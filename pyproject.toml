@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "IF-analysis"
+version = "0.1.0"
+description = "ImageJ confocal microscopy data processing pipeline for amyloid project"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=1.5",
+    "numpy>=1.23",
+    "matplotlib>=3.6",
+    "seaborn>=0.12",
+    "scipy>=1.9",
+    "statsmodels>=0.14",
+    "scikit-posthocs>=0.9",
+    "openpyxl>=3.0",
+    "read-roi>=1.6",
+    "Pillow>=9.0",
+]
+
+[project.optional-dependencies]
+windows = ["pywin32"]
+
+[tool.setuptools.packages.find]
+include = ["IF_analysis*"]
