@@ -171,6 +171,15 @@ def _pattern_to_regex(pattern):
 
 
 EXCEL_MAX = 31
+_EXP_SUFFIX_RE = re.compile(r"\.exp(\d+)$")
+
+def _strip_exp_suffix(colname: str):
+    """Strip '.expN' disambiguation suffix, returning (base_name, exp_tag_or_empty)."""
+    m = _EXP_SUFFIX_RE.search(colname)
+    if m:
+        return colname[:m.start()], m.group(0)
+    return colname, ""
+
 _RULES = sorted(
     ((_pattern_to_regex(p), rule) for p, rule in IF_NAME_MAP.items()),
     key=lambda x: len(x[0].pattern),
@@ -180,13 +189,16 @@ _RULES = sorted(
 
 def convert_name(colname: str, truncate: bool = True):
     """Convert a raw column name to (short_label, description)."""
+    base, exp_tag = _strip_exp_suffix(colname)
     for rx, rule in _RULES:
-        m = rx.match(colname)
+        m = rx.match(base)
         if m:
             label, desc = rule["label"], rule["desc"]
             for k, v in m.groupdict().items():
                 label = label.replace(f"<{k}>", v)
                 desc = desc.replace(f"<{k}>", v)
+            if exp_tag:
+                label = f"{label} ({exp_tag.lstrip('.')})"
             return (label[:EXCEL_MAX] if truncate else label), desc
     raise KeyError(f"No NAME_MAP rule for column: {colname}")
 
@@ -197,8 +209,9 @@ RAW_RULES = sorted(
 )
 
 def convert_raw_name(colname: str):
+    base, exp_tag = _strip_exp_suffix(colname)
     for rx, rule in RAW_RULES:
-        m = rx.match(colname)
+        m = rx.match(base)
         if not m:
             continue
         label = rule["label"]
@@ -206,6 +219,8 @@ def convert_raw_name(colname: str):
         for k, v in m.groupdict().items():
             label = label.replace(f"<{k}>", v)
             desc  = desc.replace(f"<{k}>", v)
+        if exp_tag:
+            label = f"{label} ({exp_tag.lstrip('.')})"
         return label, desc
     raise KeyError(colname)
 
@@ -269,8 +284,9 @@ def merge_contiguous_cells(worksheet, df, col_name, col_idx=0, cell_format=None)
         )
 
 def _groups_for_column(colname: str) -> dict:
+    base, _ = _strip_exp_suffix(colname)
     for rx, _rule in _RULES:
-        m = rx.match(colname)
+        m = rx.match(base)
         if m:
             return m.groupdict()
     raise KeyError(colname)

@@ -192,7 +192,11 @@ class Batch(Experiment):
 
     def _label_duplicate_metric_columns_with_experiment(self, df, id_cols):
         """
-        Rename duplicate metric columns by source experiment using `_expN`.
+        Rename duplicate metric columns by source experiment using `.expN`.
+
+        Uses a dot separator (`.exp1`, `.exp2`) so that the suffix is never
+        consumed by underscore-based regex patterns that parse marker names
+        (e.g. `<ab>_Coloc<ab2>` where `<ab2>` matches `[A-Za-z0-9_-]+`).
 
         Temporary merge suffix format is `__exp{idx}` where idx starts at 1
         for the second experiment. The first experiment is treated as exp1.
@@ -221,7 +225,7 @@ class Batch(Experiment):
         new_cols = []
         for base, exp_num in parsed:
             if base in duplicate_metric_bases:
-                candidate = f"{base}_exp{exp_num}"
+                candidate = f"{base}.exp{exp_num}"
             else:
                 candidate = base
             if candidate in used:
@@ -308,7 +312,7 @@ class Batch(Experiment):
         summary = self._canonicalize_not_included_cells(summary, id_cols=id_cols)
 
         # Replace generic duplicate numbering with experiment-aware names
-        # for repeated metric columns (e.g. CK1d_Count_exp1, CK1d_Count_exp2).
+        # for repeated metric columns (e.g. CK1d_Count.exp1, CK1d_Count.exp2).
         summary = self._label_duplicate_metric_columns_with_experiment(summary, id_cols=id_cols)
         self.summary = self._dedup_columns(summary)
         return self.summary

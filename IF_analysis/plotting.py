@@ -86,7 +86,7 @@ def get_display_name(name, minimal=False, compact_per=False):
     """Convert a raw column name to a human-readable label."""
     raw_label = str(name)
     # Hide experiment suffixes in display labels only (save names remain unchanged).
-    clean_label = re.sub(r"_exp\d+(?=_|$)", "", raw_label)
+    clean_label = re.sub(r"\.exp\d+$", "", raw_label)
 
     # Keep AOE as the short code in plots/axes.
     if clean_label.strip().casefold() == "aoe":

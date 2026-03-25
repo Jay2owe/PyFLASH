@@ -3,6 +3,7 @@ Pickle-based save/load for Experiment and Batch objects.
 """
 
 import os
+import re
 import pickle
 
 import pandas as pd
@@ -77,6 +78,34 @@ def _strip_legacy_image_arrays(obj):
     return changed
 
 
+_OLD_EXP_SUFFIX_RE = re.compile(r"_exp(\d+)$")
+
+
+def _migrate_exp_suffix_columns(obj):
+    """Convert old ``_expN`` column suffixes to ``.expN`` on the batch summary.
+
+    Only applies to Batch objects (those with ``experiment_list``), since
+    per-experiment summaries never carry experiment-disambiguation suffixes.
+
+    Returns True if any column was renamed.
+    """
+    if not hasattr(obj, "experiment_list"):
+        return False
+    summary = getattr(obj, "summary", None)
+    if not isinstance(summary, pd.DataFrame):
+        return False
+    new_cols = []
+    any_renamed = False
+    for col in summary.columns:
+        new_col = _OLD_EXP_SUFFIX_RE.sub(r".exp\1", str(col))
+        new_cols.append(new_col)
+        if new_col != str(col):
+            any_renamed = True
+    if any_renamed:
+        obj.summary.columns = new_cols
+    return any_renamed
+
+
 def normalize_paths(obj, verbose=True):
     """
     Public helper: normalize `filePath` + derived save paths in-place.
@@ -137,12 +166,13 @@ def load_state(filename, normalize_paths=True, resave_if_rebased=False, verbose=
 
     obj._state_path = filename
     legacy_arrays_removed = _strip_legacy_image_arrays(obj)
+    exp_suffix_migrated = _migrate_exp_suffix_columns(obj)
     rebased = False
     if normalize_paths:
         rebased = _normalize_loaded_paths(obj, verbose=verbose)
 
     legacy_cache = f"{filename}{LEGACY_IMAGE_CACHE_SUFFIX}"
-    should_resave = legacy_arrays_removed or os.path.exists(legacy_cache) or (rebased and resave_if_rebased)
+    should_resave = legacy_arrays_removed or exp_suffix_migrated or os.path.exists(legacy_cache) or (rebased and resave_if_rebased)
     if should_resave:
         save_state(obj, filename, verbose=False)
 
