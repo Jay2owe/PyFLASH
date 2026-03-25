@@ -8,7 +8,7 @@ from IF_analysis.config import Config, check_directory
 from IF_analysis.experiment import Experiment
 from IF_analysis.batch import Batch
 from IF_analysis.serialization import save_state, load_state
-from IF_analysis.utils import ProgressTracker
+from IF_analysis.utils import ProgressTracker, generate_aliases
 
 
 def _copy_representative_metadata(dst_obj, src_obj):
@@ -196,6 +196,23 @@ def create_batch(name, conditions, batch_path, experiments=None,
     effective_import_images = bool(import_images or (rerun and reimport_images))
     batch.processData(import_images=effective_import_images, progress=progress)
     tracker.finish_item("Process Batch", detail=getattr(batch, "_last_process_summary", None))
+
+    # Auto-generate path aliases from condition vocabulary
+    vocab = set()
+    for f in batch.factor:
+        vocab.add(f)
+    for cond in conditions.conditions:
+        vocab.add(cond.name)
+        vocab.add(cond.label)
+        vocab.add(getattr(cond, 'factor', ''))
+    # Also include factor column values from the summary
+    for f in batch.factor:
+        if f in batch.summary.columns:
+            vocab.update(str(v) for v in batch.summary[f].dropna().unique())
+    auto_aliases = generate_aliases(vocab - {None, '', 'None'})
+    # Manual overrides from Config take priority
+    auto_aliases.update(Config.ALIASES)
+    batch.aliases = auto_aliases
 
     tracker.start_item("Carry Over Representatives")
     rep_detail = "No previous representative selections found"

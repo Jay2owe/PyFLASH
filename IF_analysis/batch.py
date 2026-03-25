@@ -35,6 +35,8 @@ class Batch(Experiment):
         self.factorDict = cond_list.factorDict
 
     def createSavePaths(self):
+        # Batch uses self.filePath directly (not dirname like Experiment)
+        self._save_root = self.filePath
         results = os.path.join(self.filePath, "Results")
         self.export_path = os.path.join(self.filePath, "Exports")
         self.fig_path = os.path.join(results, "Python Figures")
@@ -46,10 +48,20 @@ class Batch(Experiment):
         self.column_path = os.path.join(self.csv_path, "Columns")
         self.attribute_path = os.path.join(self.csv_path, "Attributes")
 
-        paths = [results, self.export_path, self.fig_path, self.image_fig_path, self.representative_path, self.legend_path, self.data_path,
+        paths = [results, self.export_path, self.fig_path, self.image_fig_path,
+                 self.representative_path, self.legend_path, self.data_path,
                  self.csv_path, self.column_path, self.attribute_path]
+        # Per-marker folders with analysis-type subfolders
+        analysis_types = ['Bars', 'Histograms', 'Ridgelines', 'ECDFs', 'PieCharts']
         for marker in self.markers:
-            paths.append(os.path.join(self.fig_path, marker))
+            marker_dir = os.path.join(self.fig_path, marker)
+            paths.append(marker_dir)
+            for atype in analysis_types:
+                paths.append(os.path.join(marker_dir, atype))
+        # Cross-marker analysis-type folders
+        for atype in ['Matrices', 'Rectangular', 'Locations', 'Regressions',
+                      'Modelling', 'Volcano', 'UpSet', 'Sankey']:
+            paths.append(os.path.join(self.fig_path, atype))
         for p in paths:
             os.makedirs(p, exist_ok=True)
 
@@ -365,7 +377,7 @@ class Batch(Experiment):
             print(f"Starting export to: {save_path}")
             print(f"Processing {len(self.experiment_list)} experiments with {total_sheets} total data sheets...")
 
-        with pd.ExcelWriter(save_path+"/IF_Extended.xlsx", engine="xlsxwriter") as writer:
+        with pd.ExcelWriter(os.path.join(save_path, "IF_Extended.xlsx"), engine="xlsxwriter") as writer:
             if verbose and not use_tqdm:
                 print("  ✓ Writing Conditions sheet...")
             write_conditions_table_sheet(writer, self.conditions, sheet_name="Conditions")
@@ -526,7 +538,7 @@ class Batch(Experiment):
             print(f"  Cache hits: {len(_raw_name_cache)} unique column patterns")
             print(f"  Saved to: {save_path}")
         
-        print(f"Exported extended IF data to {save_path+"/IF_Extended.xlsx"}")
+        print(f"Exported extended IF data to {os.path.join(save_path, "IF_Extended.xlsx")}")
 
     def export_IF_summary_excel(self, save_path=None):
         if save_path == None: save_path = self.export_path
@@ -537,7 +549,7 @@ class Batch(Experiment):
         #print([col for col in columns_to_save])
 
         cols_not_included = []
-        with pd.ExcelWriter(save_path+"/IF_Summary.xlsx", engine='xlsxwriter') as writer:
+        with pd.ExcelWriter(os.path.join(save_path, "IF_Summary.xlsx"), engine='xlsxwriter') as writer:
             write_conditions_table_sheet(writer, self.conditions, sheet_name="Experimental Conditions")
             write_experiment_data_list_sheet(writer, self.experiment_list, sheet_name="Data Summary")
             used_sheet_names = set(writer.sheets)
@@ -578,9 +590,10 @@ class Batch(Experiment):
 
                 except KeyError as k:
                     cols_not_included.append(col)
-        print(f"Exported IF summary to {save_path+"/IF_Summary.xlsx"}")
-        print(cols_not_included)
-        
+        print(f"Exported IF summary to {os.path.join(save_path, "IF_Summary.xlsx")}")
+        if cols_not_included:
+            print(f"Columns not included (no name map): {cols_not_included}")
+
 
     def export_behavior_summary_excel(self, save_path=None):
         if save_path == None: save_path = self.export_path
@@ -592,7 +605,7 @@ class Batch(Experiment):
 
         cols_not_included = []
 
-        with pd.ExcelWriter(save_path+"/Behavior_Summary.xlsx", engine="xlsxwriter") as writer:
+        with pd.ExcelWriter(os.path.join(save_path, "Behavior_Summary.xlsx"), engine="xlsxwriter") as writer:
             write_conditions_table_sheet(writer, self.conditions, sheet_name="Conditions")
             used_sheet_names = set(writer.sheets)
             for col in BEHAVIOR_NAME_MAP.keys():
@@ -653,7 +666,7 @@ class Batch(Experiment):
                     cols_not_included.append(col)
                     print(f"Behavior export failed for {col}: {e}")
 
-        print(f"Exported Behavior summary to {save_path+"/Behavior_Summary.xlsx"}")
+        print(f"Exported Behavior summary to {os.path.join(save_path, "Behavior_Summary.xlsx")}")
         print("Behavior columns not included:", cols_not_included)
 
     # ── Iteration ──────────────────────────────────────────────────────

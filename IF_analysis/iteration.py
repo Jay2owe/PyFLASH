@@ -34,6 +34,8 @@ from typing import Any, Optional, Callable, Literal
 import numpy as np
 import pandas as pd
 
+from IF_analysis.utils import filter_df_by_specificity, flatten_specificity_values
+
 
 # ═══════════════════════════════════════════════════════════════
 # CONTEXT
@@ -315,27 +317,9 @@ def run(experiment, over, action,
     _orig_summary = None
     if specificity is not None:
         _orig_summary = experiment.summary
-        key, *raw_values = specificity
-        values = []
-        for v in raw_values:
-            if isinstance(v, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
-                values.extend(list(v))
-            else:
-                values.append(v)
-
-        if key in experiment.summary.columns and len(values) > 0:
-            col = experiment.summary[key]
-            if (
-                pd.api.types.is_object_dtype(col)
-                or pd.api.types.is_string_dtype(col)
-                or pd.api.types.is_categorical_dtype(col)
-            ):
-                norm_col = col.astype(str).str.strip().str.casefold()
-                norm_values = {str(v).strip().casefold() for v in values}
-                mask = norm_col.isin(norm_values)
-            else:
-                mask = col.isin(values)
-            experiment.summary = experiment.summary[mask].copy()
+        filtered = filter_df_by_specificity(experiment.summary, specificity)
+        if len(filtered) < len(experiment.summary):
+            experiment.summary = filtered.copy()
 
     root = Context(experiment=experiment)
     iter_kwargs = {'columns': columns, 'factor': factor}

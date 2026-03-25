@@ -23,7 +23,12 @@ try:
 except Exception:  # pragma: no cover - optional import fallback
     dmatrices = None
 
-from IF_analysis.utils import save_fig, strip_name, get_columns
+from IF_analysis.utils import (
+    save_fig, strip_name, get_columns,
+    flatten_specificity_values, is_specificity_queue,
+    iter_specificities, filter_df_by_specificity,
+    resolve_column_key, specificity_path_parts,
+)
 
 
 NOT_INCLUDED_SENTINEL = "NOT_INCLUDED_IN_EXPERIMENT"
@@ -69,38 +74,10 @@ def _to_numeric_excluding_not_included(series, sentinel=NOT_INCLUDED_SENTINEL) -
     return pd.to_numeric(s, errors="coerce")
 
 
-def _flatten_specificity_values(raw_values) -> list:
-    vals = []
-    for v in raw_values:
-        if isinstance(v, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
-            vals.extend(list(v))
-        else:
-            vals.append(v)
-    return vals
+_flatten_specificity_values = flatten_specificity_values
 
 
-def _filter_df_by_specificity(df: pd.DataFrame, specificity):
-    if specificity is None:
-        return df
-    if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
-        return df
-    spec_key, *raw_vals = specificity
-    resolved_key = _resolve_column_key(df, spec_key)
-    if resolved_key is None:
-        return df
-    spec_vals = _flatten_specificity_values(raw_vals)
-    if len(spec_vals) == 0:
-        return df
-    col = df[resolved_key]
-    if (
-        pd.api.types.is_object_dtype(col)
-        or pd.api.types.is_string_dtype(col)
-        or pd.api.types.is_categorical_dtype(col)
-    ):
-        norm_col = col.astype(str).str.strip().str.casefold()
-        norm_vals = {str(v).strip().casefold() for v in spec_vals}
-        return df[norm_col.isin(norm_vals)]
-    return df[col.isin(spec_vals)]
+_filter_df_by_specificity = filter_df_by_specificity
 
 
 def _normalize_filter_tuples(spec_or_exclude):
@@ -128,15 +105,7 @@ def _normalize_filter_tuples(spec_or_exclude):
     return []
 
 
-def _resolve_column_key(df: pd.DataFrame, key) -> str | None:
-    """Resolve column key with case-insensitive/trim matching."""
-    if key in df.columns:
-        return key
-    target = str(key).strip().casefold()
-    for col in df.columns:
-        if str(col).strip().casefold() == target:
-            return col
-    return None
+_resolve_column_key = resolve_column_key
 
 
 def _drop_unused_categorical_levels(df: pd.DataFrame) -> pd.DataFrame:
@@ -273,41 +242,9 @@ def _exclude_df_by_rules(df: pd.DataFrame, exclude):
     return out
 
 
-def _is_specificity_queue(spec):
-    """
-    True when specificity is a queue of 2+ specificity tuples.
-    Example:
-        [('Time', 'WeekFour'), ('Time', 'WeekEight')]
-    """
-    if not isinstance(spec, (list, tuple)) or len(spec) == 0:
-        return False
-    first = spec[0]
-    return isinstance(first, (list, tuple)) and len(first) >= 2
-
-
-def _iter_specificities(spec):
-    if not _is_specificity_queue(spec):
-        return []
-    out = []
-    for item in spec:
-        if isinstance(item, (list, tuple)) and len(item) >= 2:
-            out.append(tuple(item))
-    return out
-
-
-def _specificity_subfolder_parts(specificity):
-    if specificity is None:
-        return []
-    if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
-        return []
-    spec_key, *spec_vals = specificity
-    parts = [strip_name(str(spec_key))]
-    flat_vals = _flatten_specificity_values(spec_vals)
-    if len(flat_vals) == 1:
-        parts.append(strip_name(str(flat_vals[0])))
-    elif len(flat_vals) > 1:
-        parts.append(strip_name(" and ".join([str(v) for v in flat_vals])))
-    return parts
+_is_specificity_queue = is_specificity_queue
+_iter_specificities = iter_specificities
+_specificity_subfolder_parts = specificity_path_parts
 
 
 def _normalize_numeric_dataframe(
@@ -1483,9 +1420,10 @@ def iterative_best_fit(
     auto_save_root = getattr(batch, "fig_path", None)
     if auto_save_root is not None:
         auto_save_root = str(auto_save_root)
-    base_save_name = f"Best Iterative Model for {dependent_variable}"
-    subfolder_parts = ["Modelling"] + _specificity_subfolder_parts(specificity)
-    subfolder = os.path.join(*subfolder_parts) if len(subfolder_parts) > 0 else None
+    _aliases = getattr(batch, 'aliases', None)
+    from IF_analysis.utils import build_subfolder
+    subfolder, suffix = build_subfolder('Modelling', specificity=specificity, aliases=_aliases)
+    base_save_name = f"Best Iterative Model for {dependent_variable}{suffix}"
     if save and auto_save_root is None and verbose:
         print("[iterative_best_fit] batch.fig_path not found. Skipping save.")
 
@@ -1536,7 +1474,6 @@ def iterative_best_fit(
             bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.92},
         )
         fig.set_dpi(dpi)
-        plt.show()
         if save and auto_save_root is not None:
             save_fig(
                 fig,
@@ -1545,6 +1482,7 @@ def iterative_best_fit(
                 subfolder=subfolder,
                 verbose=False,
             )
+        plt.show()
 
         # Plot single-predictor relationships for interpretable terms.
         work_cols_set = set([str(c) for c in work_df.columns])
@@ -1587,7 +1525,6 @@ def iterative_best_fit(
                     ci=None,
                 )
             lm.fig.set_dpi(dpi)
-            plt.show()
             if save and auto_save_root is not None:
                 save_fig(
                     lm.fig,
@@ -1596,6 +1533,7 @@ def iterative_best_fit(
                     subfolder=subfolder,
                     verbose=False,
                 )
+            plt.show()
 
         if plot_insights and len(feature_change_df) > 0:
             ordered_features = feature_change_df["feature"].tolist()
@@ -1653,7 +1591,6 @@ def iterative_best_fit(
             ax_counts.legend(frameon=False)
             fig_counts.set_dpi(dpi)
             plt.tight_layout()
-            plt.show()
             if save and auto_save_root is not None:
                 save_fig(
                     fig_counts,
@@ -1662,6 +1599,7 @@ def iterative_best_fit(
                     subfolder=subfolder,
                     verbose=False,
                 )
+            plt.show()
 
             fig_delta, ax_delta = plt.subplots(1, 1, figsize=cfg["figsize"])
             mean_deltas = feature_change_df["mean_delta"].to_numpy(dtype=float)
@@ -1697,7 +1635,6 @@ def iterative_best_fit(
             ax_delta.set_title("Average Score Change When Feature Added")
             fig_delta.set_dpi(dpi)
             plt.tight_layout()
-            plt.show()
             if save and auto_save_root is not None:
                 save_fig(
                     fig_delta,
@@ -1706,6 +1643,7 @@ def iterative_best_fit(
                     subfolder=subfolder,
                     verbose=False,
                 )
+            plt.show()
 
     result = {
         "best_model": best_formula,

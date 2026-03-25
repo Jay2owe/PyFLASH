@@ -64,6 +64,12 @@ class Config:
     # ── Save mode ──────────────────────────────────────────────────────
     SAVE_MODE = True   # False to skip saving figures
 
+    # ── Path aliases ──────────────────────────────────────────────────
+    # User-defined overrides for specificity/factor abbreviations.
+    # Auto-generated aliases are built at batch creation; manual entries
+    # here take priority.  Example: {'WeekEight': 'W8', 'Genotype': 'GT'}
+    ALIASES = {}
+
 
 def generate_palettes(colors=None):
     """Generate blend palette strings from all color pairs."""

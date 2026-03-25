@@ -1284,8 +1284,6 @@ class Experiment:
 
     def importCSVs(self, progress=True):
         """Import all CSV/ZIP files from the experiment folder structure."""
-        self.createSavePaths()
-
         labels_path = os.path.join(self.filePath, "Condition Labels.csv")
         if os.path.exists(labels_path):
             self.condition_labels = pd.read_csv(labels_path)
@@ -1750,10 +1748,20 @@ class Experiment:
         self.column_path = os.path.join(self.csv_path, "Columns")
         self.attribute_path = os.path.join(self.csv_path, "Attributes")
 
-        paths = [results, self.fig_path, self.image_fig_path, self.representative_path, self.legend_path, self.data_path,
+        paths = [results, self.fig_path, self.image_fig_path,
+                 self.representative_path, self.legend_path, self.data_path,
                  self.csv_path, self.column_path, self.attribute_path]
+        # Per-marker folders with analysis-type subfolders
+        analysis_types = ['Bars', 'Histograms', 'Ridgelines', 'ECDFs', 'PieCharts']
         for marker in self.markers:
-            paths.append(os.path.join(self.fig_path, marker))
+            marker_dir = os.path.join(self.fig_path, marker)
+            paths.append(marker_dir)
+            for atype in analysis_types:
+                paths.append(os.path.join(marker_dir, atype))
+        # Cross-marker analysis-type folders
+        for atype in ['Matrices', 'Rectangular', 'Locations', 'Regressions',
+                      'Modelling', 'Volcano', 'UpSet', 'Sankey']:
+            paths.append(os.path.join(self.fig_path, atype))
         for p in paths:
             os.makedirs(p, exist_ok=True)
 

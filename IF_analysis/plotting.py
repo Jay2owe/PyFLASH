@@ -47,6 +47,10 @@ from IF_analysis.utils import (
     save_fig, round_up_to_nearest_5, get_columns, strip_name,
     convert_microns_to_pixels, convert_pixels_to_microns,
     normalize_image_roi_name, normalize_animal_name,
+    flatten_specificity_values, is_specificity_queue,
+    iter_specificities, filter_df_by_specificity,
+    specificity_path_parts, resolve_column_key,
+    build_subfolder,
 )
 
 
@@ -200,55 +204,17 @@ def _resolve_filtered_columns(experiment, filtered_columns=None,
     return resolved
 
 
-def _is_specificity_queue(specificity):
-    return (
-        isinstance(specificity, (list, tuple))
-        and len(specificity) > 0
-        and isinstance(specificity[0], (list, tuple))
-    )
-
-
-def _iter_specificities(specificity):
-    if _is_specificity_queue(specificity):
-        for spec in specificity:
-            yield tuple(spec)
-    else:
-        yield specificity
-
-
-def _flatten_specificity_values(values):
-    out = []
-    for v in values:
-        if isinstance(v, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
-            out.extend(list(v))
-        else:
-            out.append(v)
-    return out
-
-
-def _filter_df_by_specificity(df: pd.DataFrame, specificity):
-    if specificity is None:
-        return df
-    if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
-        return df
-    spec_key, *raw_vals = specificity
-    if spec_key not in df.columns:
-        return df
-    spec_vals = _flatten_specificity_values(raw_vals)
-    if len(spec_vals) == 0:
-        return df
-
-    col = df[spec_key]
-    if pd.api.types.is_object_dtype(col) or pd.api.types.is_string_dtype(col) or pd.api.types.is_categorical_dtype(col):
-        norm_col = col.astype(str).str.strip().str.casefold()
-        norm_vals = {str(v).strip().casefold() for v in spec_vals}
-        return df[norm_col.isin(norm_vals)]
-    return df[col.isin(spec_vals)]
+# Thin aliases for internal _-prefixed references
+_is_specificity_queue = is_specificity_queue
+_iter_specificities = iter_specificities
+_flatten_specificity_values = flatten_specificity_values
+_filter_df_by_specificity = filter_df_by_specificity
+_specificity_path_parts = specificity_path_parts
 
 
 def _filtered_summary_for_specificity(experiment, specificity):
     summary = experiment.summary
-    return _filter_df_by_specificity(summary, specificity)
+    return filter_df_by_specificity(summary, specificity)
 
 
 def _count_level_processes(experiment, level, factor=None, specificity=None):
@@ -394,7 +360,8 @@ def _specificity_path_parts(specificity):
         return []
     if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
         return []
-    spec_key, *spec_vals = specificity
+    spec_key, *raw_vals = specificity
+    spec_vals = _flatten_specificity_values(raw_vals)
     parts = [strip_name(str(spec_key))]
     if len(spec_vals) == 1:
         parts.append(strip_name(str(spec_vals[0])))
@@ -8850,14 +8817,13 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 ax.yaxis.set_major_locator(LinearLocator(numticks=5))
 
         marker_name = col.split('_')[0] if '_' in col else col
-        subfolder_parts = []
-        if marker_name != col:
-            subfolder_parts.append(marker_name)
-        if factor is not None:
-            subfolder_parts.append(strip_name(str(factor)))
-        subfolder_parts.extend(_specificity_path_parts(specificity))
-        subfolder = os.path.join(*subfolder_parts) if len(subfolder_parts) > 0 else None
-        save_fig(fig, experiment.fig_path, _artifact_name(col), subfolder=subfolder, verbose=False)
+        subfolder, suffix = build_subfolder(
+            plot_type='Bars',
+            marker=marker_name if marker_name != col else None,
+            factor=factor, specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+        )
+        save_fig(fig, experiment.fig_path, _artifact_name(col) + suffix, subfolder=subfolder, verbose=False)
         saved_columns_log.append(col)
         _progress_finish_item(state, col)
 
@@ -9290,13 +9256,15 @@ def plot_locations(experiment, objects,
             base_name = f'{outer_name} per {join_by}'
         else:
             base_name = f'{outer_name} {panel_tag} per {join_by}'
-        subfolder_parts = ['Locations', strip_name(str(separate_by).rstrip('s'))]
-        subfolder_parts.extend(_specificity_path_parts(specificity))
-        subfolder = os.path.join(*subfolder_parts)
+        subfolder, suffix = build_subfolder(
+            plot_type='Locations',
+            factor=None, specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+        )
         fig.suptitle(title_name, **title_kwargs)
         fig.IF_analysis_image_adjustments = normalized_image_adjustments
         if save:
-            save_fig(fig, experiment.fig_path, base_name, subfolder=subfolder)
+            save_fig(fig, experiment.fig_path, base_name + suffix, subfolder=subfolder)
         _progress_finish_item(state, outer_name)
         if state.get('location_return_fig'):
             returned_fig['fig'] = fig
@@ -9411,26 +9379,26 @@ def plot_regressions(experiment, x, y,
             ax = state.get('ax')
             if fig is None or ax is None:
                 return
-            subfolder_parts = ['Regressions']
-            if factor is not None:
-                subfolder_parts.append(strip_name(str(factor)))
-            subfolder_parts.extend(_specificity_path_parts(specificity))
-            subfolder = os.path.join(*subfolder_parts)
+            subfolder, suffix = build_subfolder(
+                plot_type='Regressions',
+                factor=factor, specificity=specificity,
+                aliases=getattr(experiment, 'aliases', None),
+            )
             if save:
                 save_fig(fig, experiment.fig_path,
-                         f'{x} vs {y} (Combined)', subfolder=subfolder)
+                         f'{x} vs {y} (Combined)' + suffix, subfolder=subfolder)
             plt.close(fig)
             return
 
         fig = state['fig']
-        subfolder_parts = ['Regressions']
-        if factor is not None:
-            subfolder_parts.append(strip_name(str(factor)))
-        subfolder_parts.extend(_specificity_path_parts(specificity))
-        subfolder = os.path.join(*subfolder_parts)
+        subfolder, suffix = build_subfolder(
+            plot_type='Regressions',
+            factor=factor, specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+        )
         if save:
             save_fig(fig, experiment.fig_path,
-                     f'{x} vs {y} ({name})', subfolder=subfolder)
+                     f'{x} vs {y} ({name})' + suffix, subfolder=subfolder)
         plt.close(fig)
 
     return run(
@@ -9557,13 +9525,11 @@ def plot_histograms(experiment, marker, x_attr,
     def teardown(ctx, state, results):
         fig = state['fig']
         name = ctx.factor_value or ctx.condition or 'Combined'
-        subfolder_parts = []
-        if marker_key is not None:
-            subfolder_parts.append(strip_name(str(marker_key)))
-        if factor is not None:
-            subfolder_parts.append(strip_name(str(factor)))
-        subfolder_parts.extend(_specificity_path_parts(specificity))
-        subfolder = os.path.join(*subfolder_parts) if len(subfolder_parts) > 0 else None
+        subfolder, suffix = build_subfolder(
+            plot_type='Histograms', marker=marker_key,
+            factor=factor, specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+        )
         _progress_finish_item(state, name)
 
         if combine_mode:
@@ -9586,13 +9552,13 @@ def plot_histograms(experiment, marker, x_attr,
                     )
             if save:
                 save_fig(fig, experiment.fig_path,
-                         f'{x} Histogram (Combined)', subfolder=subfolder)
+                         f'{x} Histogram (Combined)' + suffix, subfolder=subfolder)
             plt.close(fig)
             return
 
         if save:
             save_fig(fig, experiment.fig_path,
-                     f'{x} Histogram {name}', subfolder=subfolder)
+                     f'{x} Histogram {name}' + suffix, subfolder=subfolder)
         plt.close(fig)
 
     return run(
@@ -9768,15 +9734,13 @@ def plot_ridgeline(experiment, marker, x_attr,
         sns.despine(trim=False, ax=ax)
         fig.tight_layout()
 
-        subfolder_parts = []
-        if marker_key is not None:
-            subfolder_parts.append(strip_name(str(marker_key)))
-        if factor is not None:
-            subfolder_parts.append(strip_name(str(factor)))
-        subfolder_parts.extend(_specificity_path_parts(specificity))
-        subfolder = os.path.join(*subfolder_parts) if len(subfolder_parts) > 0 else None
+        subfolder, suffix = build_subfolder(
+            plot_type='Ridgelines', marker=marker_key,
+            factor=factor, specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+        )
         if save:
-            save_fig(fig, experiment.fig_path, f'{x} Ridgeline', subfolder=subfolder)
+            save_fig(fig, experiment.fig_path, f'{x} Ridgeline' + suffix, subfolder=subfolder)
         plt.close(fig)
 
     return run(
@@ -9949,15 +9913,13 @@ def plot_ecdf(experiment, marker, x_attr,
                 top=False,
                 labelbottom=bool(bottom_tick_labels),
             )
-        subfolder_parts = []
-        if marker_key is not None:
-            subfolder_parts.append(strip_name(str(marker_key)))
-        if factor is not None:
-            subfolder_parts.append(strip_name(str(factor)))
-        subfolder_parts.extend(_specificity_path_parts(specificity))
-        subfolder = os.path.join(*subfolder_parts) if len(subfolder_parts) > 0 else None
+        subfolder, suffix = build_subfolder(
+            plot_type='ECDFs', marker=marker_key,
+            factor=factor, specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+        )
         if save:
-            save_fig(fig, experiment.fig_path, f'{x} ECDF {name}', subfolder=subfolder)
+            save_fig(fig, experiment.fig_path, f'{x} ECDF {name}' + suffix, subfolder=subfolder)
         _progress_finish_item(state, name)
         plt.close(fig)
 
@@ -10296,17 +10258,17 @@ def plot_volcano(experiment, filtered_columns=None,
         fig = state['fig']
         group_name = state.get('volcano_group_name') or (ctx.factor_value if factor is not None else ctx.condition)
 
-        subfolder_parts = ['Volcano']
-        if factor is not None:
-            subfolder_parts.append(strip_name(str(factor)))
-        subfolder_parts.extend(_specificity_path_parts(specificity))
-        subfolder = os.path.join(*subfolder_parts) if len(subfolder_parts) > 0 else None
+        subfolder, suffix = build_subfolder(
+            plot_type='Volcano',
+            factor=factor, specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+        )
 
         if save and not bool(state.get('volcano_skip_save', False)):
             save_fig(
                 fig,
                 experiment.fig_path,
-                f'Volcano {group_name} vs {control_name}',
+                f'Volcano {group_name} vs {control_name}' + suffix,
                 subfolder=subfolder,
             )
         _progress_finish_item(state, group_name)
@@ -10443,13 +10405,11 @@ def plot_pie_charts(experiment, marker, x_attr,
     def teardown(ctx, state, results):
         fig = state['fig']
         name = ctx.factor_value or ctx.condition or 'Combined'
-        subfolder_parts = []
-        if marker_key is not None:
-            subfolder_parts.append(strip_name(str(marker_key)))
-        if factor is not None:
-            subfolder_parts.append(strip_name(str(factor)))
-        subfolder_parts.extend(_specificity_path_parts(specificity))
-        subfolder = os.path.join(*subfolder_parts) if len(subfolder_parts) > 0 else None
+        subfolder, suffix = build_subfolder(
+            plot_type='PieCharts', marker=marker_key,
+            factor=factor, specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+        )
         _progress_finish_item(state, name)
 
         if combine_bar_mode:
@@ -10543,14 +10503,14 @@ def plot_pie_charts(experiment, marker, x_attr,
             if save:
                 unit_tag = "counts" if as_counts else "percent"
                 save_fig(fig, experiment.fig_path,
-                         f'{x} Bar (Combined) {unit_tag}', subfolder=subfolder)
+                         f'{x} Bar (Combined) {unit_tag}' + suffix, subfolder=subfolder)
             plt.close(fig)
             return
 
         if save:
             unit_tag = "counts" if as_counts else "percent"
             save_fig(fig, experiment.fig_path,
-                     f'{x} Pie {name} {unit_tag}', subfolder=subfolder)
+                     f'{x} Pie {name} {unit_tag}' + suffix, subfolder=subfolder)
         plt.close(fig)
 
     return run(
@@ -10707,18 +10667,17 @@ def plot_matrices(experiment, filtered_columns=None,
     def teardown(ctx, state, results):
         fig = state['fig']
         name = ctx.factor_value or ctx.condition or 'Combined'
-        subfolder_parts = ['Matrices']
-        if factor is not None:
-            subfolder_parts.append(strip_name(str(factor)))
-        else:
-            subfolder_parts.append(strip_name(str(by).rstrip('s')))
-        subfolder_parts.extend(_specificity_path_parts(specificity))
-        subfolder = os.path.join(*subfolder_parts)
+        subfolder, suffix = build_subfolder(
+            plot_type='Matrices',
+            factor=factor if factor is not None else str(by).rstrip('s'),
+            specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+        )
         if save:
             title = f'{name} Correlation Matrix'
             if marker is not None:
                 title = f'{marker} {title}'
-            save_fig(fig, experiment.fig_path, title, subfolder=subfolder)
+            save_fig(fig, experiment.fig_path, title + suffix, subfolder=subfolder)
         _progress_finish_item(state, name)
         plt.close(fig)
 
@@ -11159,18 +11118,17 @@ def plot_rect_matrices(
             pass
     # Avoid tight_layout here; it can expand inter-panel spacing with fixed-aspect axes.
     if save:
-        subfolder_parts = ['Matrices', 'Rectangular']
-        if factor is not None:
-            subfolder_parts.append(strip_name(str(factor)))
-        else:
-            subfolder_parts.append(strip_name(str(by).rstrip('s')))
-        subfolder_parts.extend(_specificity_path_parts(specificity))
-        subfolder = os.path.join(*subfolder_parts)
+        subfolder, suffix = build_subfolder(
+            plot_type='Rectangular', marker='Matrices',
+            factor=factor if factor is not None else str(by).rstrip('s'),
+            specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+        )
         panel_names = " and ".join([p[1] for p in panels[:3]])
         if len(panels) > 3:
             panel_names += " and more"
         title = f"Rectangular Correlation Matrix ({panel_names})"
-        save_fig(big_fig, experiment.fig_path, title, subfolder=subfolder)
+        save_fig(big_fig, experiment.fig_path, title + suffix, subfolder=subfolder)
     plt.close(big_fig)
     return outputs
 
@@ -11539,11 +11497,12 @@ def plot_coloc_upset(
         fig.suptitle(title_text, fontsize=14, weight="bold")
 
         if save and exp_obj is not None:
-            subfolder_parts = [strip_name(marker_s)]
-            if by_mode is not None and by_mode != "conditions":
-                subfolder_parts.append(strip_name(str(by_mode)))
-            subfolder_parts.extend(_specificity_path_parts(specificity))
-            subfolder = os.path.join(*subfolder_parts)
+            subfolder, suffix = build_subfolder(
+                plot_type='UpSet', marker=marker_s,
+                factor=by_mode if by_mode is not None and by_mode != "conditions" else None,
+                specificity=specificity,
+                aliases=getattr(exp_obj, 'aliases', None),
+            )
             norm_tag = "normalized" if normalize else "rawcounts"
             closest_tag = "noClosest" if remove_closest else "withClosest"
             if (by_mode is None and auto_group_by == "Condition") or by_mode == "conditions":
@@ -11555,7 +11514,7 @@ def plot_coloc_upset(
                 save_name = f"UpSet Plot_{norm_tag}_{closest_tag}_{by_tag}_{panel_tag}"
             else:
                 save_name = f"UpSet Plot_{norm_tag}_{closest_tag}"
-            save_fig(fig, exp_obj.fig_path, save_name, subfolder=subfolder)
+            save_fig(fig, exp_obj.fig_path, save_name + suffix, subfolder=subfolder)
 
         outputs[panel_name] = fig
         _progress_finish_item(state, panel_name)
@@ -12232,11 +12191,12 @@ def plot_coloc_sankey(
         )
 
         if save and exp_obj is not None:
-            subfolder_parts = [strip_name(marker_s)]
-            if by_mode is not None and by_mode != "conditions":
-                subfolder_parts.append(strip_name(str(by_mode)))
-            subfolder_parts.extend(_specificity_path_parts(specificity))
-            subfolder = os.path.join(*subfolder_parts)
+            subfolder, suffix = build_subfolder(
+                plot_type='Sankey', marker=marker_s,
+                factor=by_mode if by_mode is not None and by_mode != "conditions" else None,
+                specificity=specificity,
+                aliases=getattr(exp_obj, 'aliases', None),
+            )
 
             norm_tag = "normalized" if normalize else "rawcounts"
             neither_tag = "withFalse" if include_neither else "trueOnly"
@@ -12251,7 +12211,7 @@ def plot_coloc_sankey(
                 save_name = f"Sankey_{norm_tag}_{neither_tag}_{closest_tag}_{layout_tag}_{by_tag}_{panel_tag}"
             else:
                 save_name = f"Sankey_{norm_tag}_{neither_tag}_{closest_tag}_{layout_tag}"
-            _save_plotly_figure(fig, exp_obj.fig_path, save_name, subfolder=subfolder)
+            _save_plotly_figure(fig, exp_obj.fig_path, save_name + suffix, subfolder=subfolder)
 
         outputs[panel_name] = fig
         _progress_finish_item(state, panel_name)

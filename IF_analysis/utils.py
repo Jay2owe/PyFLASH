@@ -8,7 +8,213 @@ import math
 import hashlib
 import time
 import numpy as np
+import pandas as pd
 from matplotlib import pyplot as plt
+
+
+# ── Specificity helpers (canonical versions) ──────────────────────────
+
+def flatten_specificity_values(values):
+    """Flatten nested iterables in specificity value lists."""
+    out = []
+    for v in values:
+        if isinstance(v, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
+            out.extend(list(v))
+        else:
+            out.append(v)
+    return out
+
+
+def is_specificity_queue(specificity):
+    """True when specificity is a list of 2+ specificity tuples.
+
+    Example queue: [('Time', 'WeekFour'), ('Time', 'WeekEight')]
+    Not a queue:   ('Time', 'WeekFour')
+    """
+    return (
+        isinstance(specificity, (list, tuple))
+        and len(specificity) > 0
+        and isinstance(specificity[0], (list, tuple))
+    )
+
+
+def iter_specificities(specificity):
+    """Yield individual specificity tuples from a queue or single spec."""
+    if is_specificity_queue(specificity):
+        for item in specificity:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                yield tuple(item)
+    else:
+        yield specificity
+
+
+def resolve_column_key(df, key):
+    """Resolve column key with case-insensitive/trim matching."""
+    if key in df.columns:
+        return key
+    target = str(key).strip().casefold()
+    for col in df.columns:
+        if str(col).strip().casefold() == target:
+            return col
+    return None
+
+
+def filter_df_by_specificity(df, specificity):
+    """Filter a DataFrame by a specificity tuple like ('Time', 'WeekEight')."""
+    if specificity is None:
+        return df
+    if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
+        return df
+    spec_key, *raw_vals = specificity
+    resolved_key = resolve_column_key(df, spec_key)
+    if resolved_key is None:
+        return df
+    spec_vals = flatten_specificity_values(raw_vals)
+    if len(spec_vals) == 0:
+        return df
+    col = df[resolved_key]
+    if (
+        pd.api.types.is_object_dtype(col)
+        or pd.api.types.is_string_dtype(col)
+        or pd.api.types.is_categorical_dtype(col)
+    ):
+        norm_col = col.astype(str).str.strip().str.casefold()
+        norm_vals = {str(v).strip().casefold() for v in spec_vals}
+        return df[norm_col.isin(norm_vals)]
+    return df[col.isin(spec_vals)]
+
+
+def specificity_path_parts(specificity):
+    """Convert specificity tuple to subfolder path components."""
+    if specificity is None:
+        return []
+    if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
+        return []
+    spec_key, *raw_vals = specificity
+    flat_vals = flatten_specificity_values(raw_vals)
+    parts = [strip_name(str(spec_key))]
+    if len(flat_vals) == 1:
+        parts.append(strip_name(str(flat_vals[0])))
+    elif len(flat_vals) > 1:
+        combined = " and ".join([str(v) for v in flat_vals])
+        parts.append(strip_name(combined))
+    return parts
+
+
+# ── Alias system ──────────────────────────────────────────────────────
+
+def generate_aliases(vocabulary):
+    """Build shortest-unambiguous abbreviations for a set of terms.
+
+    Strategy:
+    - Terms <= 3 chars are kept as-is.
+    - CamelCase terms use initials first (e.g. WeekEight → WE, WeekFour → WF).
+    - Other terms start at first 2 chars.
+    - Collisions are resolved by extending until unique.
+
+    Parameters
+    ----------
+    vocabulary : iterable of str
+        The terms to abbreviate (factor names, condition values, etc.)
+
+    Returns
+    -------
+    dict : {original_term: abbreviation}
+    """
+    import re as _re
+    terms = sorted(set(str(t) for t in vocabulary if t is not None))
+    aliases = {}
+    for t in terms:
+        if len(t) <= 3:
+            aliases[t] = t
+            continue
+        # Try CamelCase initials: WeekEight → WE, WeekFour → WF
+        camel_parts = _re.findall(r'[A-Z][a-z]*|[a-z]+|[0-9]+', t)
+        if len(camel_parts) >= 2:
+            initials = ''.join(p[0].upper() for p in camel_parts)
+            aliases[t] = initials
+        else:
+            aliases[t] = t[:2]
+
+    # Resolve collisions by extending abbreviations
+    max_iters = 50
+    for _ in range(max_iters):
+        seen = {}
+        collisions = set()
+        for term, abbr in aliases.items():
+            if abbr in seen:
+                collisions.add(term)
+                collisions.add(seen[abbr])
+            else:
+                seen[abbr] = term
+        if not collisions:
+            break
+        for term in collisions:
+            cur = aliases[term]
+            if len(cur) < len(term):
+                aliases[term] = term[:len(cur) + 1]
+    return aliases
+
+
+def apply_alias(term, aliases=None):
+    """Look up a term's alias. Falls back to the full term if no alias."""
+    if aliases and term in aliases:
+        return aliases[term]
+    from IF_analysis.config import Config
+    if term in Config.ALIASES:
+        return Config.ALIASES[term]
+    return str(term)
+
+
+def build_specificity_alias(specificity, aliases=None):
+    """Encode a specificity tuple as a compact filename suffix.
+
+    Examples:
+        ('Time', 'WeekEight')           → 'TM.W8'   (with aliases)
+        ('Time', 'WeekFour', 'WeekEight') → 'TM.W4+W8'
+        None                             → ''
+    """
+    if specificity is None:
+        return ''
+    if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
+        return ''
+    spec_key, *raw_vals = specificity
+    flat_vals = flatten_specificity_values(raw_vals)
+    key_alias = apply_alias(spec_key, aliases)
+    val_aliases = [apply_alias(str(v), aliases) for v in flat_vals]
+    if len(val_aliases) == 0:
+        return key_alias
+    return f"{key_alias}.{'+'.join(val_aliases)}"
+
+
+def build_subfolder(plot_type=None, marker=None, factor=None,
+                    specificity=None, aliases=None):
+    """Build a save subfolder and filename suffix for a plot.
+
+    Returns (subfolder, suffix) where:
+    - subfolder: e.g. 'Iba1/Bars' or 'Matrices' (max 2 levels)
+    - suffix: e.g. '--GT.W8' or '' (encoded factor + specificity)
+
+    Single-marker plots go under marker/type/.
+    Cross-marker plots go under type/.
+    Factor and specificity are encoded into the filename suffix, never as folders.
+    """
+    parts = []
+    if marker is not None:
+        parts.append(strip_name(str(marker)))
+    if plot_type is not None:
+        parts.append(strip_name(str(plot_type)))
+    subfolder = os.path.join(*parts) if parts else None
+
+    suffix_parts = []
+    if factor is not None:
+        suffix_parts.append(apply_alias(str(factor), aliases))
+    spec_alias = build_specificity_alias(specificity, aliases)
+    if spec_alias:
+        suffix_parts.append(spec_alias)
+
+    suffix = '--' + '--'.join(suffix_parts) if suffix_parts else ''
+    return subfolder, suffix
 
 
 # ── String helpers ─────────────────────────────────────────────────────
@@ -407,17 +613,15 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
     ext = ".svg"
     full_path = os.path.join(save_path, f"{image_name}{ext}")
 
-    # Windows long paths (common with deep Dropbox trees) can fail around 260 chars.
-    # Shorten only the filename stem, preserving folder structure.
-    if os.name == "nt":
-        max_path_len = 245  # keep a safety margin below legacy MAX_PATH
-        if len(full_path) > max_path_len:
-            digest = hashlib.md5(image_name.encode("utf-8")).hexdigest()[:10]
-            room = max_path_len - len(save_path) - len(ext) - len(digest) - 2
-            room = max(8, room)
-            short_stem = image_name[:room].rstrip(" .")
-            image_name = f"{short_stem}_{digest}"
-            full_path = os.path.join(save_path, f"{image_name}{ext}")
+    # Warn if path approaches Windows MAX_PATH limit
+    if os.name == "nt" and len(full_path) > 245:
+        import warnings
+        warnings.warn(
+            f"Path length ({len(full_path)} chars) exceeds 245. "
+            f"Consider setting Config.ALIASES or shortening the base path. "
+            f"Path: {full_path}",
+            stacklevel=2,
+        )
 
     if Config.SAVE_MODE:
         with plt.rc_context({'svg.fonttype': 'none'}):

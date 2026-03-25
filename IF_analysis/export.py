@@ -478,58 +478,6 @@ def write_conditions_table_sheet(writer, conditions, sheet_name="Conditions", pa
     merge_fmt = writer.book.add_format({"valign": "top", "border": 1})
     merge_contiguous_cells(worksheet, df_display, "Factor", 0, cell_format=merge_fmt)
 
-def export_IF_summary_excel(self, save_path):
-    summary = self.summary
-    factors = self.factor
-    condition_list = self.condition_list
-    columns_to_save = (col for col in summary.columns if col not in ['Condition', 'AnimalName'] + factors and any(data in col for data in self.data.keys())) # Only save relevant columns
-    #print([col for col in columns_to_save])
-
-    cols_not_included = []
-    with pd.ExcelWriter(save_path, engine='xlsxwriter') as writer:
-        write_conditions_table_sheet(writer, self.conditions, sheet_name="Experimental Conditions")
-        write_experiment_data_list_sheet(writer, self.experiment_list, sheet_name="Data Summary")
-        used_sheet_names = set(writer.sheets)
-        for col in columns_to_save:
-            try:
-                label, desc = convert_name(col, truncate=False)
-                # Avoid reusing the same worksheet when Excel truncates or duplicates labels.
-                sheet_name = safe_sheet_name(label, used_sheet_names)
-                column_data = {cond.name: summary[summary['Condition'] == cond.name][col] for cond in condition_list}
-                column_df = pd.DataFrame(column_data)
-                column_df_cleaned = pd.DataFrame({column: column_df[column].dropna().reset_index(drop=True) for column in column_df.columns})
-                column_df_cleaned.to_excel(writer, sheet_name=sheet_name, index=False)
-                
-                worksheet = writer.sheets[sheet_name]
-                for i, column in enumerate(column_df_cleaned):
-                    worksheet.set_column(i, i, len(column) + 4)
-                last_data_row = len(column_df_cleaned) + 1
-                
-                desc_format = writer.book.add_format({
-                    "italic": True,
-                    "text_wrap": True,
-                    "valign": "vcenter"
-                })
-                
-                if desc and len(column_df_cleaned.columns) > 0:
-                    worksheet.merge_range(
-                        last_data_row + 1, 0,
-                        last_data_row + 1, len(column_df_cleaned.columns) - 1,
-                        desc,
-                        desc_format
-                    )
-
-                    desc_row = last_data_row + 1
-
-                    # Estimate row height based on number of lines
-                    n_lines = max(desc.count("\n") + 1, len(desc) // 80 + 1)
-                    worksheet.set_row(desc_row, 18 * n_lines)
-
-            except KeyError as k:
-                cols_not_included.append(col)
-
-    print(cols_not_included)
-
 def convert_behavior_name(colname: str, truncate: bool = True):
     if colname not in BEHAVIOR_NAME_MAP:
         raise KeyError(f"No BEHAVIOR_NAME_MAP rule for column: {colname}")
