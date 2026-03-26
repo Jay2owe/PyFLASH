@@ -11,6 +11,7 @@ from matplotlib import pyplot as plt
 from collections import defaultdict
 
 from IF_analysis.config import Config
+from IF_analysis._logging import logger as _log
 from IF_analysis.utils import (
     clean_column_name, add_suffix, get_columns,
     convert_microns_to_pixels, trace_downward_nearest,
@@ -67,11 +68,11 @@ class Antibody(Attribute):
         if isinstance(self, objectMarker):
             self.addColocData(Config.THRESHOLD)
         self.df.set_index('SCN', inplace=True)
-        print(f'{self.name} data processing successfully completed!\n{"_" * 40}')
+        _log.confirm(f'{self.name} data processing complete.')
         return self.df
 
     def _clean_columns(self):
-        print(f"Cleaning {self.name} DataFrame...")
+        _log.status(f"Cleaning {self.name} DataFrame...")
         no_rename = ['SCN', 'Animal Name']
         label_map = None
         if hasattr(self.experiment, 'condition_labels'):
@@ -119,7 +120,7 @@ class Antibody(Attribute):
         self.df[f'{name}_RawYM'] = self.df[f'{name}_YM'] / Config.PIXEL_SIZE
         self.df[f'{name}_RawXM'] = self.df[f'{name}_XM'] / Config.PIXEL_SIZE
         try:
-            print(f"Adjusting coordinates for {name} points...")
+            _log.status(f"Adjusting coordinates for {name} points...")
             area = self.experiment.data['ROI Properties'].df
             self.df = self.df.merge(area, left_on='SCN', right_on='SCN')
             self.df = self.df.drop(columns=["AnimalName_y"]).rename(
@@ -130,9 +131,10 @@ class Antibody(Attribute):
             self.df[f'{name}_XM'] = self.df[f'{name}_XM'] * self.df['X_factor']
             self.df[f'{name}_YM'] = self.df[f'{name}_YM'] * self.df['Y_factor']
             self.df = self.df.drop(columns=['Height', 'Width', 'X_factor', 'Y_factor', 'Area'])
-            print(f'{name} adjusted coordinates added!')
+            _log.confirm(f'{name} adjusted coordinates added!')
         except KeyError as k:
-            print(f'No Area Data provided; coordinates not adjusted {k}')
+            import warnings
+            warnings.warn(f'No Area Data provided; coordinates not adjusted {k}', stacklevel=2)
         return self.df
 
     def set_df(self, new_df):
@@ -143,7 +145,7 @@ class Antibody(Attribute):
         coloc_cols = get_columns(self.df, regex_string="Coloc")
         for column in coloc_cols:
             coloc_name = column.split('Coloc')[1]
-            print(f"Adding {coloc_name} colocalisation data...")
+            _log.status(f"Adding {coloc_name} colocalisation data...")
             self.df[f'{self.name}_ColocCount{coloc_name}'] = np.where(
                 self.df[f'{self.name}_Coloc{coloc_name}'] > threshold, 1, 0
             )
@@ -261,8 +263,8 @@ class Antibody(Attribute):
         other_df[f'{other_marker.name}_NumClosestTo_{self.name}'] = all_closest_count
         other_marker.set_df(other_df)
 
-        print(f"'Closest to {self.name}' column added to {other_marker.name} DataFrame!")
-        print(f"'Distance to closest {other_marker.name}' column added to {self.name} DataFrame!")
+        _log.confirm(f"'Closest to {self.name}' column added to {other_marker.name} DataFrame!")
+        _log.confirm(f"'Distance to closest {other_marker.name}' column added to {self.name} DataFrame!")
         return self.df
 
 

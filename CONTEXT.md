@@ -37,6 +37,7 @@ IF_analysis/
 ├── export.py            # Excel export with name mapping and formatting
 ├── serialization.py     # Pickle-based save/load with path normalization
 ├── image_io.py          # Image loading with multiple backend support
+├── _logging.py          # Unified output system (IFLogger, Verbosity, silent/verbose)
 └── utils.py             # Shared utilities (string, DataFrame, geometry, plotting helpers)
 ```
 
@@ -391,6 +392,49 @@ Multi-backend image loading system:
 
 ### Progress
 - `ProgressTracker` — notebook/terminal-friendly progress display with timing and ETA, supports IPython rich display
+
+---
+
+## Output System (_logging.py)
+
+All package output is routed through a unified `IFLogger` singleton instead of bare `print()` calls. This enables global verbosity control and silencing.
+
+### Verbosity Levels
+`Verbosity` IntEnum with 5 levels:
+- `error (0)` — only errors
+- `warning (1)` — + warnings
+- `info (2)` — + file confirmations, status updates, progress (default)
+- `hint (3)` — + diagnostic detail (row counts, backend choices, skipped columns)
+- `debug (4)` — + per-item trace
+
+### Logger Methods (categories, not severity)
+- `status(msg)` — progress updates, stage names (level >= info)
+- `confirm(msg)` — file-saved / export-done messages (level >= info), prefixed `[OK]`
+- `timing(msg)` — elapsed time, ETA summaries (level >= info), prefixed `[T]`
+- `hint(msg)` — diagnostic detail (level >= hint)
+- `debug(msg)` — per-item trace (level >= debug)
+- `warn(msg)` — unexpected but non-fatal situations (level >= warning), prefixed `[!]`
+
+### User-Facing API
+```python
+import IF_analysis
+
+IF_analysis.set_verbosity('debug')    # or int 0-4, or Verbosity enum
+IF_analysis.set_verbosity(0)          # silent
+
+with IF_analysis.silent():
+    batch.export_all_excel()          # no output
+
+with IF_analysis.verbose():
+    batch.processData()               # maximum detail
+```
+
+### Integration
+- All modules import `from IF_analysis._logging import logger as _log`
+- `ProgressTracker` (utils.py) handles live-updating progress bars independently
+- `modelling.py`'s iterative_best_fit uses `ProgressTracker` for its model search loop
+- Genuine warnings (missing data, fallback behavior) use `warnings.warn()` with typed categories
+- User-invoked display functions (`cheat_sheet()`, `Experiment.info()`) still use `print()` directly
 
 ---
 

@@ -9,6 +9,7 @@ import pickle
 import pandas as pd
 
 from IF_analysis.config import check_directory
+from IF_analysis._logging import logger as _log
 
 
 LEGACY_IMAGE_CACHE_SUFFIX = ".images.pkl"
@@ -37,7 +38,7 @@ def _normalize_one_object_paths(obj, verbose=False):
             setattr(obj, "filePath", new_path)
             changed = True
             if verbose:
-                print(f"  Rebased {getattr(obj, 'name', type(obj).__name__)}: {old_path} -> {new_path}")
+                _log.status(f"  Rebased {getattr(obj, 'name', type(obj).__name__)}: {old_path} -> {new_path}")
 
     file_path = getattr(obj, "filePath", None)
     if isinstance(file_path, str) and os.path.exists(file_path) and hasattr(obj, "createSavePaths"):
@@ -45,7 +46,7 @@ def _normalize_one_object_paths(obj, verbose=False):
             obj.createSavePaths()
         except Exception as exc:
             if verbose:
-                print(f"  Warning: could not refresh save paths for {getattr(obj, 'name', type(obj).__name__)} ({exc})")
+                _log.warn(f"Could not refresh save paths for {getattr(obj, 'name', type(obj).__name__)} ({exc})")
     return changed
 
 
@@ -140,7 +141,7 @@ def save_state(obj, filename=None, verbose=True):
 
     size_mb = os.path.getsize(filename) / (1024 * 1024)
     if verbose:
-        print(f"Saved '{obj.name}' to {filename} ({size_mb:.1f} MB)")
+        _log.confirm(f"Saved '{obj.name}' to {filename} ({size_mb:.1f} MB)")
 
 
 def load_state(filename, normalize_paths=True, resave_if_rebased=False, verbose=True):
@@ -177,9 +178,9 @@ def load_state(filename, normalize_paths=True, resave_if_rebased=False, verbose=
         save_state(obj, filename, verbose=False)
 
     if verbose:
-        print(f"Loaded '{obj.name}' from {filename}")
-        print(f"  Data keys: {list(obj.data.keys())}")
-        print(f"  Summary shape: {obj.summary.shape}")
+        _log.confirm(f"Loaded '{obj.name}' from {filename}")
+        _log.status(f"  Data keys: {list(obj.data.keys())}")
+        _log.status(f"  Summary shape: {obj.summary.shape}")
         if hasattr(obj, 'condition_list'):
-            print(f"  Conditions: {[c.name for c in obj.condition_list]}")
+            _log.status(f"  Conditions: {[c.name for c in obj.condition_list]}")
     return obj

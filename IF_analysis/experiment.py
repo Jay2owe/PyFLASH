@@ -13,6 +13,8 @@ from functools import reduce
 from collections import defaultdict
 from collections.abc import Mapping
 from read_roi import read_roi_zip
+
+from IF_analysis._logging import logger as _log
 try:
     from roifile import roiread as roifile_read
 except Exception:
@@ -1851,7 +1853,7 @@ class Experiment:
         for attr_name, attr in self.data.items():
             attr_type = type(attr).__name__
             attr.df.to_csv(os.path.join(self.attribute_path, f'{attr_name}_{attr_type}.csv'))
-            print(f"{attr_name} data saved to CSV.")
+            _log.confirm(f"{attr_name} data saved to CSV.")
 
     # ── Lookup helpers ─────────────────────────────────────────────────
 

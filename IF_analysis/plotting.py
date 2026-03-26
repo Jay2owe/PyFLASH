@@ -33,6 +33,7 @@ from matplotlib.ticker import LinearLocator
 
 from IF_analysis.iteration import Context, run
 from IF_analysis.config import Config
+from IF_analysis._logging import logger as _log
 from IF_analysis.experiment import _source_panel_order_rows
 from IF_analysis.image_io import read_image_array, resolve_image_worker_count, get_image_shape
 from IF_analysis.markers import stainColors
@@ -7923,13 +7924,13 @@ def _save_plotly_figure(fig, save_path, image_name, subfolder=None, verbose=True
     try:
         fig.write_image(svg_path, format="svg")
         if verbose:
-            print(f"Figure saved to {svg_path}")
+            _log.confirm(f"Figure saved to {svg_path}")
         return svg_path
     except Exception:
         html_path = os.path.join(target_dir, f"{image_name}.html")
         fig.write_html(html_path, include_plotlyjs="cdn")
         if verbose:
-            print(f"Figure saved to {html_path} (HTML fallback; install kaleido for SVG export)")
+            _log.confirm(f"Figure saved to {html_path} (HTML fallback; install kaleido for SVG export)")
         return html_path
 
 
@@ -9097,7 +9098,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 'p_value': float(p_val) if not isinstance(p_val, list) else float(p_val[0]),
             })
         df_out = pd.DataFrame(rows)
-        print(df_out.to_string(index=False))
+        _log.status(df_out.to_string(index=False))
         return df_out
 
     inner = 'factors' if factor else 'conditions'
@@ -9124,9 +9125,9 @@ def plot_mean_bars(experiment, filtered_columns=None,
     except Exception:
         pass
     saved = saved_columns_log
-    print(f"[plot_mean_bars] Saved columns ({len(saved)}): {', '.join(saved)}")
+    _log.confirm(f"[plot_mean_bars] Saved columns ({len(saved)}): {', '.join(saved)}")
     if len(skipped_columns_log) > 0:
-        print(f"[plot_mean_bars] Skipped columns ({len(skipped_columns_log)}): {', '.join(skipped_columns_log)}")
+        _log.hint(f"[plot_mean_bars] Skipped columns ({len(skipped_columns_log)}): {', '.join(skipped_columns_log)}")
     try:
         if Config.EXPORT_HTML:
             subfolder_html, _ = build_subfolder(
@@ -10949,7 +10950,7 @@ def plot_matrices(experiment, filtered_columns=None,
             shared_cols = [c for c in resolved_columns if c in shared_set]
             resolved_columns = shared_cols
             if len(resolved_columns) == 0:
-                print("[plot_matrices] No shared valid columns across panels after NaN/sentinel filtering.")
+                _log.warn("[plot_matrices] No shared valid columns across panels after NaN/sentinel filtering.")
 
     n = len(resolved_columns)
     fig_w = min(max(6.0, n * 0.35), 30.0)

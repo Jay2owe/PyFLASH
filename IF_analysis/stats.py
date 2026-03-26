@@ -9,6 +9,8 @@ import math
 import os
 from typing import Iterable
 
+from IF_analysis._logging import logger as _log
+
 import numpy as np
 import pandas as pd
 import scikit_posthocs as sp
@@ -90,7 +92,7 @@ def results_to_excel(results_dict, other, experiment_save_path, save_name, verbo
             row = [key, *value] if isinstance(value, list) else [key, value]
             writer.writerow(row)
     if verbose:
-        print(f"Stats results saved to {out_path}")
+        _log.confirm(f"Stats results saved to {out_path}")
 
 
 def bonferroni_correction(p_value, n_tests):
@@ -707,7 +709,7 @@ def multipleComparisons(
         out_path = os.path.join(experiment.data_path, fname)
         norm_fig.savefig(out_path, bbox_inches="tight", dpi=normality_dpi)
         if verbose:
-            print(f"Normality figure saved to {out_path}")
+            _log.confirm(f"Normality figure saved to {out_path}")
     if norm_fig is not None:
         plt.close(norm_fig)
     if force_nonparametric:

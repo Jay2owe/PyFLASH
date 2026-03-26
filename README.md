@@ -106,7 +106,25 @@ crossed = (
 | `export.py` | Formatted Excel export with human-readable column names |
 | `serialization.py` | Pickle save/load with cross-machine path resolution |
 | `image_io.py` | Multi-backend image loading (tifffile, cv2, imageio, PIL) |
+| `_logging.py` | Unified output system with verbosity control (`set_verbosity`, `silent()`, `verbose()`) |
 | `utils.py` | String, DataFrame, geometry, and plotting helpers |
+
+## Controlling output
+
+```python
+import IF_analysis
+
+# Set verbosity: 0=error, 1=warning, 2=info (default), 3=hint, 4=debug
+IF_analysis.set_verbosity('debug')
+
+# Silence all output for a block
+with IF_analysis.silent():
+    batch.export_all_excel()
+
+# Maximize detail for a block
+with IF_analysis.verbose():
+    batch.processData()
+```
 
 ## Data flow
 

@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
+from IF_analysis._logging import logger as _log
+
 
 # ── Specificity helpers (canonical versions) ──────────────────────────
 
@@ -657,7 +659,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
     if Config.SAVE_MODE:
         if use_skip and os.path.isfile(full_path):
             if verbose:
-                print(f"Skipped (exists): {full_path}")
+                _log.hint(f"Skipped (exists): {full_path}")
             return full_path
 
         if rasterize:
@@ -669,7 +671,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
                            dpi=600, transparent=True, pad_inches=pad_inches)
 
     if verbose:
-        print(f"Figure saved to {full_path}")
+        _log.confirm(f"Figure saved to {full_path}")
     return full_path
 
 

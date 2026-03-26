@@ -14,9 +14,8 @@ Usage:
 import os
 import json
 import inspect
-import logging
 
-logger = logging.getLogger(__name__)
+from IF_analysis._logging import logger as _log
 
 
 # Lazy string references to avoid circular imports
@@ -214,13 +213,11 @@ def run_spec(experiments, path):
     errors, warnings = validate_spec(spec, exp_dict)
 
     for w in warnings:
-        logger.warning("Spec warning: %s", w)
-        print(f"  WARNING: {w}")
+        _log.warn(f"Spec warning: {w}")
 
     if errors:
         for e in errors:
-            logger.error("Spec error: %s", e)
-            print(f"  ERROR: {e}")
+            _log.warn(f"Spec error: {e}")
         raise ValueError(
             f"Spec validation failed with {len(errors)} error(s). "
             "Fix the errors above and retry."
@@ -240,7 +237,7 @@ def run_spec(experiments, path):
             experiment = next(iter(exp_dict.values()))
         else:
             experiment = next(iter(exp_dict.values()))
-            print(f"  WARNING: plots[{i}] has no 'batch' key, using first experiment")
+            _log.warn(f"plots[{i}] has no 'batch' key, using first experiment")
 
         # Build kwargs
         kwargs = {}
@@ -264,12 +261,11 @@ def run_spec(experiments, path):
 
         try:
             batch_label = f" [{batch_name}]" if batch_name else ""
-            print(f"  Running {plot_type}{batch_label} ({i + 1}/{len(spec['plots'])})...")
+            _log.status(f"Running {plot_type}{batch_label} ({i + 1}/{len(spec['plots'])})")
             result = func(experiment, **kwargs)
             results.append(result)
         except Exception as e:
-            logger.error("Plot %s failed: %s", plot_type, e)
-            print(f"  FAILED: {plot_type} -- {e}")
+            _log.warn(f"Plot {plot_type} failed: {e}")
             results.append(None)
 
     return results

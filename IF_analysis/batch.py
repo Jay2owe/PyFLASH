@@ -10,6 +10,7 @@ from functools import reduce
 from collections import defaultdict
 
 from IF_analysis.config import check_directory
+from IF_analysis._logging import logger as _log
 from IF_analysis.experiment import (
     Experiment, _add_marker_scores,
     _attach_image_metadata, _build_images_dict, _empty_image_table, _sort_image_table,
@@ -358,8 +359,8 @@ class Batch(Experiment):
             try:
                 from tqdm import tqdm
             except ImportError:
-                if verbose:
-                    print("Warning: tqdm not installed, falling back to print statements")
+                import warnings
+                warnings.warn("tqdm not installed, falling back to print statements", stacklevel=2)
                 use_tqdm = False
         
         used_sheet_names = set()
@@ -374,12 +375,12 @@ class Batch(Experiment):
         )
         
         if verbose and not use_tqdm:
-            print(f"Starting export to: {save_path}")
-            print(f"Processing {len(self.experiment_list)} experiments with {total_sheets} total data sheets...")
+            _log.status(f"Starting export to: {save_path}")
+            _log.status(f"Processing {len(self.experiment_list)} experiments with {total_sheets} total data sheets...")
 
         with pd.ExcelWriter(os.path.join(save_path, "IF_Extended.xlsx"), engine="xlsxwriter") as writer:
             if verbose and not use_tqdm:
-                print("  ✓ Writing Conditions sheet...")
+                _log.status("  Writing Conditions sheet...")
             write_conditions_table_sheet(writer, self.conditions, sheet_name="Conditions")
             
             wb = writer.book
@@ -402,7 +403,7 @@ class Batch(Experiment):
             
             for exp_idx, exp in exp_iterator:
                 if verbose and not use_tqdm:
-                    print(f"\n  Processing Experiment {exp_idx}/{len(self.experiment_list)}...")
+                    _log.status(f"  Processing Experiment {exp_idx}/{len(self.experiment_list)}...")
                 
                 cond_map = None
                 if "Condition" in exp.summary.columns and "AnimalName" in exp.summary.columns:
@@ -525,20 +526,21 @@ class Batch(Experiment):
                     
                     sheets_processed += 1
                     if verbose and not use_tqdm:
-                        print(f"    ✓ Sheet {sheets_processed}/{total_sheets}: '{sheet}' ({len(out)} rows, {len(out.columns)} columns)")
+                        _log.confirm(f"    Sheet {sheets_processed}/{total_sheets}: '{sheet}' ({len(out)} rows, {len(out.columns)} columns)")
                     elif use_tqdm:
                         exp_iterator.set_postfix({"sheets": f"{sheets_processed}/{total_sheets}"})
         
         if verbose:
             elapsed = time.time() - start_time
-            print(f"\n✓ Export complete!")
-            print(f"  Total sheets: {sheets_processed}")
-            print(f"  Time elapsed: {elapsed:.2f} seconds")
-            print(f"  Average: {elapsed/sheets_processed:.3f} sec/sheet" if sheets_processed > 0 else "")
-            print(f"  Cache hits: {len(_raw_name_cache)} unique column patterns")
-            print(f"  Saved to: {save_path}")
-        
-        print(f"Exported extended IF data to {os.path.join(save_path, "IF_Extended.xlsx")}")
+            _log.confirm("Export complete!")
+            _log.timing(f"  Total sheets: {sheets_processed}")
+            _log.timing(f"  Time elapsed: {elapsed:.2f} seconds")
+            if sheets_processed > 0:
+                _log.timing(f"  Average: {elapsed/sheets_processed:.3f} sec/sheet")
+            _log.hint(f"  Cache hits: {len(_raw_name_cache)} unique column patterns")
+            _log.confirm(f"  Saved to: {save_path}")
+
+        _log.confirm(f"Exported extended IF data to {os.path.join(save_path, 'IF_Extended.xlsx')}")
 
     def export_IF_summary_excel(self, save_path=None):
         if save_path == None: save_path = self.export_path
@@ -590,9 +592,9 @@ class Batch(Experiment):
 
                 except KeyError as k:
                     cols_not_included.append(col)
-        print(f"Exported IF summary to {os.path.join(save_path, "IF_Summary.xlsx")}")
+        _log.confirm(f"Exported IF summary to {os.path.join(save_path, 'IF_Summary.xlsx')}")
         if cols_not_included:
-            print(f"Columns not included (no name map): {cols_not_included}")
+            _log.hint(f"Columns not included (no name map): {cols_not_included}")
 
 
     def export_behavior_summary_excel(self, save_path=None):
@@ -664,10 +666,10 @@ class Batch(Experiment):
 
                 except Exception as e:
                     cols_not_included.append(col)
-                    print(f"Behavior export failed for {col}: {e}")
+                    _log.warn(f"Behavior export failed for {col}: {e}")
 
-        print(f"Exported Behavior summary to {os.path.join(save_path, "Behavior_Summary.xlsx")}")
-        print("Behavior columns not included:", cols_not_included)
+        _log.confirm(f"Exported Behavior summary to {os.path.join(save_path, 'Behavior_Summary.xlsx')}")
+        _log.hint(f"Behavior columns not included: {cols_not_included}")
 
     # ── Iteration ──────────────────────────────────────────────────────
 

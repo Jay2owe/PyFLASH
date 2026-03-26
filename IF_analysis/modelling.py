@@ -18,6 +18,8 @@ import pandas as pd
 import seaborn as sns
 import statsmodels.api as sm
 from matplotlib import pyplot as plt
+
+from IF_analysis._logging import logger as _log
 try:
     from patsy import dmatrices
 except Exception:  # pragma: no cover - optional import fallback
@@ -438,16 +440,6 @@ def _build_formula(dependent_variable: str, predictors: Iterable[str], available
     if len(terms) == 0:
         raise ValueError("At least one predictor is required.")
     return f"{dep} ~ " + " + ".join(terms)
-
-
-def _estimate_eta(seconds: float) -> str:
-    if not np.isfinite(seconds) or seconds < 0:
-        return "??:??:??"
-    s = int(round(seconds))
-    h = s // 3600
-    m = (s % 3600) // 60
-    sec = s % 60
-    return f"{h:02d}:{m:02d}:{sec:02d}"
 
 
 def _subset_key(subset: Iterable[str]) -> tuple[str, ...]:
@@ -1061,7 +1053,7 @@ def iterative_best_fit(
     work_df = _exclude_df_by_rules(work_df, exclude_filter).copy()
     work_df = _drop_unused_categorical_levels(work_df)
     if verbose and exclude_filter is not None:
-        print(f"[iterative_best_fit] Exclude filter removed {pre_exclude_n - len(work_df)} rows.")
+        _log.hint(f"[iterative_best_fit] Exclude filter removed {pre_exclude_n - len(work_df)} rows.")
     if len(work_df) == 0:
         raise ValueError("No rows remain after specificity/exclude filtering.")
 
@@ -1075,7 +1067,7 @@ def iterative_best_fit(
         sentinel=NOT_INCLUDED_SENTINEL,
     )
     if verbose:
-        print(
+        _log.hint(
             f"[iterative_best_fit] Removed {removed_sentinel_rows} rows with "
             "NOT_INCLUDED sentinel values."
         )
@@ -1111,7 +1103,7 @@ def iterative_best_fit(
     max_features_i = int(max_features) if int(max_features) > 0 else len(predictors)
     max_features_i = max(1, min(max_features_i, len(predictors)))
     if verbose and len(removed_nan_predictors) > 0:
-        print(
+        _log.hint(
             "[iterative_best_fit] Bypassed predictors due to NaN values: "
             + ", ".join(removed_nan_predictors)
         )
@@ -1134,13 +1126,13 @@ def iterative_best_fit(
         raise ValueError("No predictor combinations to test.")
 
     if verbose:
-        print(f"Total combinations: {len(combinations)}")
-        print(f"CV backend: {str(cv_backend).strip().lower()}")
+        _log.status(f"Total combinations: {len(combinations)}")
+        _log.status(f"CV backend: {str(cv_backend).strip().lower()}")
         if cv_group_column is not None and cv_group_column in model_df.columns:
             n_groups = int(model_df[cv_group_column].dropna().astype(str).nunique())
-            print(f"CV mode: leave-one-{cv_group_column}-out ({n_groups} groups)")
+            _log.status(f"CV mode: leave-one-{cv_group_column}-out ({n_groups} groups)")
         else:
-            print("CV mode: row-wise leave-one-out")
+            _log.status("CV mode: row-wise leave-one-out")
 
     start_time = time.time()
     best_score = np.inf
@@ -1207,11 +1199,11 @@ def iterative_best_fit(
         elif dmatrices is not None:
             backend = "fast"
             if verbose:
-                print("[iterative_best_fit] Ultra backend unavailable for current predictors; falling back to fast backend.")
+                _log.hint("[iterative_best_fit] Ultra backend unavailable for current predictors; falling back to fast backend.")
         else:
             backend = "statsmodels"
             if verbose:
-                print("[iterative_best_fit] Ultra backend unavailable and patsy missing; falling back to statsmodels backend.")
+                _log.hint("[iterative_best_fit] Ultra backend unavailable and patsy missing; falling back to statsmodels backend.")
     else:  # requested fast
         if simple_backend_ready:
             backend = "ultra"
@@ -1220,12 +1212,18 @@ def iterative_best_fit(
         else:
             backend = "statsmodels"
             if verbose:
-                print("[iterative_best_fit] patsy not available, falling back to statsmodels backend.")
+                _log.hint("[iterative_best_fit] patsy not available, falling back to statsmodels backend.")
 
     if verbose and backend != requested_backend:
-        print(f"[iterative_best_fit] Effective backend: {backend}")
+        _log.hint(f"[iterative_best_fit] Effective backend: {backend}")
+
+    from IF_analysis.utils import ProgressTracker
+    _tracker = ProgressTracker(
+        "iterative_best_fit", len(combinations), unit="model", enabled=verbose,
+    )
 
     for i, subset in enumerate(combinations, start=1):
+        _tracker.start_item(" + ".join(str(s) for s in subset))
         if backend == "ultra":
             idx = [simple_col_idx[str(c)] for c in subset]
             x_sub = x_simple_all[:, idx]
@@ -1342,21 +1340,12 @@ def iterative_best_fit(
                 best_cv_params = params
                 best_fold_mae = fold_mae
                 if verbose:
-                    print(f"\nBest so far: {best_formula}\nScore (LOO MAE): {best_score:.6g}")
+                    _log.status(f"Best so far: {best_formula} | LOO MAE: {best_score:.6g}")
 
-        if verbose:
-            elapsed = time.time() - start_time
-            avg = elapsed / max(1, i)
-            eta = _estimate_eta(avg * max(0, (len(combinations) - i)))
-            pct = (i / len(combinations)) * 100.0
-            print(
-                f"\r[iterative_best_fit] {i}/{len(combinations)} "
-                f"({pct:5.1f}%) | ETA {eta} | Avg/model {avg:.2f}s",
-                end="",
-                flush=True,
-            )
-    if verbose:
-        print("")
+        _tracker.finish_item(
+            detail=f"Best: {best_formula or 'none'} | MAE: {best_score:.6g}" if best_formula else None,
+        )
+    _tracker.close()
 
     if best_formula is None or best_subset is None or len(best_actual) == 0:
         raise ValueError(
@@ -1385,37 +1374,37 @@ def iterative_best_fit(
     feature_change_df = _feature_change_summary_df(feature_add_stats)
 
     if verbose:
-        print(f"Best Model: {best_formula}")
-        print(f"Best Score (LOO MAE): {best_score:.6g}")
-        print(f"Params:\n{best_fit.params}")
-        print(f"R^2: {best_fit.rsquared}")
-        print(f"Adj R^2: {best_fit.rsquared_adj}")
-        print(f"F-statistic: {best_fit.fvalue}")
-        print(f"F-statistic p-value: {best_fit.f_pvalue}")
-        print(f"Model Summary:\n{best_fit.summary()}")
-        print(f"Valid models tested: {valid_models}/{len(combinations)}")
+        _log.status(f"Best Model: {best_formula}")
+        _log.status(f"Best Score (LOO MAE): {best_score:.6g}")
+        _log.status(f"Params:\n{best_fit.params}")
+        _log.status(f"R^2: {best_fit.rsquared}")
+        _log.status(f"Adj R^2: {best_fit.rsquared_adj}")
+        _log.status(f"F-statistic: {best_fit.fvalue}")
+        _log.status(f"F-statistic p-value: {best_fit.f_pvalue}")
+        _log.status(f"Model Summary:\n{best_fit.summary()}")
+        _log.status(f"Valid models tested: {valid_models}/{len(combinations)}")
         if len(top_single_df) > 0:
-            print(f"Top {top_n_single} single predictors:")
+            _log.status(f"Top {top_n_single} single predictors:")
             for _, row in top_single_df.iterrows():
-                print(f"  - {row['predictor']}: {float(row['score']):.6g}")
+                _log.status(f"  - {row['predictor']}: {float(row['score']):.6g}")
         if len(feature_change_df) > 0:
             top_feature = feature_change_df.iloc[0]
-            print(
+            _log.hint(
                 "[iterative_best_fit] Feature most often improving models: "
                 f"{top_feature['feature']} ({int(top_feature['improved_count'])} improvements)"
             )
         if len(removed_sentinel_columns) > 0:
-            print(
+            _log.hint(
                 "[iterative_best_fit] Sentinel rows were removed based on columns: "
                 + ", ".join(removed_sentinel_columns)
             )
         if len(removed_nan_columns) > 0:
-            print(
+            _log.hint(
                 "[iterative_best_fit] Columns removed due to NaN: "
                 + ", ".join(removed_nan_columns)
             )
         else:
-            print("[iterative_best_fit] Columns removed due to NaN: none")
+            _log.hint("[iterative_best_fit] Columns removed due to NaN: none")
 
     auto_save_root = getattr(batch, "fig_path", None)
     if auto_save_root is not None:
@@ -1425,7 +1414,7 @@ def iterative_best_fit(
     subfolder, suffix = build_subfolder('Modelling', specificity=specificity, aliases=_aliases)
     base_save_name = f"Best Iterative Model for {dependent_variable}{suffix}"
     if save and auto_save_root is None and verbose:
-        print("[iterative_best_fit] batch.fig_path not found. Skipping save.")
+        _log.warn("[iterative_best_fit] batch.fig_path not found. Skipping save.")
 
     if plot:
         scatter_df = pd.DataFrame({
