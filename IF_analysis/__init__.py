@@ -25,6 +25,7 @@ from IF_analysis.serialization import save_state, load_state, normalize_paths
 from IF_analysis.config import Config
 from IF_analysis.modelling import iterative_best_fit
 from IF_analysis.spec import run_spec
+from IF_analysis.plotting import cheat_sheet
 import IF_analysis.stats as stats
 
 __all__ = [
@@ -42,6 +43,8 @@ __all__ = [
     "Config", "stainColors",
     # Spec DSL
     "run_spec",
+    # Reference
+    "cheat_sheet",
     # Stats module
     "stats",
 ]

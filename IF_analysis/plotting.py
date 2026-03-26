@@ -12554,3 +12554,242 @@ def plot_coloc_sankey(
     if len(outputs) == 1 and by_mode is None and auto_group_by is None:
         return outputs["Combined"]
     return outputs
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Cheat-sheet utility
+# ═══════════════════════════════════════════════════════════════════════
+
+_PARAM_DESCRIPTIONS = {
+    # ── Common to most functions ─────────────────────────────────────
+    'experiment':           'Experiment or Batch object containing your data.',
+    'source':               'Experiment, Batch, or MiniExperiment data source.',
+    'filtered_columns':     'List of column names to plot (e.g. ["DAPI_Count", "Iba1_Volume"]).',
+    'column_strings':       'Substring filter — include columns whose names contain this string.',
+    'regex_string':         'Regex filter — include columns whose names match this pattern.',
+    'exclude':              'Exclude columns whose names contain this substring.',
+    'specificity':          'Filter data by a factor value. Tuple: ("Time", "WeekEight"). '
+                            'Queue: [("Time","WeekEight"), ("Time","WeekFour")].',
+    'save':                 'Whether to save figures to disk (default True).',
+    'factor':               'Group by a factor column instead of Condition (e.g. "Genotype").',
+    'by':                   'Grouping mode: "conditions" (default) or a factor column name.',
+    'comparisons':          'Explicit pairwise comparisons for stats, e.g. ["1-2", "1-3"].',
+    'normalize':            'Normalize values to the first condition (fold-change).',
+    'ns':                   'Label for non-significant results (default "ns").',
+    'multiple_comparison':  'Stats test type: "One-Way" (ANOVA/Kruskal) or "Two-Way".',
+    'force_nonparametric':  'Force non-parametric tests regardless of normality.',
+    'bottom_ticks':         'Show tick marks on the bottom axis.',
+    'bottom_tick_labels':   'Show tick labels on the bottom axis.',
+    'save_normality':       'Save normality test Q-Q plots as PNG.',
+    'normality_dpi':        'DPI for normality test figures.',
+    'dry_run':              'Compute stats without rendering; returns a DataFrame summary.',
+    'combine':              'Overlay all groups on one panel instead of separate figures.',
+    'merge':                'Synonym for combine in some functions.',
+    # ── Marker-based functions ───────────────────────────────────────
+    'marker':               'Marker name (e.g. "Iba1") or list of markers.',
+    'markers':              'List of marker names to include (None = all).',
+    'x_attr':               'Attribute suffix to plot (e.g. "Volume", "Count", "IntDen").',
+    'x':                    'X-axis column name or marker attribute.',
+    'y':                    'Y-axis column name or marker attribute.',
+    # ── Histogram / density ──────────────────────────────────────────
+    'bins':                 'Number of histogram bins (default 30).',
+    'binwidth':             'Fixed bin width (overrides bins if set).',
+    'bin_range':            'Explicit (min, max) range for bins.',
+    'bin_edges':            'Explicit array of bin edges.',
+    'share_bins':           'Use identical bin edges across all panels.',
+    'kde':                  'Overlay a kernel density estimate curve.',
+    'alpha':                'Transparency of bars/fills (0-1).',
+    'stat':                 'Y-axis statistic: "count", "proportion", "density".',
+    'invert_x':             'Flip the x-axis direction.',
+    'ymax':                 'Manual upper limit for y-axis.',
+    # ── Ridgeline ────────────────────────────────────────────────────
+    'ridge_height':         'Overlap fraction between ridgeline rows (default 0.85).',
+    'bw_adjust':            'Bandwidth multiplier for KDE smoothing.',
+    'line_width':           'Width of density outline strokes.',
+    # ── ECDF ─────────────────────────────────────────────────────────
+    'complementary':        'Plot 1-ECDF (survival function) instead of ECDF.',
+    # ── Regression ───────────────────────────────────────────────────
+    'test':                 'Correlation test: "pearsonr" or "spearmanr".',
+    'normalize_x':          'Normalize x-axis values by condition (default True).',
+    'normalize_y':          'Normalize y-axis values by condition (default True).',
+    'x_range':              'Manual (min, max) for x-axis.',
+    'y_range':              'Manual (min, max) for y-axis.',
+    # ── Volcano ──────────────────────────────────────────────────────
+    'control':              'Name of the control condition for fold-change calculation.',
+    'p_threshold':          'Significance threshold for highlighting (default 0.05).',
+    'label_points':         '"significant" to label sig. points, "all", or None.',
+    # ── Pie charts ───────────────────────────────────────────────────
+    'threshold':            'Value(s) for binning data into groups.',
+    'start_angle':          'Rotation angle for the first slice (default 90).',
+    'plot_format':          '"pie" for pie chart, "bar" for stacked bar.',
+    'as_counts':            'Show raw counts instead of percentages.',
+    # ── Correlation matrices ─────────────────────────────────────────
+    'correlation':          'Correlation method: "pearsonr" or "spearmanr".',
+    'first_columns':        'Pin these columns to the left of the matrix.',
+    'tick_label_size':      'Font size for axis tick labels.',
+    'prefix_order':         'Custom ordering of column prefixes.',
+    'marker_order':         'Custom ordering of markers.',
+    'share_columns_across_panels': 'Use same columns in every panel (default True).',
+    'drop_duplicate_columns':      'Remove duplicate column entries.',
+    # ── Rectangular matrices ─────────────────────────────────────────
+    'against_columns':          'Columns for the second axis (rows vs columns).',
+    'against_column_strings':   'Substring filter for second-axis columns.',
+    'against_regex_string':     'Regex filter for second-axis columns.',
+    'against_exclude':          'Exclude filter for second-axis columns.',
+    'conditions':               'Subset of conditions to include.',
+    'encode_x_categorical':     'Treat x-axis as categorical.',
+    'combine_conditions':       'Combine all conditions into one panel.',
+    'column_order':             'Custom ordering for primary columns.',
+    'against_order':            'Custom ordering for second-axis columns.',
+    'blank_panel_on_nan':       'Show blank panel when all values are NaN.',
+    # ── Images ───────────────────────────────────────────────────────
+    'animal_filter':        'Show only specific animals (name or list).',
+    'roi_filter':           'Show only specific ROIs.',
+    'ncols':                'Number of columns in the image grid.',
+    'max_images':           'Maximum number of images to show.',
+    'tile_size':            'Size of each image tile in inches.',
+    'title':                'Custom title for the figure.',
+    'show':                 'Display the figure interactively.',
+    'verbose':              'Print detailed progress messages.',
+    'tile_gap':             'Gap between tiles.',
+    'tile_gap_units':       'Units for tile_gap: "points" or "inches".',
+    'image_backend':        'Image loading backend: "auto", "tifffile", "pil".',
+    'draw_rois':            'Draw ROI outlines on images.',
+    'scale_bar':            'Add a scale bar to images.',
+    'scale_bar_location':   'Position: "bottom left", "bottom right", etc.',
+    'scale_bar_size':       'Scale bar length in microns.',
+    'scale_bar_units':      '"microns" or "pixels".',
+    'image_width_microns':  'Known image width for scale bar calculation.',
+    'pixel_size':           'Microns per pixel (overrides Config.PIXEL_SIZE).',
+    # ── Representative images ────────────────────────────────────────
+    'fast_loading':         'Use lower-resolution loading for speed.',
+    'preview_max_dim':      'Max dimension in pixels for preview thumbnails.',
+    'image_adjustments':    'Dict of per-marker brightness/contrast adjustments.',
+    'edit_mode':            'Launch interactive editor for selecting images.',
+    'use_existing_edits':   'Reuse previously saved edit selections.',
+    'progress':             'Show progress bar during loading.',
+    'image_workers':        'Number of parallel workers for image loading.',
+    # ── Locations ────────────────────────────────────────────────────
+    'objects':              'Marker(s) to plot as scatter points.',
+    'separate_by':          'Panel separation mode: "conditions", "animals".',
+    'join_by':              'What to combine within a panel: "animals", "rois".',
+    'colocalise':           'Show colocalisation overlay.',
+    'annotate':             'Add text annotations to panels.',
+    'extra_graphs':         'Additional markers to overlay as separate graphs.',
+    'images':               'Background image marker(s).',
+    'colocaliser':          'Colocalisation marker to highlight.',
+    'extra_graph_colors':   'Colors for extra graph overlays.',
+    'image_layout':         '"shared" or "per_panel" image arrangement.',
+    'hue':                  'Color-code points by group.',
+    'marker_colors':        'Custom color dict for markers.',
+    'black_background':     'Use black background for location plots.',
+    'panel_line_width':     'Border line width for panels.',
+    'dpi':                  'Resolution for raster elements.',
+    # ── Colocalisation plots ─────────────────────────────────────────
+    'remove_closest':       'Remove closest-neighbour coloc artifacts.',
+    'include_neither':      'Include "neither" category in upset/sankey.',
+    'min_count':            'Minimum count threshold for display.',
+    'sort_by':              'Upset sorting: "cardinality" or "degree".',
+    'df':                   'Optional pre-filtered DataFrame override.',
+    'false_bottom':         'Sankey: True nodes at top, False at bottom.',
+    'order':                'Sankey layer ordering: "auto" or list of markers.',
+    # ── Shared ───────────────────────────────────────────────────────
+    'points':               'Overlay individual data points on bar charts.',
+    'enforce_shared_columns': 'Force all panels to use the same column set.',
+    'shared_columns':       'Explicit list of columns to share across panels.',
+}
+
+
+def cheat_sheet(func_name=None):
+    """Print a parameter reference for plot functions.
+
+    Call with no arguments to list all plot functions.
+    Call with a function name for detailed parameter info.
+
+    Examples
+    --------
+    >>> cheat_sheet()                    # list all plot functions
+    >>> cheat_sheet('plot_mean_bars')    # detailed params for one function
+    >>> cheat_sheet('histograms')        # shorthand without plot_ prefix
+    """
+    import inspect as _inspect
+    import sys as _sys
+
+    _this = _sys.modules[__name__]
+    plot_funcs = {}
+    for _n in dir(_this):
+        if _n.startswith('plot_') and callable(getattr(_this, _n)):
+            _obj = getattr(_this, _n)
+            if hasattr(_obj, '__code__'):
+                plot_funcs[_n] = _obj
+
+    if func_name is None:
+        print("=" * 70)
+        print("  IF_analysis — Plot Function Reference")
+        print("=" * 70)
+        print()
+        for name in sorted(plot_funcs):
+            doc = (plot_funcs[name].__doc__ or '').strip().split('\n')[0]
+            print(f"  {name}")
+            if doc:
+                print(f"    {doc}")
+            print()
+        print("-" * 70)
+        print("  Call cheat_sheet('function_name') for detailed parameters.")
+        print("  e.g. cheat_sheet('plot_mean_bars') or cheat_sheet('histograms')")
+        print("=" * 70)
+        return
+
+    # Resolve name (supports shorthand without 'plot_' prefix)
+    key = func_name
+    if key not in plot_funcs:
+        key = f"plot_{func_name}"
+    if key not in plot_funcs:
+        matches = [n for n in plot_funcs if func_name in n]
+        if len(matches) == 1:
+            key = matches[0]
+        else:
+            print(f"Unknown function '{func_name}'. Available:")
+            for n in sorted(plot_funcs):
+                print(f"  {n}")
+            return
+
+    func = plot_funcs[key]
+    sig = _inspect.signature(func)
+    doc = (func.__doc__ or '').strip()
+    first_line = doc.split('\n')[0] if doc else ''
+
+    print()
+    print("=" * 70)
+    print(f"  {key}")
+    if first_line:
+        print(f"  {first_line}")
+    print("=" * 70)
+    print()
+
+    for p in sig.parameters.values():
+        name = p.name
+        default = p.default
+
+        if name.startswith('_'):
+            continue
+        desc = _PARAM_DESCRIPTIONS.get(name, '')
+
+        if default is _inspect.Parameter.empty:
+            default_str = '(required)'
+        elif default is None:
+            default_str = 'None'
+        elif isinstance(default, str):
+            default_str = f'"{default}"'
+        else:
+            default_str = str(default)
+
+        req = '*' if default is _inspect.Parameter.empty else ' '
+        print(f"  {req} {name:<30s} = {default_str}")
+        if desc:
+            print(f"    {desc}")
+        print()
+
+    print("-" * 70)
+    print("  * = required parameter")
+    print("=" * 70)
