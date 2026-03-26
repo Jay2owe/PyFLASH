@@ -3,7 +3,12 @@ Declarative plot specification — run plot batches from YAML/TOML/JSON files.
 
 Usage:
     from IF_analysis import run_spec
-    run_spec(experiment, 'my_plots.yaml')
+
+    # Single experiment
+    run_spec(batch1, 'plots.yaml')
+
+    # Multiple batches — reference by name in the YAML
+    run_spec({'batch1': batch1, 'CK1I': batch_CK1I}, 'plots.yaml')
 """
 
 import os
@@ -32,6 +37,9 @@ PLOT_REGISTRY = {
     'coloc_sankey': 'plot_coloc_sankey',
 }
 
+# Keys consumed by the spec runner, not passed to plot functions
+_SPEC_KEYS = {'type', 'batch'}
+
 
 def _resolve_func(name):
     """Resolve a plot function by name from the plotting module."""
@@ -55,25 +63,7 @@ def _convert_specificity(value):
 
 
 def load_spec(path):
-    """Load a plot specification from a YAML, TOML, or JSON file.
-
-    Parameters
-    ----------
-    path : str
-        Path to a .yaml/.yml, .toml, or .json spec file.
-
-    Returns
-    -------
-    dict
-        Parsed specification dictionary.
-
-    Raises
-    ------
-    ImportError
-        If the required parser library is not installed.
-    ValueError
-        If the file extension is not supported.
-    """
+    """Load a plot specification from a YAML, TOML, or JSON file."""
     ext = os.path.splitext(path)[1].lower()
 
     with open(path, 'r', encoding='utf-8') as f:
@@ -111,22 +101,8 @@ def load_spec(path):
         )
 
 
-def validate_spec(spec, experiment=None):
-    """Validate a plot specification, returning (errors, warnings) lists.
-
-    Parameters
-    ----------
-    spec : dict
-        Parsed specification from :func:`load_spec`.
-    experiment : Experiment or Batch, optional
-        If provided, column references are checked against
-        ``experiment.summary.columns``.
-
-    Returns
-    -------
-    tuple[list[str], list[str]]
-        ``(errors, warnings)`` — errors are fatal, warnings are advisory.
-    """
+def validate_spec(spec, experiments=None):
+    """Validate a plot specification, returning (errors, warnings) lists."""
     errors = []
     warnings = []
 
@@ -138,6 +114,12 @@ def validate_spec(spec, experiment=None):
     if not isinstance(plots, list):
         errors.append("'plots' must be a list of plot entries")
         return errors, warnings
+
+    # Normalise experiments to a dict
+    if experiments is not None and not isinstance(experiments, dict):
+        exp_dict = {'default': experiments}
+    else:
+        exp_dict = experiments
 
     for i, entry in enumerate(plots):
         prefix = f"plots[{i}]"
@@ -158,6 +140,14 @@ def validate_spec(spec, experiment=None):
             )
             continue
 
+        # Check batch reference
+        batch_name = entry.get('batch')
+        if batch_name and exp_dict and batch_name not in exp_dict:
+            errors.append(
+                f"{prefix}: batch '{batch_name}' not found. "
+                f"Available: {', '.join(sorted(exp_dict.keys()))}"
+            )
+
         # Validate parameter names against function signature
         func_name = PLOT_REGISTRY[plot_type]
         try:
@@ -166,9 +156,8 @@ def validate_spec(spec, experiment=None):
             valid_params = set(sig.parameters.keys())
 
             for key in entry:
-                if key == 'type':
+                if key in _SPEC_KEYS:
                     continue
-                # Map 'columns' to 'filtered_columns' for functions that use it
                 if key == 'columns' and 'filtered_columns' in valid_params:
                     continue
                 if key not in valid_params:
@@ -179,28 +168,33 @@ def validate_spec(spec, experiment=None):
         except Exception as e:
             warnings.append(f"{prefix}: could not validate params: {e}")
 
-        # Validate column references if experiment provided
-        if experiment is not None:
+        # Validate column references
+        exp = None
+        if exp_dict:
+            exp = exp_dict.get(batch_name) if batch_name else next(iter(exp_dict.values()), None)
+        if exp is not None:
             cols = entry.get('columns') or entry.get('filtered_columns')
             if isinstance(cols, list):
-                available = set(experiment.summary.columns)
+                available = set(exp.summary.columns)
                 for col in cols:
                     if col not in available:
                         warnings.append(
-                            f"{prefix}: column '{col}' not found in "
-                            "experiment.summary"
+                            f"{prefix}: column '{col}' not found in experiment.summary"
                         )
 
     return errors, warnings
 
 
-def run_spec(experiment, path):
+def run_spec(experiments, path):
     """Load, validate, and execute a plot specification file.
 
     Parameters
     ----------
-    experiment : Experiment or Batch
-        The data source to plot from.
+    experiments : Experiment, Batch, or dict
+        A single data source, or a dict mapping names to sources, e.g.
+        ``{'batch1': batch1, 'CK1I': batch_CK1I, 'NLGFKI': batch_NLGFKI}``.
+        When a dict is passed, each spec entry can use ``batch: name`` to
+        select which source to plot from.
     path : str
         Path to a .yaml, .toml, or .json spec file.
 
@@ -208,14 +202,16 @@ def run_spec(experiment, path):
     -------
     list
         Results from each plot call (may contain None for failed entries).
-
-    Raises
-    ------
-    ValueError
-        If the spec contains validation errors.
     """
     spec = load_spec(path)
-    errors, warnings = validate_spec(spec, experiment)
+
+    # Normalise to dict
+    if isinstance(experiments, dict):
+        exp_dict = experiments
+    else:
+        exp_dict = {'default': experiments}
+
+    errors, warnings = validate_spec(spec, exp_dict)
 
     for w in warnings:
         logger.warning("Spec warning: %s", w)
@@ -236,30 +232,39 @@ def run_spec(experiment, path):
         func_name = PLOT_REGISTRY[plot_type]
         func = _resolve_func(func_name)
 
+        # Resolve which experiment to use
+        batch_name = entry.get('batch')
+        if batch_name:
+            experiment = exp_dict[batch_name]
+        elif len(exp_dict) == 1:
+            experiment = next(iter(exp_dict.values()))
+        else:
+            experiment = next(iter(exp_dict.values()))
+            print(f"  WARNING: plots[{i}] has no 'batch' key, using first experiment")
+
         # Build kwargs
         kwargs = {}
         sig = inspect.signature(func)
         valid_params = set(sig.parameters.keys())
 
         for key, value in entry.items():
-            if key == 'type':
+            if key in _SPEC_KEYS:
                 continue
 
-            # Map 'columns' alias to 'filtered_columns'
             param_key = key
             if (key == 'columns'
                     and key not in valid_params
                     and 'filtered_columns' in valid_params):
                 param_key = 'filtered_columns'
 
-            # Convert specificity lists to tuples
             if key == 'specificity':
                 value = _convert_specificity(value)
 
             kwargs[param_key] = value
 
         try:
-            print(f"  Running {plot_type} ({i + 1}/{len(spec['plots'])})...")
+            batch_label = f" [{batch_name}]" if batch_name else ""
+            print(f"  Running {plot_type}{batch_label} ({i + 1}/{len(spec['plots'])})...")
             result = func(experiment, **kwargs)
             results.append(result)
         except Exception as e:

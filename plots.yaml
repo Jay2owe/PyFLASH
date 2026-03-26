@@ -1,0 +1,166 @@
+# ══════════════════════════════════════════════════════════════════════
+#  IF_analysis plot specification
+#
+#  Usage:
+#    from IF_analysis import run_spec
+#    run_spec({
+#        'batch1':    batch1,
+#        'CK1I':      batch_CK1I,
+#        'NLGFKI':    batch_NLGFKI,
+#    }, 'plots.yaml')
+# ══════════════════════════════════════════════════════════════════════
+
+plots:
+
+  # ── Mean Bars ────────────────────────────────────────────────────
+
+  - type: mean_bars
+    batch: batch1
+    column_strings: [IntDen, Count, '%Area', Contains, Coloc]
+    exclude: Combo
+    bottom_tick_labels: false
+
+  - type: mean_bars
+    batch: batch1
+    column_strings: [IntDen, Count, '%Area', Contains, Coloc]
+    exclude: Combo
+    bottom_tick_labels: false
+    specificity:
+      - [Time, WeekTwo]
+      - [Time, WeekFour]
+      - [Time, WeekEight]
+
+  - type: mean_bars
+    batch: CK1I
+    column_strings: [IntDen, Count, '%Area', Contains, Coloc]
+    exclude: Combo
+    bottom_tick_labels: false
+
+  - type: mean_bars
+    batch: CK1I
+    column_strings: [IntDen, Count, '%Area', Contains, Coloc]
+    exclude: Combo
+    bottom_tick_labels: false
+    specificity:
+      - [Genotype, hAPP]
+      - [Genotype, NLGF]
+
+  - type: mean_bars
+    batch: NLGFKI
+    column_strings: [IntDen, Count, '%Area', Contains, Coloc]
+    exclude: Combo
+    bottom_tick_labels: false
+
+  - type: mean_bars
+    batch: NLGFKI
+    column_strings: [IntDen, Count, '%Area', Contains, Coloc]
+    exclude: Combo
+    bottom_tick_labels: false
+    factor: Genotype
+
+  # ── Rectangular Matrices ─────────────────────────────────────────
+
+  - type: rect_matrices
+    batch: batch1
+    column_strings: [IntDen, Count, '%Area']
+    against_column_strings: [PeriodMean, AOE, 'LocomotoractivityIR(counts)']
+    exclude: [Error, _exp3, _exp4, _exp1, Combo]
+    against_exclude: [Error, exp4, exp3]
+    column_order: [H31L21, MOAB-2, Caspase3, Iba1, IgG, GFAP, AF488, CK1d]
+    against_order: [Period, AOE, Locomotor]
+    factor: Genotype
+    specificity: [Time, WeekFour, WeekEight]
+    blank_panel_on_nan: true
+
+  # ── Regressions ──────────────────────────────────────────────────
+
+  - type: regressions
+    batch: batch1
+    x: PeriodMean_exp2
+    y: [H31L21_Count, H31L21_IntDenTotal, MOAB-2_burdenScore, MOAB-2_Count, MOAB-2_IntDenTotal, Iba1_ROI_%AreaMean, GFAP_ROI_%AreaMean]
+    specificity:
+      - [Time, WeekEight]
+      - [Time, WeekEight, WeekFour]
+    factor: Genotype
+    normalize_y: false
+    combine: true
+
+  - type: regressions
+    batch: batch1
+    x: CK1d_IntDenTotal
+    y: [MOAB-2_IntDenTotal, H31L21_IntDenTotal, MOAB-2_Count, H31L21_Count]
+    specificity:
+      - [Time, WeekEight]
+      - [Time, WeekEight, WeekFour]
+    factor: Genotype
+    combine: true
+
+  - type: regressions
+    batch: batch1
+    x: mCherry_ROI_IntDenMean_exp2
+    y: [MOAB-2_IntDenTotal, MOAB-2_Count, H31L21_IntDenTotal, H31L21_Count]
+    specificity:
+      - [Time, WeekEight]
+      - [Time, WeekEight, WeekFour]
+    factor: Genotype
+    normalize_y: true
+    normalize_x: true
+    combine: true
+
+  # ── Colocalisation ───────────────────────────────────────────────
+
+  - type: coloc_upset
+    batch: batch1
+    marker: [CK1d, Iba1, Caspase3, AF488]
+    by: Genotype
+    remove_closest: true
+
+  - type: coloc_sankey
+    batch: batch1
+    marker: [CK1d, Iba1, Caspase3, AF488]
+    by: Genotype
+    remove_closest: true
+
+  # ── Histograms ───────────────────────────────────────────────────
+
+  - type: histograms
+    batch: batch1
+    marker: CK1d
+    x_attr: Volume
+    factor: Genotype
+    specificity:
+      - [Time, WeekEight]
+    combine: true
+    stat: density
+
+  # ── Pie Charts ───────────────────────────────────────────────────
+
+  - type: pie_charts
+    batch: batch1
+    marker: [CK1d]
+    x_attr: ColocmCherry
+    threshold: [30]
+    as_counts: true
+    plot_format: pie
+    bottom_ticks: false
+    factor: Genotype
+    specificity:
+      - [Time, WeekFour]
+
+  # ── Ridgeline ────────────────────────────────────────────────────
+
+  - type: ridgeline
+    batch: NLGFKI
+    marker: [AF546]
+    x_attr: [Volume, ColocIba1]
+
+  # ── Volcano ──────────────────────────────────────────────────────
+
+  - type: volcano
+    batch: batch1
+    control: Syn
+    factor: Genotype
+    specificity:
+      - [Time, WeekEight]
+    column_strings: [IntDen, Count, '%Area']
+    exclude: [Non, Raw, ColocCount, mCherry]
