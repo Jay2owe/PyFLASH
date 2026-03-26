@@ -50,7 +50,7 @@ from IF_analysis.utils import (
     flatten_specificity_values, is_specificity_queue,
     iter_specificities, filter_df_by_specificity,
     specificity_path_parts, resolve_column_key,
-    build_subfolder,
+    build_subfolder, parallel_map,
 )
 
 
@@ -8737,9 +8737,9 @@ def plot_mean_bars(experiment, filtered_columns=None,
     """
     # Queue mode: allow multiple specificity filters in one call.
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec_tuple in _iter_specificities(specificity):
-            queued_outputs[spec_tuple] = plot_mean_bars(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec_tuple):
+            return plot_mean_bars(
                 experiment,
                 filtered_columns=filtered_columns,
                 points=points,
@@ -8759,7 +8759,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 save_normality=save_normality,
                 normality_dpi=normality_dpi,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     saved_columns_log = []
     skipped_columns_log = []
@@ -9155,9 +9155,9 @@ def plot_locations(experiment, objects,
     image_layout = _normalize_location_image_layout(image_layout)
 
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_locations(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_locations(
                 experiment, objects,
                 separate_by=separate_by, join_by=join_by,
                 merge=merge, colocalise=colocalise, annotate=annotate,
@@ -9176,7 +9176,7 @@ def plot_locations(experiment, objects,
                 dpi=dpi, save=save,
                 specificity=spec,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     object_panels = _resolve_location_marker_panels(experiment, objects)
     image_panels = _resolve_location_marker_panels(experiment, images)
@@ -9518,16 +9518,16 @@ def plot_regressions(experiment, x, y,
         return queued_outputs
 
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_regressions(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_regressions(
                 experiment, x, y,
                 by=by, factor=factor, test=test,
                 normalize_x=normalize_x, normalize_y=normalize_y,
                 specificity=spec, save=save, combine=combine,
                 x_range=x_range, y_range=y_range,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     level = 'factors' if factor else by
 
@@ -9653,9 +9653,9 @@ def plot_histograms(experiment, marker, x_attr,
         return queued_outputs
 
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_histograms(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_histograms(
                 experiment, marker, x_attr,
                 by=by, factor=factor,
                 bins=bins, binwidth=binwidth, bin_range=bin_range,
@@ -9663,7 +9663,7 @@ def plot_histograms(experiment, marker, x_attr,
                 alpha=alpha, stat=stat, merge=merge, combine=combine, invert_x=invert_x,
                 ymax=ymax, save=save, specificity=spec,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     marker_key = _resolve_marker_data_key(experiment, marker)
     x = _resolve_histogram_x_column(experiment, marker_key, x_attr)
@@ -9821,9 +9821,9 @@ def plot_ridgeline(experiment, marker, x_attr,
         return queued_outputs
 
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_ridgeline(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_ridgeline(
                 experiment,
                 marker=marker,
                 x_attr=x_attr,
@@ -9838,7 +9838,7 @@ def plot_ridgeline(experiment, marker, x_attr,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     marker_key = _resolve_marker_data_key(experiment, marker)
     x = _resolve_histogram_x_column(experiment, marker_key, x_attr)
@@ -10059,9 +10059,9 @@ def plot_ecdf(experiment, marker, x_attr,
         return queued_outputs
 
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_ecdf(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_ecdf(
                 experiment,
                 marker=marker,
                 x_attr=x_attr,
@@ -10076,7 +10076,7 @@ def plot_ecdf(experiment, marker, x_attr,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     marker_key = _resolve_marker_data_key(experiment, marker)
     x = _resolve_histogram_x_column(experiment, marker_key, x_attr)
@@ -10391,9 +10391,9 @@ def plot_volcano(experiment, filtered_columns=None,
     - 'none'
     """
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_volcano(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_volcano(
                 experiment,
                 filtered_columns=filtered_columns,
                 by=by,
@@ -10408,7 +10408,7 @@ def plot_volcano(experiment, filtered_columns=None,
                 regex_string=regex_string,
                 exclude=exclude,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     resolved_columns = _resolve_filtered_columns(
         experiment,
@@ -10571,9 +10571,9 @@ def plot_pie_charts(experiment, marker, x_attr,
         return queued_outputs
 
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_pie_charts(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_pie_charts(
                 experiment,
                 marker=marker,
                 x_attr=x_attr,
@@ -10589,7 +10589,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     marker_key = _resolve_marker_data_key(experiment, marker)
     x = _resolve_histogram_x_column(experiment, marker_key, x_attr)
@@ -10766,9 +10766,9 @@ def plot_matrices(experiment, filtered_columns=None,
     Correlation matrix: one figure per condition or factor value.
     """
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_matrices(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_matrices(
                 experiment,
                 filtered_columns=filtered_columns,
                 by=by,
@@ -10786,7 +10786,7 @@ def plot_matrices(experiment, filtered_columns=None,
                 regex_string=regex_string,
                 exclude=exclude,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     resolved_columns = _resolve_filtered_columns(
         experiment,
@@ -10981,9 +10981,9 @@ def plot_rect_matrices(
       matrix cells with "NaN" (instead of dropping columns).
     """
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_rect_matrices(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_rect_matrices(
                 experiment,
                 filtered_columns=filtered_columns,
                 against_columns=against_columns,
@@ -11007,7 +11007,7 @@ def plot_rect_matrices(
                 share_columns_across_panels=share_columns_across_panels,
                 blank_panel_on_nan=blank_panel_on_nan,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     y_columns = _resolve_filtered_columns(
         experiment,
@@ -11477,9 +11477,9 @@ def plot_coloc_upset(
     source_df = _enrich_df_grouping_columns(source_df, exp_obj, requested_by=by_mode)
 
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_coloc_upset(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_coloc_upset(
                 source,
                 marker,
                 specificity=spec,
@@ -11495,7 +11495,7 @@ def plot_coloc_upset(
                 experiment=exp_obj,
                 dpi=dpi,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     marker_s = str(marker)
     esc = re.escape(marker_s)
@@ -11893,9 +11893,9 @@ def plot_coloc_sankey(
     source_df = _enrich_df_grouping_columns(source_df, exp_obj, requested_by=by_mode)
 
     if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_coloc_sankey(
+        specs = list(_iter_specificities(specificity))
+        def _run_one(spec):
+            return plot_coloc_sankey(
                 source,
                 marker,
                 df=source_df,
@@ -11912,7 +11912,7 @@ def plot_coloc_sankey(
                 experiment=exp_obj,
                 dpi=dpi,
             )
-        return queued_outputs
+        return parallel_map(_run_one, specs)
 
     marker_s = str(marker)
     esc = re.escape(marker_s)
