@@ -717,6 +717,60 @@ def parallel_map(func, items, threshold=None):
         return {item: func(item) for item in items}
 
 
+def plot_parallel(*calls):
+    """Run multiple plot calls concurrently using threads.
+
+    Each argument should be a zero-argument callable, e.g.::
+
+        plot_parallel(
+            lambda: plot_mean_bars(batch1, column_strings=cols),
+            lambda: plot_mean_bars(batch2, column_strings=cols),
+            lambda: plot_histograms(batch1, marker='Iba1', x_attr='Volume'),
+        )
+
+    Uses threads (not processes) so batch/experiment objects don't need
+    to be picklable.  Matplotlib's Agg backend + ioff() makes this safe
+    as long as each call creates its own figures (which all plot_*
+    functions do).
+
+    Returns a list of results in the same order as the input calls.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import matplotlib
+    matplotlib.use('Agg')
+
+    n = len(calls)
+    if n == 0:
+        return []
+    if n == 1:
+        return [calls[0]()]
+
+    results = [None] * n
+    errors = []
+
+    def _run(idx, fn):
+        import matplotlib as _mpl
+        _mpl.use('Agg')
+        return idx, fn()
+
+    with ThreadPoolExecutor(max_workers=min(n, os.cpu_count() or 4)) as pool:
+        futures = {pool.submit(_run, i, fn): i for i, fn in enumerate(calls)}
+        for future in as_completed(futures):
+            try:
+                idx, result = future.result()
+                results[idx] = result
+            except Exception as e:
+                idx = futures[future]
+                print(f"  plot_parallel: call {idx} failed — {e}")
+                errors.append((idx, e))
+
+    if errors:
+        print(f"  plot_parallel: {len(errors)}/{n} calls failed")
+    else:
+        print(f"  plot_parallel: {n} calls completed")
+    return results
+
+
 def plot_legend_separately(ax, n_labels, flat=False):
     """Extract a legend from axes into its own figure."""
     label_params = ax.get_legend_handles_labels()

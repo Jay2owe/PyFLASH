@@ -26,6 +26,7 @@ from IF_analysis.config import Config
 from IF_analysis.modelling import iterative_best_fit
 from IF_analysis.spec import run_spec
 from IF_analysis.plotting import cheat_sheet
+from IF_analysis.utils import plot_parallel
 import IF_analysis.stats as stats
 
 __all__ = [
@@ -43,6 +44,8 @@ __all__ = [
     "Config", "stainColors",
     # Spec DSL
     "run_spec",
+    # Parallelism
+    "plot_parallel",
     # Reference
     "cheat_sheet",
     # Stats module
