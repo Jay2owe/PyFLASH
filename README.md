@@ -27,10 +27,20 @@ from IF_analysis.utils import rc_params, get_columns
 
 rc_params()
 
-# Define experimental conditions
-WT = condition('WT', 'WT', Config.COLORS['blue'], 'Genotype', 'Wild-type mice')
-KO = condition('KO', 'KO', Config.COLORS['red'], 'Genotype', 'Knockout mice')
-conditions = conditionList([WT, KO], comparisons=['1-2'])
+# Define experimental conditions (fluent builder)
+conditions = (
+    ConditionBuilder("Genotype")
+    .add("WT", short="WT", color="blue")        # color names or hex
+    .add("KO", short="KO", color="red")
+    .compare("WT", "KO")                         # named, not '1-2'
+    .explain("Wild-type vs knockout mice")
+    .build()
+)
+
+# Or the classic API (still works):
+# WT = condition('WT', 'WT', Config.COLORS['blue'], 'Genotype', 'Wild-type mice')
+# KO = condition('KO', 'KO', Config.COLORS['red'], 'Genotype', 'Knockout mice')
+# conditions = conditionList([WT, KO], comparisons=['1-2'])
 
 # Create or load a batch
 batch = create_batch(
@@ -51,12 +61,40 @@ batch.export_all_excel()
 save_state(batch, "my_batch.pkl")
 ```
 
+### Crossed (factorial) designs
+
+```python
+genotype = (
+    ConditionBuilder("Genotype")
+    .add("WT", short="WT", color="blue")
+    .add("KO", short="KO", color="red")
+    .compare("WT", "KO")
+    .build()
+)
+
+treatment = (
+    ConditionBuilder("Drug")
+    .add("Vehicle", short="Veh")
+    .add("Drug A", short="DrugA")
+    .compare("Veh", "DrugA")
+    .build()
+)
+
+crossed = (
+    ConditionBuilder.cross(genotype, treatment)
+    .compare("Veh", "DrugA", within="WT")    # drug effect in WT
+    .compare("Veh", "DrugA", within="KO")    # drug effect in KO
+    .compare("WT", "KO", within="Veh")       # genotype effect, no drug
+    .build()
+)
+```
+
 ## Package structure
 
 | Module | Purpose |
 |---|---|
 | `config.py` | Global configuration (thresholds, pixel size, colors) |
-| `conditions.py` | Experimental condition and factor definitions |
+| `conditions.py` | Experimental conditions, `ConditionBuilder` fluent DSL |
 | `markers.py` | Data marker classes (Antibody, cellMarker, objectMarker) |
 | `experiment.py` | Single-experiment CSV import, ROI processing, summary building |
 | `batch.py` | Multi-experiment batch processing and merging |

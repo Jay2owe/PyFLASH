@@ -63,7 +63,28 @@ Also contains `check_directory()` for resolving paths across different user dire
 - `condition(label, name, color, factor, explanation)` — single experimental condition (e.g., genotype, treatment)
 - `multiCondition(conditionsList)` — compound condition from crossing two+ conditions
 - `conditionList(condition_list, comparisons, explanation)` — ordered list with comparison pairs and factor info
-- `zipConditions()` / `zipConditionLists()` — helpers for creating condition tuples
+- `zipConditions()` / `zipConditionLists()` — helpers for creating condition tuples (still supported)
+
+### `ConditionBuilder` (conditions.py) — fluent builder DSL
+Alternative to the raw constructors above. Produces the same objects with a friendlier API:
+
+```python
+conditions = (
+    ConditionBuilder("Genotype")
+    .add("Syn-mCherry", short="Syn", color="red")   # color name or hex
+    .add("hAPP-mCherry", short="hAPP")               # color auto-assigned
+    .compare_all_pairs()                              # or .compare("Syn", "hAPP")
+    .explain("WT mice injected with <> at 2 months.")
+    .build()                                          # → conditionList
+)
+```
+
+Key features:
+- **Color resolution:** accepts `Config.COLORS` keys (`"red"`), CSS names (`"steelblue"`), hex (`"#ff0000"`), or `None` (auto-assigns from Okabe-Ito colorblind-safe palette)
+- **Named comparisons:** `.compare("Syn", "hAPP")` instead of `'1-2'`. Also `.compare_all_pairs()`, `.compare_to_control("Syn")`, `.compare_sequential()`
+- **Fuzzy error messages:** typo `"hApp"` → `"Did you mean 'hAPP'?"`
+- **Crossed/factorial designs:** `ConditionBuilder.cross(cl1, cl2, colors=)` returns a `_CrossedConditionBuilder` with `.compare("Veh", "Drug", within="hAPP")`, `.compare_all_pairs(within_factor="Time")`, `.order_by("Time")`
+- **Backward compatible:** old `condition()`, `zipConditions()`, `conditionList()` are unchanged
 
 ### Marker Classes (markers.py)
 Hierarchy: `Attribute` → `Antibody` → `cellMarker` / `objectMarker`
@@ -420,7 +441,7 @@ Multi-backend image loading system:
 2. **SCN naming:** `LHSCN`, `RHSCN`, `LHSCN2`, `RHSCN2` — left/right suprachiasmatic nucleus regions
 3. **Sentinel values:** `NOT_INCLUDED_IN_EXPERIMENT` marks animals absent from specific experiments in batch summaries
 4. **Factor system:** Conditions have a `factor` attribute for grouping (e.g., "Genotype", "Time"). Used for ANOVA and plot organization.
-5. **Comparisons:** Specified as string pairs like `"1-2"`, `"1-3"` (1-indexed condition positions)
+5. **Comparisons:** Legacy: string pairs like `"1-2"` (1-indexed positions). Preferred: named via `ConditionBuilder` — `.compare("Syn", "hAPP")`, `.compare_all_pairs()`, `.compare_to_control("Syn")`
 6. **Path resolution:** `check_directory()` tries multiple usernames to resolve Dropbox/OneDrive paths across machines
 7. **Image ROI mapping:** ROI zip keys are parsed to derive AnimalName, SCN name, and ImageROI labels. The system handles both cropped and uncropped ROIs.
 8. **Specificity filtering:** `specificity=('Time', 'WeekEight')` filters the summary to specific factor levels before analysis
@@ -439,10 +460,20 @@ from IF_analysis.utils import rc_params
 # Set up display
 rc_params()
 
-# Define conditions
-WT = condition('WT', 'WT', Config.COLORS['blue'], 'Genotype', '<> mice')
-KO = condition('KO', 'KO', Config.COLORS['red'], 'Genotype', '<> mice')
-conditions = conditionList([WT, KO], comparisons=['1-2'])
+# Define conditions — fluent builder (preferred)
+conditions = (
+    ConditionBuilder("Genotype")
+    .add("WT", short="WT", color="blue")
+    .add("KO", short="KO", color="red")
+    .compare("WT", "KO")
+    .explain("<> mice")
+    .build()
+)
+
+# Or the classic API (still works):
+# WT = condition('WT', 'WT', Config.COLORS['blue'], 'Genotype', '<> mice')
+# KO = condition('KO', 'KO', Config.COLORS['red'], 'Genotype', '<> mice')
+# conditions = conditionList([WT, KO], comparisons=['1-2'])
 
 # Create or load batch
 batch = create_batch(

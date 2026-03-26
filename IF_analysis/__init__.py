@@ -19,6 +19,7 @@ from IF_analysis.batch import Batch
 from IF_analysis.conditions import (
     condition, multiCondition, conditionList,
     zipConditions, zipConditionLists,
+    ConditionBuilder,
 )
 from IF_analysis.factory import create_batch
 from IF_analysis.serialization import save_state, load_state, normalize_paths
@@ -26,6 +27,7 @@ from IF_analysis.config import Config
 from IF_analysis.modelling import iterative_best_fit
 from IF_analysis.spec import run_spec
 from IF_analysis.plotting import cheat_sheet
+from IF_analysis._logging import set_verbosity, silent, verbose, Verbosity
 import IF_analysis.stats as stats
 
 __all__ = [
@@ -34,13 +36,14 @@ __all__ = [
     "Experiment", "MiniExperiment", "Batch",
     # Conditions
     "condition", "multiCondition", "conditionList",
-    "zipConditions", "zipConditionLists",
+    "zipConditions", "zipConditionLists", "ConditionBuilder",
     # Factory & IO
     "create_batch", "save_state", "load_state", "normalize_paths",
     # Modelling
     "iterative_best_fit",
-    # Config
+    # Config & output control
     "Config", "stainColors",
+    "set_verbosity", "silent", "verbose", "Verbosity",
     # Spec DSL
     "run_spec",
     # Reference
