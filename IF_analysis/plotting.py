@@ -41,6 +41,7 @@ from IF_analysis.stats import (
     test_normality,
     runITTest,
     mwu_multiple_comparisons,
+    stats_cache_key,
 )
 from IF_analysis.export import convert_name, convert_raw_name, convert_behavior_name
 from IF_analysis.utils import (
@@ -8729,11 +8730,15 @@ def plot_mean_bars(experiment, filtered_columns=None,
                    bottom_ticks=False, bottom_tick_labels=False,
                    factor=None, save=True,
                    column_strings=None, regex_string=None, exclude='',
-                   save_normality=True, normality_dpi=96):
+                   save_normality=True, normality_dpi=96,
+                   dry_run=False):
     """
-    Bar chart with individual data points for each column Ã— condition.
+    Bar chart with individual data points for each column × condition.
 
     One figure per column, all conditions side by side.
+
+    When *dry_run* is True, compute stats for every column but skip
+    figure creation/saving.  Returns a pandas DataFrame of results.
     """
     # Queue mode: allow multiple specificity filters in one call.
     if _is_specificity_queue(specificity):
@@ -8758,6 +8763,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 exclude=exclude,
                 save_normality=save_normality,
                 normality_dpi=normality_dpi,
+                dry_run=dry_run,
             )
         return parallel_map(_run_one, specs)
 
@@ -8939,8 +8945,9 @@ def plot_mean_bars(experiment, filtered_columns=None,
             else:
                 group_colors = None
             stats_error = None
+            _sc_key = stats_cache_key(col, ordered_keys, specificity) if ordered_keys else None
             try:
-                test_used, posthoc_used, _ = multipleComparisons(
+                test_used, posthoc_used, _, _stats_result = multipleComparisons(
                     experiment,
                     col_dfs,
                     ax=ax,
@@ -8959,6 +8966,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                     verbose=False,
                     save_normality=save_normality,
                     normality_dpi=normality_dpi,
+                    cache_key=_sc_key,
                 )
                 if test_used == "Error":
                     stats_error = posthoc_used
@@ -9023,6 +9031,74 @@ def plot_mean_bars(experiment, filtered_columns=None,
             "No plottable numeric columns were found after filtering. "
             "Try different filters or remove non-numeric columns."
         )
+
+    # ── Dry-run mode: compute stats without rendering figures ─────────
+    if dry_run:
+        from IF_analysis.stats import test_normality as _test_norm
+        summary = experiment.summary
+        if specificity is not None:
+            from IF_analysis.utils import filter_df_by_specificity as _filt
+            summary = _filt(summary, specificity)
+        if factor:
+            group_col = factor
+        else:
+            group_col = 'Condition'
+        groups = [str(g) for g in summary[group_col].dropna().unique()]
+        rows = []
+        for col in resolved_columns:
+            vals = pd.to_numeric(summary[col], errors='coerce').dropna()
+            if len(vals) == 0:
+                rows.append({'Column': col, 'N': 0, 'Test': 'N/A', 'PostHoc': 'N/A'})
+                continue
+            col_dfs = []
+            for g in groups:
+                g_vals = pd.to_numeric(
+                    summary.loc[summary[group_col] == g, col], errors='coerce'
+                ).dropna()
+                if len(g_vals) > 0:
+                    col_dfs.append(g_vals)
+            if len(col_dfs) < 2:
+                rows.append({'Column': col, 'N': int(len(vals)), 'Test': 'N/A', 'PostHoc': 'N/A'})
+                continue
+            normal, _, _ = _test_norm(col_dfs, make_plot=False)
+            if force_nonparametric:
+                normal = False
+            # Determine test without executing (mirrors multipleComparisons logic)
+            if len(col_dfs) == 2:
+                test_name = 'Independent T-Test' if normal else 'Mann-Whitney U'
+            else:
+                if normal:
+                    test_name = 'One-Way ANOVA' if multiple_comparison == 'One-Way' else 'Two-Way ANOVA'
+                else:
+                    test_name = 'Kruskal-Wallis'
+            # Quick p-value
+            try:
+                if len(col_dfs) == 2:
+                    if normal:
+                        _, p = runITTest(col_dfs[0], col_dfs[1], {}, ns=ns)[:2]
+                        p_val = p[0] if isinstance(p, list) else p
+                    else:
+                        pvals, _, _, _, _ = mwu_multiple_comparisons(col_dfs, ['1-2'], {}, ns=ns)
+                        p_val = pvals[0] if pvals else float('nan')
+                else:
+                    from scipy.stats import kruskal, f_oneway as _fow
+                    if normal:
+                        _, p_val = _fow(*col_dfs)
+                    else:
+                        _, p_val = kruskal(*col_dfs)
+            except Exception:
+                p_val = float('nan')
+            rows.append({
+                'Column': col,
+                'N': int(len(vals)),
+                'Groups': len(col_dfs),
+                'Normal': normal,
+                'Test': test_name,
+                'p_value': float(p_val) if not isinstance(p_val, list) else float(p_val[0]),
+            })
+        df_out = pd.DataFrame(rows)
+        print(df_out.to_string(index=False))
+        return df_out
 
     inner = 'factors' if factor else 'conditions'
     out = None

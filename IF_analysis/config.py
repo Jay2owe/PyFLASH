@@ -67,6 +67,7 @@ class Config:
     PLOT_CACHE = False  # True to enable content-hash caching (skip unchanged plots)
     EXPORT_HTML = False  # True to export interactive Altair HTML alongside SVG plots
     PARALLEL_THRESHOLD = 30  # Min plot count before enabling parallel rendering (0=off)
+    STATS_CACHE = False  # True to cache stats results within a session
 
     # ── Path aliases ──────────────────────────────────────────────────
     # User-defined overrides for specificity/factor abbreviations.

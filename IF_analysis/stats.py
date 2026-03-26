@@ -28,6 +28,24 @@ except ImportError:  # pragma: no cover
 
 from IF_analysis.utils import save_fig, strip_name
 
+# ── Stats result cache ──────────────────────────────────────────────
+# Keyed on (column_name, frozenset(condition_names), specificity_tuple).
+# Populated by multipleComparisons when Config.STATS_CACHE is True.
+# Call clear_stats_cache() between independent analysis runs.
+_stats_cache: dict = {}
+
+
+def stats_cache_key(column_name, condition_names, specificity):
+    """Build a hashable cache key for a stats computation."""
+    conds = frozenset(condition_names) if condition_names else frozenset()
+    spec = tuple(specificity) if specificity else ()
+    return (str(column_name), conds, spec)
+
+
+def clear_stats_cache():
+    """Reset the stats cache (call between independent analysis runs)."""
+    _stats_cache.clear()
+
 
 def get_annotation(p, ns="ns"):
     """Return significance annotation text for a p-value."""
@@ -619,14 +637,62 @@ def multipleComparisons(
     verbose=False,
     save_normality=False,
     normality_dpi=120,
+    draw=True,
+    cache_key=None,
 ):
-    """Run group and post-hoc tests, save stats CSV, and annotate the plot."""
+    """Run group and post-hoc tests, save stats CSV, and optionally annotate.
+
+    When *draw* is False the computation runs but no annotations are added
+    to the axes.  The fourth return element is the results dict.
+
+    When *cache_key* is provided and ``Config.STATS_CACHE`` is True,
+    previously computed results are reused (draw still runs if requested).
+    """
+    from IF_analysis.config import Config
+
     if not dfs:
-        return "N/A", "N/A", None
+        return "N/A", "N/A", None, {}
     clean_dfs = [pd.to_numeric(pd.Series(g), errors="coerce").dropna() for g in dfs]
     valid_groups = [g for g in clean_dfs if len(g) > 0]
     if len(valid_groups) < 2:
-        return "N/A", "N/A", None
+        return "N/A", "N/A", None, {}
+
+    # ── Cache lookup ────────────────────────────────────────────────
+    cached = None
+    if cache_key is not None and Config.STATS_CACHE:
+        cached = _stats_cache.get(cache_key)
+    if cached is not None:
+        test = cached['test']
+        post_hoc = cached['post_hoc']
+        annotations = cached['annotations']
+        results = cached['results']
+        overall = cached['overall']
+        results_dict = cached['results_dict']
+        comparisons = cached['comparisons']
+        cond_list = group_labels if group_labels is not None else experiment.condition_list
+        results_strings = cached.get('results_strings', {})
+        if save_name:
+            results_to_excel(results_dict, results_strings, experiment.data_path, save_name, verbose=verbose)
+        annotation_objects = None
+        if draw:
+            annotation_objects = plot_comparison_lines_from_figdata(
+                scatter, bar, ax,
+                annotations=annotations,
+                comparisons=comparisons,
+                errobar_width=0.12, lw=2,
+                max_override=max_override,
+                group_values=valid_groups,
+                group_positions=group_positions,
+                group_colors=group_colors,
+            )
+            if annotate_summary:
+                _annotate_stats_summary(
+                    ax=ax, test=test, post_hoc=post_hoc, overall=overall,
+                    comparisons=comparisons, pairwise_pvalues=results,
+                    condition_list=cond_list,
+                    factor_list=experiment.factor if hasattr(experiment, "factor") else None,
+                )
+        return test, post_hoc, annotation_objects, results_dict
 
     if comparisons is None:
         default_from_conditions = getattr(experiment.condition_list, "comparisons", None)
@@ -681,7 +747,7 @@ def multipleComparisons(
     except Exception as e:
         err = str(e)
         results_dict["Stats_error"] = [err, np.nan]
-        if annotate_summary:
+        if draw and annotate_summary:
             _annotate_stats_error(ax, err)
         if save_name:
             results_to_excel(
@@ -691,7 +757,7 @@ def multipleComparisons(
                 save_name,
                 verbose=verbose,
             )
-        return "Error", f"Error: {err}", None
+        return "Error", f"Error: {err}", None, results_dict
 
     group_strings, comp_strings = print_comparison_results(
         comparisons,
@@ -714,28 +780,44 @@ def multipleComparisons(
     }
     if save_name:
         results_to_excel(results_dict, results_strings, experiment.data_path, save_name, verbose=verbose)
-    annotation_objects = plot_comparison_lines_from_figdata(
-        scatter,
-        bar,
-        ax,
-        annotations=annotations,
-        comparisons=comparisons,
-        errobar_width=0.12,
-        lw=2,
-        max_override=max_override,
-        group_values=valid_groups,
-        group_positions=group_positions,
-        group_colors=group_colors,
-    )
-    if annotate_summary:
-        _annotate_stats_summary(
-            ax=ax,
-            test=test,
-            post_hoc=post_hoc,
-            overall=overall,
+    annotation_objects = None
+    if draw:
+        annotation_objects = plot_comparison_lines_from_figdata(
+            scatter,
+            bar,
+            ax,
+            annotations=annotations,
             comparisons=comparisons,
-            pairwise_pvalues=results,
-            condition_list=cond_list,
-            factor_list=experiment.factor if hasattr(experiment, "factor") else None,
+            errobar_width=0.12,
+            lw=2,
+            max_override=max_override,
+            group_values=valid_groups,
+            group_positions=group_positions,
+            group_colors=group_colors,
         )
-    return test, post_hoc, annotation_objects
+        if annotate_summary:
+            _annotate_stats_summary(
+                ax=ax,
+                test=test,
+                post_hoc=post_hoc,
+                overall=overall,
+                comparisons=comparisons,
+                pairwise_pvalues=results,
+                condition_list=cond_list,
+                factor_list=experiment.factor if hasattr(experiment, "factor") else None,
+            )
+
+    # ── Cache store ──────────────────────────────────────────────────
+    if cache_key is not None and Config.STATS_CACHE:
+        _stats_cache[cache_key] = {
+            'test': test,
+            'post_hoc': post_hoc,
+            'annotations': annotations,
+            'results': results,
+            'overall': overall,
+            'results_dict': results_dict,
+            'comparisons': comparisons,
+            'results_strings': results_strings,
+        }
+
+    return test, post_hoc, annotation_objects, results_dict
