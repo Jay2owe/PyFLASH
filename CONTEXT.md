@@ -12,7 +12,7 @@
 pandas, numpy, matplotlib, seaborn, scipy, statsmodels, scikit-posthocs, openpyxl, read-roi, Pillow
 
 ### Optional Dependencies
-pywin32 (Windows), tifffile, cv2, imageio, roifile, patsy, tqdm
+pywin32 (Windows), tifffile, cv2, imageio, roifile, patsy, tqdm, altair (interactive HTML), pyyaml/tomli (spec DSL)
 
 ---
 
@@ -26,12 +26,13 @@ IF_analysis/
 ├── config.py            # Global configuration singleton (Config class)
 ├── conditions.py        # Experimental condition classes
 ├── markers.py           # Data marker classes (Attribute, Antibody, cellMarker, objectMarker)
-├── experiment.py         # Experiment class — CSV import, ROI processing, summary building
+├── experiment.py        # Experiment class — CSV import, ROI processing, summary building
 ├── batch.py             # Batch class — combines multiple Experiments
 ├── factory.py           # create_batch() — high-level batch creation with caching
 ├── iteration.py         # Context + run() — iteration framework for analysis actions
 ├── plotting.py          # Plotting action functions and one-liner wrappers (~480KB, largest file)
 ├── stats.py             # Statistical testing (t-test, ANOVA, KW, Tukey, MWU, normality)
+├── spec.py              # Declarative plot specification DSL (YAML/TOML/JSON)
 ├── modelling.py         # Model selection (iterative best-fit with LOO cross-validation)
 ├── export.py            # Excel export with name mapping and formatting
 ├── serialization.py     # Pickle-based save/load with path normalization
@@ -50,6 +51,10 @@ Global configuration singleton with class-level attributes:
 - `FALLBACK_USERS` — list of usernames for cross-machine path resolution
 - `COLORS` — hex color palette dictionary
 - `SAVE_MODE = True` — whether to save figures
+- `SKIP_EXISTING = False` — skip saving when output file already exists (opt-in)
+- `EXPORT_HTML = False` — export interactive Altair HTML alongside SVG plots (opt-in)
+- `STATS_CACHE = False` — cache stats results within a session (opt-in)
+- `ALIASES = {}` — user-defined abbreviations for specificity/factor values
 - Display labels: `AB = 'Aβ'`, `CK = 'CK1δ'`, unit labels
 
 Also contains `check_directory()` for resolving paths across different user directories (important for Dropbox shared paths).
@@ -118,7 +123,7 @@ Extends `Experiment`. Groups multiple experiments under shared conditions.
 
 **Key methods:**
 - `processData()` — processes all child experiments, merges summaries, imports images
-- `_create_batch_summary()` — outer-joins experiment summaries on AnimalName, handles sentinel values (`NOT_INCLUDED_IN_EXPERIMENT`) for animals absent from specific experiments, labels duplicate metric columns with `_expN` suffixes
+- `_create_batch_summary()` — outer-joins experiment summaries on AnimalName, handles sentinel values (`NOT_INCLUDED_IN_EXPERIMENT`) for animals absent from specific experiments, labels duplicate metric columns with `.expN` suffixes
 - `export_IF_summary_excel(save_path)` — formatted Excel with one sheet per metric
 - `export_behavior_summary_excel(save_path)` — behavioral data export
 - `export_extended_data_excel(save_path)` — per-object extended data export
@@ -182,13 +187,26 @@ The largest module (~480KB). Contains action functions and one-liner wrappers.
 `get_display_name(name, minimal, compact_per)` — converts raw column names to human-readable labels using the export name maps. Handles units, abbreviations, and formatting.
 
 ### Key Plot Functions (one-liners that wrap `run()`):
-- `plot_mean_bars()` — bar charts with swarm points, SEM error bars, and statistical annotations
+- `plot_mean_bars()` — bar charts with swarm points, SEM error bars, and statistical annotations. Supports `dry_run=True` to compute stats without rendering.
 - `plot_matrices()` — correlation heatmaps
 - `plot_rect_matrices()` — rectangular correlation matrices (y vs x columns)
-- `plot_location()` — spatial location plots of marker objects on microscopy images
-- `plot_image_panels()` — multi-panel microscopy image grids
+- `plot_histograms()` — histogram distributions by condition
+- `plot_ridgeline()` — ridgeline density plots
+- `plot_ecdf()` — empirical CDF plots
+- `plot_regressions()` — regression scatter plots with correlation stats
+- `plot_volcano()` — volcano plots of fold-change vs significance
+- `plot_pie_charts()` — pie/stacked bar charts for categorical distributions
+- `plot_locations()` — spatial location plots of marker objects on microscopy images
+- `plot_images()` — multi-panel microscopy image grids
 - `plot_representative_images()` — representative image selection and display
-- Various scatter, violin, histogram, and distribution plots
+- `plot_coloc_upset()` — UpSet plots of marker colocalisation
+- `plot_coloc_sankey()` — Sankey diagrams of colocalisation flow
+
+### Cheat Sheet
+`cheat_sheet()` — lists all plot functions. `cheat_sheet('mean_bars')` — shows all parameters with descriptions and defaults.
+
+### Interactive HTML Export
+When `Config.EXPORT_HTML = True` and altair is installed, `plot_mean_bars`, `plot_histograms`, `plot_matrices`, and `plot_volcano` also save an interactive HTML file alongside the SVG plots. Always opt-in; skips silently if altair is not available.
 
 ### Image Panel System
 - Supports multi-marker merge panels (overlaying channels)
@@ -196,6 +214,53 @@ The largest module (~480KB). Contains action functions and one-liner wrappers.
 - Representative image selection with persistent metadata
 - Image loading with multiple backends (tifffile, cv2, imageio, PIL)
 - Downsampling and preview for performance
+
+---
+
+## Plot Specification DSL (spec.py)
+
+Run entire plot batches from a YAML/TOML/JSON file instead of writing Python.
+
+### Usage
+```python
+from IF_analysis import run_spec
+
+# Single batch
+run_spec(batch1, 'plots.yaml')
+
+# Multiple batches — reference by name in the YAML
+run_spec({
+    'batch1':  batch1,
+    'CK1I':    batch_CK1I,
+    'NLGFKI':  batch_NLGFKI,
+}, 'plots.yaml')
+```
+
+### YAML format
+```yaml
+plots:
+  - type: mean_bars
+    batch: batch1
+    column_strings: [IntDen, Count, '%Area']
+    exclude: Combo
+    specificity:
+      - [Time, WeekEight]
+      - [Time, WeekFour]
+
+  - type: histograms
+    batch: batch1
+    marker: CK1d
+    x_attr: Volume
+    factor: Genotype
+    combine: true
+```
+
+### Features
+- `batch: name` selects which data source each entry uses
+- `columns` is aliased to `filtered_columns` automatically
+- Specificity lists are converted to Python tuples
+- Validates plot types, parameter names, and column references before running
+- Supports YAML (pyyaml), TOML (tomllib/tomli), and JSON (stdlib)
 
 ---
 
@@ -217,7 +282,11 @@ Master function that:
 2. Auto-selects appropriate test (parametric vs non-parametric)
 3. Runs group test + post-hoc comparisons
 4. Saves results to CSV
-5. Annotates plot with significance brackets and summary text
+5. Optionally annotates plot with significance brackets and summary text (`draw=True` by default)
+6. Supports result caching via `cache_key` when `Config.STATS_CACHE` is enabled
+
+### Stats Cache
+When `Config.STATS_CACHE = True`, stats results are cached in a module-level dict keyed on `(column, conditions, specificity)`. Call `clear_stats_cache()` between independent analysis runs.
 
 ### Annotation
 `plot_comparison_lines_from_figdata()` — draws SEM error bars and significance brackets with `*`, `**`, `***`, `****`, or `ns` annotations on bar plots.
@@ -283,6 +352,11 @@ Multi-backend image loading system:
 - `adjust_for_volumemm()` — normalize metrics per tissue volume (mm³)
 - `add_coloc_percentages()` — derive percentage colocalisation columns
 
+### Specificity Helpers
+- `is_specificity_queue(specificity)` — True when specificity is a list of 2+ tuples
+- `iter_specificities(specificity)` — yield individual specificity tuples
+- `filter_df_by_specificity(df, specificity)` — filter DataFrame by factor values
+
 ### Geometry
 - `trace_downward_nearest(x, y)` — trace a downward path through points by nearest-neighbor
 - `moving_average(a, w)` — padded moving average for smoothing
@@ -290,8 +364,9 @@ Multi-backend image loading system:
 
 ### Plotting
 - `rc_params()` — set matplotlib rcParams for publication quality
-- `save_fig()` — save as SVG with long-path handling on Windows
+- `save_fig()` — save as SVG with optional skip-existing check and long-path handling on Windows
 - `plot_legend_separately()` — extract legend into its own figure
+- `build_subfolder()` — construct output subfolder paths from specificity/marker context
 
 ### Progress
 - `ProgressTracker` — notebook/terminal-friendly progress display with timing and ETA, supports IPython rich display
@@ -319,16 +394,17 @@ Multi-backend image loading system:
    ├── Process each child experiment
    ├── Merge summaries (outer join on AnimalName)
    ├── Handle NOT_INCLUDED_IN_EXPERIMENT sentinels
-   ├── Label duplicate metric columns with _expN
+   ├── Label duplicate metric columns with .expN
    ├── Create save paths
    └── Import/merge images
         ↓
 6. Analysis & Visualization
    ├── plot_mean_bars(batch, columns, specificity=...)
    ├── plot_matrices(batch, columns, ...)
-   ├── plot_location(batch, markers, ...)
+   ├── plot_locations(batch, markers, ...)
    ├── stats.multipleComparisons(...)
    ├── iterative_best_fit(batch, y_col, ...)
+   ├── run_spec({'batch1': batch1, ...}, 'plots.yaml')
    └── batch.export_all_excel()
         ↓
 7. Persistence
@@ -348,6 +424,8 @@ Multi-backend image loading system:
 6. **Path resolution:** `check_directory()` tries multiple usernames to resolve Dropbox/OneDrive paths across machines
 7. **Image ROI mapping:** ROI zip keys are parsed to derive AnimalName, SCN name, and ImageROI labels. The system handles both cropped and uncropped ROIs.
 8. **Specificity filtering:** `specificity=('Time', 'WeekEight')` filters the summary to specific factor levels before analysis
+9. **Specificity queues:** `[('Time', 'WeekEight'), ('Time', 'WeekFour')]` — list of tuples produces multiple plots, one per entry
+10. **SVG output:** All figures are saved as SVG for publication-ready, editable output
 
 ---
 
@@ -355,8 +433,8 @@ Multi-backend image loading system:
 
 ```python
 from IF_analysis import *
-from IF_analysis.plotting import plot_mean_bars, plot_matrices, plot_location
-from IF_analysis.utils import rc_params, get_columns
+from IF_analysis import plotting
+from IF_analysis.utils import rc_params
 
 # Set up display
 rc_params()
@@ -375,13 +453,16 @@ batch = create_batch(
     pickle_path="path/to/cache",
 )
 
-# Filter columns
-cols = get_columns(batch.summary, column_strings=['Count', 'Volume'], exclude='NonColoc')
+# Plot individually
+plotting.plot_mean_bars(batch, column_strings=['IntDen', 'Count'],
+                        specificity=('Time', 'WeekEight'))
 
-# Plot
-plot_mean_bars(batch, cols, specificity=('Time', 'WeekEight'))
-plot_matrices(batch, cols)
-plot_location(batch, markers=['Iba1', 'CK1d'])
+# Or run all plots from a YAML spec
+run_spec(batch, 'plots.yaml')
+
+# Check available parameters
+from IF_analysis import cheat_sheet
+cheat_sheet('mean_bars')
 
 # Export
 batch.export_all_excel()
