@@ -63,8 +63,7 @@ class Config:
 
     # ── Save mode ──────────────────────────────────────────────────────
     SAVE_MODE = True   # False to skip saving figures
-    SKIP_EXISTING = False  # True to skip saving when output file already exists
-    PLOT_CACHE = False  # True to enable content-hash caching (skip unchanged plots)
+    SKIP_EXISTING = True   # Skip saving when output file already exists
     EXPORT_HTML = False  # True to export interactive Altair HTML alongside SVG plots
     PARALLEL_THRESHOLD = 30  # Min plot count before enabling parallel rendering (0=off)
     STATS_CACHE = False  # True to cache stats results within a session

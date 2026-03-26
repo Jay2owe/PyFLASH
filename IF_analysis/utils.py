@@ -5,7 +5,6 @@ Shared utility functions used across the package.
 import os
 import re
 import math
-import hashlib
 import time
 import numpy as np
 import pandas as pd
@@ -600,66 +599,6 @@ def rc_params(line_width=3, tick_major_width=3, tick_major_size=11.5,
     })
 
 
-def _plot_cache_path(save_path):
-    """Return the path to the plot cache sidecar file for a directory."""
-    return os.path.join(save_path, ".plot_cache.json")
-
-
-def _load_plot_cache(save_path):
-    """Load the content-hash cache from a directory's sidecar file."""
-    import json
-    cache_file = _plot_cache_path(save_path)
-    if os.path.isfile(cache_file):
-        try:
-            with open(cache_file, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def _save_plot_cache(save_path, cache):
-    """Persist the content-hash cache to a directory's sidecar file."""
-    import json
-    cache_file = _plot_cache_path(save_path)
-    try:
-        with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(cache, f, indent=1)
-    except Exception:
-        pass
-
-
-def compute_plot_hash(figure, extra_config=None):
-    """Compute a content hash for a figure's underlying data.
-
-    Walks all axes artists to capture line/bar/scatter data.  Combined
-    with *extra_config* (arbitrary repr-able object) this produces a
-    deterministic hash that changes only when the plotted data or
-    configuration changes.
-    """
-    h = hashlib.sha256()
-    for ax in figure.get_axes():
-        for line in ax.get_lines():
-            xd = line.get_xdata()
-            yd = line.get_ydata()
-            h.update(np.asarray(xd, dtype=np.float64).tobytes())
-            h.update(np.asarray(yd, dtype=np.float64).tobytes())
-        for container in ax.containers:
-            for patch in container:
-                h.update(str(patch.get_height()).encode())
-                h.update(str(patch.get_x()).encode())
-        for coll in ax.collections:
-            offsets = coll.get_offsets()
-            if hasattr(offsets, 'data'):
-                h.update(np.asarray(offsets.data, dtype=np.float64).tobytes())
-        for img in ax.get_images():
-            arr = img.get_array()
-            if arr is not None:
-                h.update(np.asarray(arr).tobytes())
-    if extra_config is not None:
-        h.update(repr(extra_config).encode())
-    return h.hexdigest()[:16]
-
 
 def rasterize_data_artists(figure, threshold=50):
     """Mark dense data artists as rasterized for faster SVG saving.
@@ -684,8 +623,7 @@ def rasterize_data_artists(figure, threshold=50):
 
 def save_fig(figure, save_path, image_name, extra_artist=None,
              pad_inches=1, subfolder=None, verbose=True,
-             skip_existing=None, cache=None, cache_extra=None,
-             rasterize=True):
+             skip_existing=None, rasterize=True):
     """Save a figure as SVG with optional subfolder creation.
 
     Parameters
@@ -693,12 +631,6 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
     skip_existing : bool or None
         If True, skip saving when the output file already exists.
         None falls back to ``Config.SKIP_EXISTING``.
-    cache : bool or None
-        If True, compute a content hash and skip saving when the hash
-        matches the cached value.  None falls back to ``Config.PLOT_CACHE``.
-    cache_extra : object, optional
-        Extra configuration to include in the content hash (e.g., a dict
-        of plot parameters).
     """
     from IF_analysis.config import Config
 
@@ -721,24 +653,12 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         )
 
     use_skip = skip_existing if skip_existing is not None else Config.SKIP_EXISTING
-    use_cache = cache if cache is not None else Config.PLOT_CACHE
 
     if Config.SAVE_MODE:
-        # Quick skip: file already exists on disk
         if use_skip and os.path.isfile(full_path):
             if verbose:
                 print(f"Skipped (exists): {full_path}")
             return full_path
-
-        # Content-hash skip: data + config unchanged since last save
-        if use_cache:
-            content_hash = compute_plot_hash(figure, extra_config=cache_extra)
-            plot_cache = _load_plot_cache(save_path)
-            cached_hash = plot_cache.get(os.path.basename(full_path))
-            if cached_hash == content_hash and os.path.isfile(full_path):
-                if verbose:
-                    print(f"Skipped (unchanged): {full_path}")
-                return full_path
 
         if rasterize:
             rasterize_data_artists(figure)
@@ -747,11 +667,6 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             figure.savefig(full_path, bbox_inches='tight',
                            bbox_extra_artists=extra_artist,
                            dpi=600, transparent=True, pad_inches=pad_inches)
-
-        # Update cache after successful save
-        if use_cache:
-            plot_cache[os.path.basename(full_path)] = content_hash
-            _save_plot_cache(save_path, plot_cache)
 
     if verbose:
         print(f"Figure saved to {full_path}")
