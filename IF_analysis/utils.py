@@ -673,37 +673,6 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
     return full_path
 
 
-def plot_parallel(*calls):
-    """Run multiple plot calls at the same time.
-
-    Usage::
-
-        plot_parallel(
-            lambda: plot_mean_bars(batch1, column_strings=cols),
-            lambda: plot_mean_bars(batch2, column_strings=cols),
-            lambda: plot_histograms(batch3, marker='Iba1', x_attr='Volume'),
-        )
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    n = len(calls)
-    if n == 0:
-        return []
-    if n == 1:
-        return [calls[0]()]
-
-    results = [None] * n
-    with ThreadPoolExecutor(max_workers=min(n, os.cpu_count() or 4)) as pool:
-        futures = {pool.submit(fn): i for i, fn in enumerate(calls)}
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                results[idx] = future.result()
-            except Exception as e:
-                print(f"  plot_parallel: call {idx} failed — {e}")
-    return results
-
-
 def plot_legend_separately(ax, n_labels, flat=False):
     """Extract a legend from axes into its own figure."""
     label_params = ax.get_legend_handles_labels()
