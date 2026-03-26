@@ -54,6 +54,14 @@ from IF_analysis.utils import (
 )
 
 
+# ── Optional Altair dependency for interactive HTML export ───────────
+try:
+    import altair as alt
+    _HAS_ALTAIR = True
+except ImportError:
+    _HAS_ALTAIR = False
+
+
 # Shared default used by location plots; this aliases the global stain color map
 # so external edits to `stainColors` are picked up automatically here too.
 LOCATION_MARKER_COLORS = stainColors
@@ -175,6 +183,145 @@ def set_display_name(ax, y_label=None, x_label=None, minimal=False, compact_per=
         ax.set_ylabel(get_display_name(y_label, minimal=minimal, compact_per=compact_per), **kwargs)
     if x_label:
         ax.set_xlabel(get_display_name(x_label, minimal=minimal, compact_per=compact_per), **kwargs)
+
+
+# ── Interactive HTML export helpers (Altair, optional) ───────────────
+
+def _export_html_bars(experiment, columns, specificity, save_path):
+    """Export an interactive bar + strip chart as self-contained HTML."""
+    if not _HAS_ALTAIR or not Config.EXPORT_HTML:
+        return
+    try:
+        import altair as alt
+        alt.data_transformers.disable_max_rows()
+        charts = []
+        for col in columns:
+            df = experiment.summary[['AnimalName', 'Condition', col]].dropna()
+            bar = alt.Chart(df).mark_bar().encode(
+                x='Condition:N',
+                y=alt.Y(f'{col}:Q', title=get_display_name(col)),
+                color='Condition:N',
+            )
+            points = alt.Chart(df).mark_circle(size=40, opacity=0.6).encode(
+                x='Condition:N',
+                y=f'{col}:Q',
+                color='Condition:N',
+            )
+            charts.append((bar + points).properties(title=get_display_name(col)))
+        if charts:
+            combined = alt.vconcat(*charts).resolve_scale(color='shared')
+            html_path = os.path.join(save_path, 'interactive_bars.html')
+            os.makedirs(save_path, exist_ok=True)
+            combined.save(html_path, inline=True)
+    except Exception:
+        pass
+
+
+def _export_html_histogram(experiment, marker, x_attr, specificity, save_path, by, factor):
+    """Export an interactive histogram as self-contained HTML."""
+    if not _HAS_ALTAIR or not Config.EXPORT_HTML:
+        return
+    try:
+        import altair as alt
+        alt.data_transformers.disable_max_rows()
+        marker_key = _resolve_marker_data_key(experiment, marker)
+        x = _resolve_histogram_x_column(experiment, marker_key, x_attr)
+        df = experiment.data[marker_key].df[[x]].copy()
+        df = df.dropna(subset=[x])
+        group_col = factor if factor else 'Condition'
+        if group_col not in df.columns:
+            df = _enrich_df_grouping_columns(df, experiment, requested_by=group_col)
+        if specificity is not None:
+            df = _filter_df_by_specificity(df, specificity)
+        chart = alt.Chart(df).mark_bar(opacity=0.7).encode(
+            alt.X(f'{x}:Q', bin=alt.Bin(maxbins=30), title=get_display_name(x)),
+            alt.Y('count():Q'),
+            alt.Color(f'{group_col}:N'),
+        ).properties(title=f'{get_display_name(x)} Histogram')
+        html_path = os.path.join(save_path, 'interactive_histogram.html')
+        os.makedirs(save_path, exist_ok=True)
+        chart.save(html_path, inline=True)
+    except Exception:
+        pass
+
+
+def _export_html_matrix(experiment, columns, specificity, save_path, by, factor, correlation):
+    """Export an interactive correlation heatmap as self-contained HTML."""
+    if not _HAS_ALTAIR or not Config.EXPORT_HTML:
+        return
+    try:
+        import altair as alt
+        alt.data_transformers.disable_max_rows()
+        summary = experiment.summary
+        if specificity is not None:
+            summary = filter_df_by_specificity(summary, specificity)
+        numeric = summary[columns].select_dtypes(include='number').dropna(axis=1, how='all')
+        if numeric.shape[1] < 2:
+            return
+        corr = numeric.corr(method='pearson' if 'pearson' in str(correlation) else 'spearman')
+        corr_long = corr.reset_index().melt(id_vars='index')
+        corr_long.columns = ['Variable 1', 'Variable 2', 'Correlation']
+        corr_long['Variable 1'] = corr_long['Variable 1'].map(get_display_name)
+        corr_long['Variable 2'] = corr_long['Variable 2'].map(get_display_name)
+        chart = alt.Chart(corr_long).mark_rect().encode(
+            x=alt.X('Variable 1:N', title=None),
+            y=alt.Y('Variable 2:N', title=None),
+            color=alt.Color('Correlation:Q', scale=alt.Scale(scheme='redblue', domain=[-1, 1])),
+            tooltip=['Variable 1', 'Variable 2', 'Correlation'],
+        ).properties(title='Correlation Matrix')
+        html_path = os.path.join(save_path, 'interactive_matrix.html')
+        os.makedirs(save_path, exist_ok=True)
+        chart.save(html_path, inline=True)
+    except Exception:
+        pass
+
+
+def _export_html_volcano(experiment, columns, specificity, save_path, control):
+    """Export an interactive volcano scatter as self-contained HTML."""
+    if not _HAS_ALTAIR or not Config.EXPORT_HTML:
+        return
+    try:
+        import altair as alt
+        alt.data_transformers.disable_max_rows()
+        summary = experiment.summary
+        if specificity is not None:
+            summary = filter_df_by_specificity(summary, specificity)
+        records = []
+        control_rows = summary[summary['Condition'] == control]
+        other_rows = summary[summary['Condition'] != control]
+        for col in columns:
+            if col not in summary.columns:
+                continue
+            ctrl_mean = control_rows[col].dropna().mean()
+            other_mean = other_rows[col].dropna().mean()
+            if ctrl_mean == 0 or pd.isna(ctrl_mean) or pd.isna(other_mean):
+                continue
+            pct_change = ((other_mean - ctrl_mean) / abs(ctrl_mean)) * 100
+            from scipy.stats import ttest_ind
+            stat_result = ttest_ind(
+                control_rows[col].dropna(),
+                other_rows[col].dropna(),
+                equal_var=False,
+            )
+            p = stat_result.pvalue if stat_result.pvalue > 0 else 1e-300
+            records.append({
+                'Column': get_display_name(col),
+                '% Change': pct_change,
+                '-log10(p)': -np.log10(p),
+            })
+        if not records:
+            return
+        df = pd.DataFrame(records)
+        chart = alt.Chart(df).mark_circle(size=60).encode(
+            x=alt.X('% Change:Q', title='% Change vs Control'),
+            y=alt.Y('-log10(p):Q', title='-log10(p-value)'),
+            tooltip=['Column', '% Change', '-log10(p)'],
+        ).properties(title=f'Volcano (vs {control})')
+        html_path = os.path.join(save_path, 'interactive_volcano.html')
+        os.makedirs(save_path, exist_ok=True)
+        chart.save(html_path, inline=True)
+    except Exception:
+        pass
 
 
 def _resolve_filtered_columns(experiment, filtered_columns=None,
@@ -2426,90 +2573,70 @@ def _apply_image_adjustments(tile, marker_name=None, image_adjustments=None):
     return arr
 
 
-_IMAGEJ_INSTANCE = None
-_IMAGEJ_INIT_ERROR = None
-
-
-def _get_imagej_instance():
-    global _IMAGEJ_INSTANCE, _IMAGEJ_INIT_ERROR
-    if _IMAGEJ_INSTANCE is not None:
-        return _IMAGEJ_INSTANCE
-    if _IMAGEJ_INIT_ERROR is not None:
-        raise RuntimeError(_IMAGEJ_INIT_ERROR)
-    try:
-        import imagej
-        _IMAGEJ_INSTANCE = imagej.init(mode='headless')
-        return _IMAGEJ_INSTANCE
-    except Exception as exc:
-        _IMAGEJ_INIT_ERROR = f"ImageJ initialization failed: {exc}"
-        raise RuntimeError(_IMAGEJ_INIT_ERROR) from exc
-
-
 def _apply_manual_brightness_contrast(arr, brightness, contrast):
     out = np.clip(np.asarray(arr, dtype=np.float32) * float(brightness), 0.0, 1.0)
     out = np.clip((out - 0.5) * float(contrast) + 0.5, 0.0, 1.0)
     return out
 
 
-def _imagej_enhance_contrast_channel(channel, saturated=0.35):
-    ij = _get_imagej_instance()
-    channel_u8 = np.clip(np.round(np.asarray(channel, dtype=np.float32) * 255.0), 0, 255).astype(np.uint8)
-    imp = ij.py.to_imageplus(channel_u8)
-    args = f"saturated={float(max(0.0, saturated)):.4f} normalize"
-    ij.py.run_plugin("Enhance Contrast...", args=args, ij1_style=True, imp=imp)
-    pixels = np.asarray(ij.py.from_java(imp.getProcessor().getPixelsCopy()), dtype=np.float32).reshape(channel_u8.shape)
-    return np.clip(pixels / 255.0, 0.0, 1.0)
+def _enhance_contrast_channel(channel, saturated=0.35):
+    """Percentile-clip + linear stretch — exact match to ImageJ Enhance Contrast
+    (ContrastEnhancer.java) with normalize=True.
+
+    ``saturated`` is the total percentage clipped, split equally across both
+    histogram tails (matching the Java ``threshold = pixelCount * saturated / 200``).
+    """
+    arr = np.asarray(channel, dtype=np.float32)
+    lo_pct = float(saturated) / 2.0
+    hi_pct = 100.0 - lo_pct
+    p_lo, p_hi = np.percentile(arr, (lo_pct, hi_pct))
+    if (p_hi - p_lo) < 1e-9:
+        return arr
+    return np.clip((arr - p_lo) / (p_hi - p_lo), 0.0, 1.0)
 
 
-def _imagej_auto_target(tile, saturated=0.35):
+def _enhance_contrast_rgb(tile, saturated=0.35):
+    """Apply per-channel percentile contrast enhancement to an RGB float tile."""
     rgb = _image_array_to_rgb_float(tile)
     out = np.empty_like(rgb, dtype=np.float32)
-    for channel_idx in range(out.shape[2]):
-        out[..., channel_idx] = _imagej_enhance_contrast_channel(
-            rgb[..., channel_idx],
-            saturated=saturated,
-        )
+    for ch in range(out.shape[2]):
+        out[..., ch] = _enhance_contrast_channel(rgb[..., ch], saturated=saturated)
     return out
 
 
-def _fit_brightness_contrast_to_target(tile, target_tile):
+def _suggest_auto_adjustments(tile, saturated=0.35):
+    """Compute brightness/contrast values that approximate per-channel percentile
+    contrast enhancement via the manual brightness/contrast model.
+
+    Uses scipy.optimize when available, otherwise a coarse grid search.
+    """
     source = _image_array_to_rgb_float(tile)
-    target = _image_array_to_rgb_float(target_tile)
-    if source.shape != target.shape:
-        target = _center_crop_image_array(target, source.shape[0], source.shape[1])
+    target = _enhance_contrast_rgb(tile, saturated=saturated)
 
     source_sample = source[::4, ::4, ...]
     target_sample = target[::4, ::4, ...]
 
-    best_brightness = 1.0
-    best_contrast = 1.0
-    best_error = float("inf")
+    def _mse(params):
+        b, c = float(params[0]), float(params[1])
+        trial = _apply_manual_brightness_contrast(source_sample, b, c)
+        return float(np.mean((trial - target_sample) ** 2))
 
-    def _search(brightness_values, contrast_values):
-        nonlocal best_brightness, best_contrast, best_error
-        for brightness in brightness_values:
-            for contrast in contrast_values:
-                trial = _apply_manual_brightness_contrast(source_sample, brightness, contrast)
-                err = float(np.mean((trial - target_sample) ** 2))
-                if err < best_error:
-                    best_error = err
-                    best_brightness = float(brightness)
-                    best_contrast = float(contrast)
+    try:
+        from scipy.optimize import minimize
+        result = minimize(_mse, x0=[1.0, 1.0], method='Powell',
+                          bounds=[(0.01, 5.0), (0.01, 5.0)],
+                          options={'maxfev': 200, 'ftol': 1e-6})
+        return max(0.0, float(result.x[0])), max(0.0, float(result.x[1]))
+    except ImportError:
+        pass
 
-    _search(
-        np.linspace(0.1, 3.0, 19, dtype=float),
-        np.linspace(0.1, 3.0, 19, dtype=float),
-    )
-    _search(
-        np.linspace(max(0.0, best_brightness - 0.35), best_brightness + 0.35, 19, dtype=float),
-        np.linspace(max(0.0, best_contrast - 0.35), best_contrast + 0.35, 19, dtype=float),
-    )
-    return max(0.0, float(best_brightness)), max(0.0, float(best_contrast))
-
-
-def _suggest_imagej_auto_adjustments(tile, saturated=0.35):
-    target = _imagej_auto_target(tile, saturated=saturated)
-    return _fit_brightness_contrast_to_target(tile, target)
+    best_brightness, best_contrast, best_error = 1.0, 1.0, float("inf")
+    for b in np.linspace(0.1, 3.0, 15, dtype=float):
+        for c in np.linspace(0.1, 3.0, 15, dtype=float):
+            err = _mse([b, c])
+            if err < best_error:
+                best_error, best_brightness, best_contrast = err, b, c
+    return max(0.0, best_brightness), max(0.0, best_contrast)
 
 
 def _center_crop_image_array(arr, target_height, target_width):
@@ -3429,7 +3556,7 @@ def plot_images(experiment, markers=None,
             image_adjustments=image_adjustments,
             use_existing_edits=use_existing_edits,
         )
-        preview_dim = int(preview_max_dim) if preview_max_dim is not None else 320
+        preview_dim = int(preview_max_dim) if preview_max_dim is not None else 512
         return _launch_image_edit_mode(
             marker_order,
             render_preview=lambda adjustments, preview_scope="full": plot_images(
@@ -4381,6 +4508,15 @@ def _launch_image_edit_mode(marker_names, *, render_preview, render_final,
         preview_state["fig"] = None
         preview_state["canvas"] = None
         preview_state["widget"] = None
+        preview_state["im_artist"] = None
+        preview_state["bg"] = None
+
+    def _fig_to_rgba(fig):
+        """Rasterize a matplotlib figure to an RGBA numpy array."""
+        fig.canvas.draw()
+        buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        w, h = fig.canvas.get_width_height()
+        return buf.reshape(h, w, 4).copy()
 
     def _render_preview():
         preview_state["job"] = None
@@ -4391,15 +4527,52 @@ def _launch_image_edit_mode(marker_names, *, render_preview, render_final,
         else:
             status_var.set("Rendering preview...")
         try:
-            fig = render_preview(_current_adjustments(), preview_scope=preview_scope)
-            _clear_preview()
-            canvas = FigureCanvasTkAgg(fig, master=preview_frame)
-            canvas.draw()
-            widget = canvas.get_tk_widget()
-            widget.pack(fill="both", expand=True)
-            preview_state["fig"] = fig
-            preview_state["canvas"] = canvas
-            preview_state["widget"] = widget
+            plot_fig = render_preview(_current_adjustments(), preview_scope=preview_scope)
+            rgba = _fig_to_rgba(plot_fig)
+            plt.close(plot_fig)
+
+            if preview_state.get("canvas") is not None and preview_state.get("im_artist") is not None:
+                im_artist = preview_state["im_artist"]
+                im_artist.set_data(rgba)
+                im_artist.set_extent([0, rgba.shape[1], rgba.shape[0], 0])
+                display_ax = preview_state["fig"].axes[0]
+                display_ax.set_xlim(0, rgba.shape[1])
+                display_ax.set_ylim(rgba.shape[0], 0)
+                canvas = preview_state["canvas"]
+                bg = preview_state.get("bg")
+                if bg is not None:
+                    try:
+                        canvas.restore_region(bg)
+                        display_ax.draw_artist(im_artist)
+                        canvas.blit(preview_state["fig"].bbox)
+                        canvas.flush_events()
+                    except Exception:
+                        canvas.draw()
+                else:
+                    canvas.draw()
+            else:
+                _clear_preview()
+                display_fig = plt.figure(figsize=(12, 8))
+                display_ax = display_fig.add_axes([0, 0, 1, 1])
+                display_ax.set_axis_off()
+                im_artist = display_ax.imshow(
+                    rgba, aspect='auto',
+                    extent=[0, rgba.shape[1], rgba.shape[0], 0],
+                    interpolation='bilinear', animated=True,
+                )
+                canvas = FigureCanvasTkAgg(display_fig, master=preview_frame)
+                canvas.draw()
+                widget = canvas.get_tk_widget()
+                widget.pack(fill="both", expand=True)
+                preview_state["fig"] = display_fig
+                preview_state["canvas"] = canvas
+                preview_state["widget"] = widget
+                preview_state["im_artist"] = im_artist
+                try:
+                    preview_state["bg"] = canvas.copy_from_bbox(display_fig.bbox)
+                except Exception:
+                    preview_state["bg"] = None
+
             if preview_scope == "single":
                 status_var.set("Adjust brightness and contrast per marker. Single-image live preview is enabled.")
             else:
@@ -4414,7 +4587,7 @@ def _launch_image_edit_mode(marker_names, *, render_preview, render_final,
                 window.after_cancel(preview_state["job"])
             except Exception:
                 pass
-        preview_state["job"] = window.after(120, _render_preview)
+        preview_state["job"] = window.after(250, _render_preview)
 
     preview_frame_controls = tk.LabelFrame(control_frame, text="Preview", bg="white", padx=8, pady=8)
     preview_frame_controls.pack(fill="x", pady=(0, 8))
@@ -4808,7 +4981,7 @@ def plot_representative_images(source, markers=None,
             image_adjustments=image_adjustments,
             use_existing_edits=use_existing_edits,
         )
-        preview_dim = int(preview_max_dim) if preview_max_dim is not None else 320
+        preview_dim = int(preview_max_dim) if preview_max_dim is not None else 512
         preview_kwargs = dict(kwargs)
         final_kwargs = dict(kwargs)
         return _launch_image_edit_mode(
@@ -8878,6 +9051,16 @@ def plot_mean_bars(experiment, filtered_columns=None,
     print(f"[plot_mean_bars] Saved columns ({len(saved)}): {', '.join(saved)}")
     if len(skipped_columns_log) > 0:
         print(f"[plot_mean_bars] Skipped columns ({len(skipped_columns_log)}): {', '.join(skipped_columns_log)}")
+    try:
+        if Config.EXPORT_HTML:
+            subfolder_html, _ = build_subfolder(
+                plot_type='Bars', factor=factor, specificity=specificity,
+                aliases=getattr(experiment, 'aliases', None),
+            )
+            html_save_path = os.path.join(experiment.fig_path, subfolder_html) if subfolder_html else experiment.fig_path
+            _export_html_bars(experiment, resolved_columns, specificity, html_save_path)
+    except Exception:
+        pass
     return out
 
 def plot_locations(experiment, objects,
@@ -9019,7 +9202,7 @@ def plot_locations(experiment, objects,
     if edit_mode:
         if len(image_marker_order) == 0:
             raise ValueError("edit_mode requires image panels. Pass images=[...] to enable image editing.")
-        preview_dim = int(preview_max_dim) if preview_max_dim is not None else 320
+        preview_dim = int(preview_max_dim) if preview_max_dim is not None else 512
         preview_image_panel = image_panels[0] if len(image_panels) > 0 else tuple(image_marker_order)
         preview_image_markers = _location_panel_markers(preview_image_panel)
         preview_image_merge = len(preview_image_markers) > 1
@@ -9505,6 +9688,8 @@ def plot_histograms(experiment, marker, x_attr,
             bin_range=bin_range_norm,
         )
 
+    _hist_shared_fig_ref = {"fig": None}
+
     def setup(ctx, state):
         _init_progress_state(
             state,
@@ -9518,7 +9703,15 @@ def plot_histograms(experiment, marker, x_attr,
                 state['fig'] = fig
                 state['ax'] = ax
         else:
-            fig, ax = plt.subplots(figsize=(8, 8))
+            if 'shared_fig' not in state or 'shared_ax' not in state:
+                fig, ax = plt.subplots(figsize=(8, 8))
+                state['shared_fig'] = fig
+                state['shared_ax'] = ax
+                _hist_shared_fig_ref["fig"] = fig
+            else:
+                fig = state['shared_fig']
+                ax = state['shared_ax']
+                ax.clear()
             state['fig'] = fig
             state['ax'] = ax
 
@@ -9559,9 +9752,8 @@ def plot_histograms(experiment, marker, x_attr,
         if save:
             save_fig(fig, experiment.fig_path,
                      f'{x} Histogram {name}' + suffix, subfolder=subfolder)
-        plt.close(fig)
 
-    return run(
+    result = run(
         experiment, over=level, action=histogram_action,
         factor=factor, specificity=specificity,
         setup=setup, teardown=teardown,
@@ -9570,6 +9762,20 @@ def plot_histograms(experiment, marker, x_attr,
         kde=kde, alpha=alpha, stat=stat, invert_x=invert_x,
         merge=combine_mode, combine=combine_mode,
     )
+    if not combine_mode and _hist_shared_fig_ref.get("fig") is not None:
+        plt.close(_hist_shared_fig_ref["fig"])
+    try:
+        if Config.EXPORT_HTML:
+            subfolder_html, _ = build_subfolder(
+                plot_type='Histograms', marker=marker_key, factor=factor,
+                specificity=specificity,
+                aliases=getattr(experiment, 'aliases', None),
+            )
+            html_save_path = os.path.join(experiment.fig_path, subfolder_html) if subfolder_html else experiment.fig_path
+            _export_html_histogram(experiment, marker, x_attr, specificity, html_save_path, by, factor)
+    except Exception:
+        pass
+    return result
 
 
 def plot_ridgeline(experiment, marker, x_attr,
@@ -10239,6 +10445,8 @@ def plot_volcano(experiment, filtered_columns=None,
         available_groups = [str(c.name) for c in experiment.condition_list]
     control_name = _resolve_control_name(control, available_groups)
 
+    _volcano_shared_fig_ref = {"fig": None}
+
     def setup(ctx, state):
         _init_progress_state(
             state,
@@ -10247,7 +10455,15 @@ def plot_volcano(experiment, filtered_columns=None,
         )
         group_name = ctx.factor_value if factor is not None else ctx.condition
         _progress_start_item(state, group_name)
-        fig, ax = plt.subplots(figsize=(8, 8))
+        if 'shared_fig' not in state or 'shared_ax' not in state:
+            fig, ax = plt.subplots(figsize=(8, 8))
+            state['shared_fig'] = fig
+            state['shared_ax'] = ax
+            _volcano_shared_fig_ref["fig"] = fig
+        else:
+            fig = state['shared_fig']
+            ax = state['shared_ax']
+            ax.clear()
         state['fig'] = fig
         state['ax'] = ax
         state['volcano_skip_save'] = False
@@ -10272,9 +10488,8 @@ def plot_volcano(experiment, filtered_columns=None,
                 subfolder=subfolder,
             )
         _progress_finish_item(state, group_name)
-        plt.close(fig)
 
-    return run(
+    result = run(
         experiment, over=level, action=volcano_action,
         factor=factor, specificity=specificity,
         setup=setup, teardown=teardown,
@@ -10284,6 +10499,19 @@ def plot_volcano(experiment, filtered_columns=None,
         p_threshold=p_threshold,
         label_points=label_points,
     )
+    if _volcano_shared_fig_ref.get("fig") is not None:
+        plt.close(_volcano_shared_fig_ref["fig"])
+    try:
+        if Config.EXPORT_HTML:
+            subfolder_html, _ = build_subfolder(
+                plot_type='Volcano', factor=factor, specificity=specificity,
+                aliases=getattr(experiment, 'aliases', None),
+            )
+            html_save_path = os.path.join(experiment.fig_path, subfolder_html) if subfolder_html else experiment.fig_path
+            _export_html_volcano(experiment, resolved_columns, specificity, html_save_path, control_name)
+    except Exception:
+        pass
+    return result
 
 
 def plot_pie_charts(experiment, marker, x_attr,
@@ -10653,6 +10881,8 @@ def plot_matrices(experiment, filtered_columns=None,
     tick_label_size_eff = min(tick_label_size, max(4, int(300 / max(1, n))))
     drop_duplicate_columns_for_action = not bool(share_columns_across_panels)
 
+    _matrix_shared_fig_ref = {"fig": None}
+
     def setup(ctx, state):
         _init_progress_state(
             state,
@@ -10660,7 +10890,15 @@ def plot_matrices(experiment, filtered_columns=None,
             total=_count_level_processes(experiment, level, factor=factor, specificity=specificity),
         )
         _progress_start_item(state)
-        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        if 'shared_fig' not in state or 'shared_ax' not in state:
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+            state['shared_fig'] = fig
+            state['shared_ax'] = ax
+            _matrix_shared_fig_ref["fig"] = fig
+        else:
+            fig = state['shared_fig']
+            ax = state['shared_ax']
+            ax.clear()
         state['fig'] = fig
         state['ax'] = ax
 
@@ -10679,9 +10917,8 @@ def plot_matrices(experiment, filtered_columns=None,
                 title = f'{marker} {title}'
             save_fig(fig, experiment.fig_path, title + suffix, subfolder=subfolder)
         _progress_finish_item(state, name)
-        plt.close(fig)
 
-    return run(
+    result = run(
         experiment, over=level, action=matrix_action,
         factor=factor, specificity=specificity,
         setup=setup, teardown=teardown,
@@ -10693,6 +10930,21 @@ def plot_matrices(experiment, filtered_columns=None,
         enforce_shared_columns=bool(share_columns_across_panels),
         shared_columns=resolved_columns,
     )
+    if _matrix_shared_fig_ref.get("fig") is not None:
+        plt.close(_matrix_shared_fig_ref["fig"])
+    try:
+        if Config.EXPORT_HTML:
+            subfolder_html, _ = build_subfolder(
+                plot_type='Matrices',
+                factor=factor if factor is not None else str(by).rstrip('s'),
+                specificity=specificity,
+                aliases=getattr(experiment, 'aliases', None),
+            )
+            html_save_path = os.path.join(experiment.fig_path, subfolder_html) if subfolder_html else experiment.fig_path
+            _export_html_matrix(experiment, resolved_columns, specificity, html_save_path, by, factor, correlation)
+    except Exception:
+        pass
+    return result
 
 
 def plot_rect_matrices(

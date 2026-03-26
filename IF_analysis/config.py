@@ -63,12 +63,37 @@ class Config:
 
     # ── Save mode ──────────────────────────────────────────────────────
     SAVE_MODE = True   # False to skip saving figures
+    SKIP_EXISTING = False  # True to skip saving when output file already exists
+    PLOT_CACHE = False  # True to enable content-hash caching (skip unchanged plots)
+    EXPORT_HTML = False  # True to export interactive Altair HTML alongside SVG plots
+    PARALLEL_THRESHOLD = 30  # Min plot count before enabling parallel rendering (0=off)
 
     # ── Path aliases ──────────────────────────────────────────────────
     # User-defined overrides for specificity/factor abbreviations.
     # Auto-generated aliases are built at batch creation; manual entries
     # here take priority.  Example: {'WeekEight': 'W8', 'Genotype': 'GT'}
     ALIASES = {}
+
+
+def _apply_matplotlib_fast_path():
+    """Set matplotlib rcParams for faster rendering.
+
+    Called once at import time.  The 'fast' style aggressively simplifies
+    paths and chunks the Agg rasteriser, which speeds up saving large SVGs
+    with many data-heavy artists.
+    """
+    try:
+        import matplotlib as mpl
+        from matplotlib import pyplot as _plt
+        mpl.rcParams['path.simplify'] = True
+        mpl.rcParams['path.simplify_threshold'] = 1.0
+        mpl.rcParams['agg.path.chunksize'] = 10000
+        _plt.ioff()
+    except Exception:
+        pass
+
+
+_apply_matplotlib_fast_path()
 
 
 def generate_palettes(colors=None):
