@@ -188,8 +188,25 @@ def build_specificity_alias(specificity, aliases=None):
     return f"{key_alias}.{'+'.join(val_aliases)}"
 
 
+def resolve_roi_bases(roi, experiment):
+    """Resolve an roi parameter to a list of ROI base strings.
+
+    None           → all ROI bases from experiment.summaries (default).
+    'SCN'          → ['SCN']
+    ['SCN', 'OC']  → ['SCN', 'OC']
+    """
+    if roi is None:
+        if hasattr(experiment, 'summaries') and experiment.summaries:
+            return sorted(experiment.summaries.keys())
+        return ['SCN']
+    if isinstance(roi, str):
+        return [roi]
+    return list(roi)
+
+
 def build_subfolder(plot_type=None, marker=None, factor=None,
-                    specificity=None, aliases=None):
+                    specificity=None, aliases=None, roi_base=None,
+                    multi_roi=False):
     """Build a save subfolder and filename suffix for a plot.
 
     Returns (subfolder, suffix) where:
@@ -199,8 +216,11 @@ def build_subfolder(plot_type=None, marker=None, factor=None,
     Single-marker plots go under marker/type/.
     Cross-marker plots go under type/.
     Factor and specificity are encoded into the filename suffix, never as folders.
+    When multi_roi is True, roi_base is prepended as a top-level folder.
     """
     parts = []
+    if multi_roi and roi_base is not None:
+        parts.append(strip_name(str(roi_base)))
     if marker is not None:
         parts.append(strip_name(str(marker)))
     if plot_type is not None:
@@ -229,14 +249,22 @@ def strip_name(name):
 
 
 def normalize_image_roi_name(name):
-    """Normalize ROI/image labels to the file-style form used in image names."""
+    """Normalize ROI/image labels to the file-style form used in image names.
+
+    Handles both legacy SCN-only names and general Hemisphere+Region names.
+    """
     value = str(name).strip()
     if value == "":
         return ""
 
     compact = re.sub(r"[\s_]+", "", value).upper()
 
-    # Already in image-file form, e.g. LHSCN, RHSCN2
+    # Already in image-file form with hemisphere prefix, e.g. LHSCN1, RHOC1
+    match = re.fullmatch(r"(LH|RH)(\w+\d+)", compact)
+    if match is not None:
+        return compact
+
+    # Legacy: LHSCN / RHSCN (no digit) — keep as-is
     match = re.fullmatch(r"(LH|RH)SCN(\d*)", compact)
     if match is not None:
         side, idx = match.groups()
@@ -251,6 +279,7 @@ def normalize_image_roi_name(name):
         side = "RH" if side_suffix == "1" else "LH"
         return f"{side}SCN{idx}"
 
+    # General region name (e.g. OC1) — return as-is
     return compact
 
 
@@ -426,13 +455,28 @@ def get_nonobject_columns(df):
     return numeric, other
 
 
+def extract_region_base(region_name):
+    """SCN1 → SCN, OC1 → OC. Strips trailing digits."""
+    return re.sub(r'\d+$', '', str(region_name).strip())
+
+
+def normalize_hemisphere(value):
+    """Normalize hemisphere values: L→LH, R→RH, LH→LH, RH→RH, empty→''."""
+    v = str(value).strip().upper()
+    if v in ('L', 'LH'):
+        return 'LH'
+    if v in ('R', 'RH'):
+        return 'RH'
+    return ''
+
+
 def adjust_for_volumemm(df, columns, volume_column):
-    """Divide each column by the volume column."""
+    """Divide each column by the volume in units of 0.1 mm³."""
     for col in columns:
         volume_um_cubed = df[volume_column] * 13
-        volume_mm_cubed = volume_um_cubed / 1000000000
+        volume_0_1_mm_cubed = volume_um_cubed / 100000000
 
-        df[col] = df[col] / volume_mm_cubed
+        df[col] = df[col] / volume_0_1_mm_cubed
     return df
 
 

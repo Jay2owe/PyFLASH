@@ -29,6 +29,7 @@ from IF_analysis.utils import (
     add_coloc_percentages, filter_dict,
     replace_cropped, add_scn_num, replace_week_int,
     normalize_image_roi_name, normalize_animal_name,
+    extract_region_base, normalize_hemisphere,
     ProgressTracker, format_elapsed,
 )
 
@@ -156,7 +157,7 @@ def _iter_source_order_objects(source, marker_names=None):
 
 def _source_panel_order_rows(source, marker_names=None) -> pd.DataFrame:
     records = []
-    seen_scns = set()
+    seen_regions = set()
     group_counts = defaultdict(int)
 
     for key, value in _iter_source_order_objects(source, marker_names=marker_names):
@@ -178,34 +179,34 @@ def _source_panel_order_rows(source, marker_names=None) -> pd.DataFrame:
             ).strip()
             exp_values = pd.Series(exp_name, index=df.index, dtype="object")
 
-        scn_values = (
-            df["SCN"].fillna("").astype(str)
-            if "SCN" in df.columns
+        region_values = (
+            df["Region"].fillna("").astype(str)
+            if "Region" in df.columns
             else pd.Series("", index=df.index, dtype="object")
         )
 
         frame = pd.DataFrame({
             "Experiment": exp_values,
             "AnimalName": df["AnimalName"].fillna("").astype(str),
-            "SCN": scn_values,
+            "Region": region_values,
             "ImageROI": df["ImageROI"].fillna("").astype(str),
         }, index=df.index)
 
         for row in frame.itertuples(index=False):
             exp_name = str(getattr(row, "Experiment", "")).strip()
             animal_name = str(getattr(row, "AnimalName", "")).strip()
-            scn_name = str(getattr(row, "SCN", "")).strip()
+            region_name = str(getattr(row, "Region", "")).strip()
             image_roi = normalize_image_roi_name(getattr(row, "ImageROI", ""))
-            if animal_name == "" or scn_name == "" or image_roi == "":
+            if animal_name == "" or region_name == "" or image_roi == "":
                 continue
 
             exp_key = exp_name.casefold()
             animal_key = normalize_animal_name(animal_name).casefold()
-            scn_key = scn_name.casefold()
-            dedup_key = (exp_key, animal_key, scn_key)
-            if dedup_key in seen_scns:
+            region_key = region_name.casefold()
+            dedup_key = (exp_key, animal_key, region_key)
+            if dedup_key in seen_regions:
                 continue
-            seen_scns.add(dedup_key)
+            seen_regions.add(dedup_key)
 
             group_key = (exp_key, animal_key)
             order_idx = group_counts[group_key]
@@ -213,13 +214,13 @@ def _source_panel_order_rows(source, marker_names=None) -> pd.DataFrame:
             records.append({
                 "Experiment": exp_name,
                 "AnimalName": animal_name,
-                "SCN": scn_name,
+                "Region": region_name,
                 "ImageROI": image_roi,
                 "__source_order__": int(order_idx),
             })
 
     if len(records) == 0:
-        return pd.DataFrame(columns=["Experiment", "AnimalName", "SCN", "ImageROI", "__source_order__"])
+        return pd.DataFrame(columns=["Experiment", "AnimalName", "Region", "ImageROI", "__source_order__"])
     return pd.DataFrame.from_records(records)
 
 
@@ -263,17 +264,20 @@ def _sort_image_table(image_df: pd.DataFrame, source=None, marker_names=None) ->
                 sort_cols.extend(["__source_missing__", "__source_order__"])
 
         def _roi_group(value):
-            match = re.fullmatch(r"(LH|RH)SCN(\d*)", str(value).strip().upper())
+            v = str(value).strip().upper()
+            # Match hemisphere-prefixed region: LHSCN1, RHOC2, etc.
+            match = re.fullmatch(r"(?:LH|RH)?(\w+?)(\d+)", v)
             if match is None:
                 return float("inf")
-            idx = match.group(2)
-            return 1 if idx in {"", "1"} else int(idx)
+            return int(match.group(2))
 
         def _roi_side(value):
-            match = re.fullmatch(r"(LH|RH)SCN(\d*)", str(value).strip().upper())
-            if match is None:
-                return 99
-            return 0 if match.group(1) == "LH" else 1
+            v = str(value).strip().upper()
+            if v.startswith("LH"):
+                return 0
+            if v.startswith("RH"):
+                return 1
+            return 99
 
         out["__roi_group__"] = roi_norm.map(_roi_group)
         out["__roi_side__"] = roi_norm.map(_roi_side)
@@ -671,51 +675,34 @@ def _read_full_roi_zip_with_bounds(file_path: str):
 
 def _finalize_roi_name_labels(roi_df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(roi_df, pd.DataFrame) or roi_df.empty:
-        return pd.DataFrame(columns=["AnimalName", "SCN", "ImageROI"])
+        return pd.DataFrame(columns=["AnimalName", "Region", "ImageROI"])
 
     out = roi_df.copy()
-    base = out.get("ROINameRaw", out["SCN"]).fillna("").astype(str).str.strip()
-    fallback = out["SCN"].fillna("").astype(str).str.strip()
-    base = base.where(base != "", fallback)
-    out["ImageROI"] = [normalize_image_roi_name(value) for value in base]
 
-    if {"AnimalName", "ImageMinX", "ImageMaxX"}.issubset(out.columns) or {"AnimalName", "ImageLeft", "ImageRight"}.issubset(out.columns):
-        match_mask = base.astype(str).str.fullmatch(r"(?i)SCN\d*(?:-\d+)?")
-        if match_mask.any():
-            group_num = (
-                base[match_mask]
-                .astype(str)
-                .str.extract(r"(?i)^SCN(\d*)", expand=False)
-                .fillna("")
-                .replace("", "1")
-            )
-            centers = (
-                pd.to_numeric(
-                    out.loc[match_mask, "ImageMinX"] if "ImageMinX" in out.columns else out.loc[match_mask, "ImageLeft"],
-                    errors="coerce",
-                )
-                + pd.to_numeric(
-                    out.loc[match_mask, "ImageMaxX"] if "ImageMaxX" in out.columns else out.loc[match_mask, "ImageRight"],
-                    errors="coerce",
-                )
-            ) / 2.0
-            tmp = pd.DataFrame({
-                "AnimalName": out.loc[match_mask, "AnimalName"].astype(str),
-                "__group__": group_num.astype(str),
-                "__center__": centers.astype(float),
-            }, index=out.index[match_mask])
-            tmp = tmp.dropna(subset=["__center__"])
-            for (_, group), idxs in tmp.groupby(["AnimalName", "__group__"]).groups.items():
-                ordered = list(
-                    tmp.loc[list(idxs)]
-                    .sort_values("__center__", kind="stable")
-                    .index
-                )
-                suffix = "" if str(group) in {"", "1"} else str(group)
-                if len(ordered) >= 1:
-                    out.loc[ordered[0], "ImageROI"] = f"LHSCN{suffix}"
-                if len(ordered) >= 2:
-                    out.loc[ordered[1], "ImageROI"] = f"RHSCN{suffix}"
+    # If Hemisphere column is populated, construct ImageROI directly
+    has_hemisphere = (
+        "Hemisphere" in out.columns
+        and out["Hemisphere"].fillna("").astype(str).str.strip().ne("").any()
+    )
+
+    if has_hemisphere:
+        hemisphere = out["Hemisphere"].fillna("").astype(str).str.strip()
+        region = out["Region"].fillna("").astype(str).str.strip()
+        out["ImageROI"] = hemisphere + region
+    else:
+        # Old format fallback: assign LH/RH by alternating order per animal
+        base = out.get("ROINameRaw", out["Region"]).fillna("").astype(str).str.strip()
+        fallback = out["Region"].fillna("").astype(str).str.strip()
+        base = base.where(base != "", fallback)
+        out["ImageROI"] = [normalize_image_roi_name(value) for value in base]
+
+        # Assign hemisphere by alternating LH/RH within each animal
+        for animal, group in out.groupby("AnimalName", sort=False):
+            idxs = group.index.tolist()
+            for i, idx in enumerate(idxs):
+                side = "LH" if i % 2 == 0 else "RH"
+                region_val = out.loc[idx, "Region"]
+                out.loc[idx, "ImageROI"] = f"{side}{region_val}"
 
     out["__dup_index__"] = out.groupby(["AnimalName", "ImageROI"]).cumcount() + 1
     out["__dup_size__"] = out.groupby(["AnimalName", "ImageROI"])["ImageROI"].transform("size")
@@ -738,23 +725,28 @@ def _image_roi_name_from_panel_index(index: int) -> str:
     return f"{side}SCN{suffix}"
 
 
-def _align_image_roi_to_master_order(master_scn: pd.DataFrame) -> pd.DataFrame:
+def _align_image_roi_to_master_order(master_region: pd.DataFrame) -> pd.DataFrame:
     if (
-        not isinstance(master_scn, pd.DataFrame)
-        or master_scn.empty
-        or "AnimalName" not in master_scn.columns
-        or "SCN" not in master_scn.columns
+        not isinstance(master_region, pd.DataFrame)
+        or master_region.empty
+        or "AnimalName" not in master_region.columns
+        or "Region" not in master_region.columns
     ):
-        return pd.DataFrame(columns=["AnimalName", "SCN", "ImageROI"])
+        return pd.DataFrame(columns=["AnimalName", "Region", "ImageROI"])
 
     records = []
-    for animal_name, group in master_scn.groupby("AnimalName", sort=False, dropna=False):
+    for animal_name, group in master_region.groupby("AnimalName", sort=False, dropna=False):
         ordered = group.reset_index(drop=True)
         for idx, row in ordered.iterrows():
+            region_base = extract_region_base(row["Region"])
+            panel_index = max(0, int(idx))
+            pair_index = (panel_index // 2) + 1
+            side = "LH" if (panel_index % 2) == 0 else "RH"
+            suffix = str(pair_index) if pair_index > 1 else ""
             records.append({
                 "AnimalName": row["AnimalName"],
-                "SCN": row["SCN"],
-                "ImageROI": _image_roi_name_from_panel_index(idx),
+                "Region": row["Region"],
+                "ImageROI": f"{side}{region_base}{suffix}",
             })
     return pd.DataFrame.from_records(records)
 
@@ -766,7 +758,7 @@ def _apply_roi_name_map(df: pd.DataFrame, roi_name_map: pd.DataFrame) -> pd.Data
         not isinstance(roi_name_map, pd.DataFrame)
         or roi_name_map.empty
         or "AnimalName" not in df.columns
-        or "SCN" not in df.columns
+        or "Region" not in df.columns
     ):
         return df
 
@@ -777,14 +769,14 @@ def _apply_roi_name_map(df: pd.DataFrame, roi_name_map: pd.DataFrame) -> pd.Data
     image_roi_cols = [c for c in df.columns if str(c).startswith("ImageROI")]
     base = df.drop(columns=image_roi_cols, errors="ignore").copy()
     base["__AnimalNameKey__"] = base["AnimalName"].map(normalize_animal_name)
-    roi_map = roi_name_map[["AnimalName", "SCN", "ImageROI"]].drop_duplicates(
-        subset=["AnimalName", "SCN"], keep="first"
+    roi_map = roi_name_map[["AnimalName", "Region", "ImageROI"]].drop_duplicates(
+        subset=["AnimalName", "Region"], keep="first"
     ).copy()
     roi_map["__AnimalNameKey__"] = roi_map["AnimalName"].map(normalize_animal_name)
     roi_map = roi_map.drop(columns=["AnimalName"], errors="ignore")
     out = base.merge(
         roi_map,
-        on=["__AnimalNameKey__", "SCN"],
+        on=["__AnimalNameKey__", "Region"],
         how="left",
     ).drop(columns=["__AnimalNameKey__"], errors="ignore")
     if "ImageROI" in out.columns:
@@ -792,8 +784,8 @@ def _apply_roi_name_map(df: pd.DataFrame, roi_name_map: pd.DataFrame) -> pd.Data
         if preserved_image_roi is not None and len(preserved_image_roi) == len(out):
             prev_roi = preserved_image_roi.fillna("").astype(str).str.strip()
             roi_name = roi_name.where(roi_name != "", prev_roi)
-        scn_vals = out["SCN"].fillna("").astype(str).str.strip()
-        out["ImageROI"] = roi_name.where(roi_name != "", scn_vals)
+        region_vals = out["Region"].fillna("").astype(str).str.strip()
+        out["ImageROI"] = roi_name.where(roi_name != "", region_vals)
     return out
 
 
@@ -1263,10 +1255,58 @@ def _add_marker_scores(summary: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _standardize_csv_columns(df):
+    """Standardize CSV format: ensure Region/Hemisphere columns exist.
+
+    New format: has Hemisphere + Region columns.
+    Old format: has SCN column — convert to Region, add empty Hemisphere.
+    Also drops pre-computed marker-specific columns from new-format CSVs.
+    """
+    cols = set(df.columns)
+
+    if 'Region' in cols:
+        # New format — normalize hemisphere and drop pre-computed columns
+        if 'Hemisphere' in cols:
+            df['Hemisphere'] = df['Hemisphere'].fillna('').apply(normalize_hemisphere)
+        else:
+            df['Hemisphere'] = ''
+        if 'ROI' not in cols:
+            df['ROI'] = 'SCN'
+        # Drop pre-computed columns that the pipeline will recompute
+        drop_cols = [c for c in df.columns if (
+            c.endswith('_um')
+            or '_DistToClosest_' in c
+            or '_ClosestTo_' in c
+            or '_NumColoc_' in c
+            or '_Contains_' in c
+            or '_NumClosestTo_' in c
+        )]
+        if drop_cols:
+            df = df.drop(columns=drop_cols)
+        # Drop legacy SCN column if both exist
+        if 'SCN' in cols:
+            df = df.drop(columns=['SCN'])
+    elif 'SCN' in cols:
+        # Old format — convert SCN to Region, default ROI to SCN
+        df = df.rename(columns={'SCN': 'Region'})
+        df['Region'] = 'SCN' + df['Region'].astype(str)
+        df['Hemisphere'] = ''
+        df['ROI'] = 'SCN'
+    else:
+        # Neither column — add empty placeholders
+        df['Region'] = ''
+        df['Hemisphere'] = ''
+        df['ROI'] = 'SCN'
+
+    return df
+
+
 def _get_stain_name_and_df(file_path):
     """Read a CSV and return (stain_name, DataFrame)."""
     stain_name = os.path.splitext(os.path.basename(file_path))[0]
-    return stain_name, pd.read_csv(file_path)
+    df = pd.read_csv(file_path)
+    df = _standardize_csv_columns(df)
+    return stain_name, df
 
 
 class Experiment:
@@ -1427,156 +1467,210 @@ class Experiment:
 
     # ── Summary creation ───────────────────────────────────────────────
 
+    @property
+    def summary(self):
+        """Backward-compat: return the SCN summary from summaries dict."""
+        if not hasattr(self, 'summaries') or not self.summaries:
+            return pd.DataFrame(columns=["AnimalName"])
+        return self.summaries.get('SCN', next(iter(self.summaries.values())))
+
+    @summary.setter
+    def summary(self, value):
+        """Backward-compat setter: store as SCN summary."""
+        if not hasattr(self, 'summaries'):
+            self.summaries = {}
+        if isinstance(value, pd.DataFrame):
+            self.summaries['SCN'] = value
+
     def createSummary(self, progress=True):
-        summary_dfs = []
-        summed, meaned = [], []
-        to_drop = ['SCN', 'AnimalName', 'Condition', 'Label', 'ImageROI', 'ROINameRaw']
         stains = list(self.data.values())
-        tracker = ProgressTracker(
-            f"{self.name} createSummary",
-            total=len(stains),
-            unit="table",
-            enabled=progress and len(stains) > 0,
-        )
+        to_drop = ['Region', 'AnimalName', 'Condition', 'Label', 'ImageROI',
+                    'ROINameRaw', 'Hemisphere', 'ROI']
 
+        # Pre-compute combo indicators once (side effect on stain.df)
         for stain in stains:
-            tracker.start_item(getattr(stain, "name", type(stain).__name__))
             stain_df = stain.df.copy()
-            existing_combo_indicator_cols = _combo_indicator_columns(stain_df, stain.name)
-            if len(existing_combo_indicator_cols) > 0:
-                stain_df = stain_df.drop(columns=existing_combo_indicator_cols, errors='ignore')
-            metric_cols = [c for c in stain_df.columns if c not in to_drop]
-            stain_df = _replace_not_included_with_nan(stain_df, columns=metric_cols)
-            animal_index = stain_df.groupby('AnimalName').size().index
-
-            mean_candidate_cols = get_columns(stain_df, regex_string='^(?!.*Count).*', exclude=to_drop)
-            if len(mean_candidate_cols) > 0:
-                mean_source = stain_df[mean_candidate_cols].copy()
-                mean_numeric = mean_source.apply(pd.to_numeric, errors='coerce')
-            else:
-                mean_source = pd.DataFrame(index=stain_df.index)
-                mean_numeric = mean_source
-
-            mean_cols = [c for c in mean_numeric.columns if mean_numeric[c].notna().any()]
-            other_cols = [c for c in mean_candidate_cols if c not in mean_cols]
-
-            if len(mean_cols) > 0:
-                grouped_numeric = pd.concat(
-                    [stain_df[['AnimalName']], mean_numeric[mean_cols]],
-                    axis=1
-                ).groupby('AnimalName')[mean_cols].mean()
-                mean_df = grouped_numeric.add_suffix('Mean')
-                contains_mean_cols = [c for c in mean_df.columns if '_Contains_' in str(c)]
-                if len(contains_mean_cols) > 0:
-                    mean_df[contains_mean_cols] = mean_df[contains_mean_cols] * 100.0
-            else:
-                mean_df = pd.DataFrame(index=animal_index.copy())
-
-            if len(other_cols) > 0:
-                other_df = stain_df.groupby('AnimalName')[other_cols].first()
-            else:
-                other_df = pd.DataFrame(index=animal_index.copy())
-
-            if not mean_df.empty:
-                meaned.append(mean_cols)
-
-            count_cols = get_columns(stain_df, regex_string='Count')
-            if len(count_cols) > 0:
-                count_numeric = stain_df[count_cols].apply(pd.to_numeric, errors='coerce')
-                count_numeric = count_numeric.where((count_numeric <= 1) | count_numeric.isna(), 1)
-                count_numeric['AnimalName'] = stain_df['AnimalName']
-                # Keep historical behavior: all-NaN groups collapse to 0, not NaN.
-                count_df = count_numeric.groupby('AnimalName')[count_cols].sum()
-                count_df = add_coloc_percentages(count_df)
-            else:
-                count_df = pd.DataFrame(index=animal_index.copy())
-            if not count_df.empty:
-                meaned.append(count_cols)
-
-            combo_indicator_df, combo_count_df, combo_intden_df, combo_mean_intden_df = _build_coloc_combo_summaries(
-                stain_df,
-                stain.name,
-            )
-            if len(existing_combo_indicator_cols) > 0:
-                stain.df = stain.df.drop(columns=existing_combo_indicator_cols, errors='ignore')
+            existing = _combo_indicator_columns(stain_df, stain.name)
+            if len(existing) > 0:
+                stain_df = stain_df.drop(columns=existing, errors='ignore')
+            combo_indicator_df, _, _, _ = _build_coloc_combo_summaries(stain_df, stain.name)
+            if len(existing) > 0:
+                stain.df = stain.df.drop(columns=existing, errors='ignore')
             if not combo_indicator_df.empty:
                 for combo_col in combo_indicator_df.columns:
                     stain.df[combo_col] = combo_indicator_df[combo_col].astype(np.int8)
 
-            sum_cols = get_columns(stain_df, regex_string='Volume|IntDen|Surface',
-                                   exclude=['Mean', 'ROI', 'Ratio'])
-            if len(sum_cols) > 0:
-                sum_numeric = stain_df[sum_cols].apply(pd.to_numeric, errors='coerce')
-                sum_numeric['AnimalName'] = stain_df['AnimalName']
-                # Keep historical behavior: all-NaN groups collapse to 0, not NaN.
-                sum_df = sum_numeric.groupby('AnimalName')[sum_cols].sum().add_suffix('Total')
-            else:
-                sum_df = pd.DataFrame(index=animal_index.copy())
-            if not sum_df.empty:
-                summed.append(sum_df.columns.tolist())
+        # Discover all ROI bases across all stain data
+        all_roi_bases = set()
+        for stain in stains:
+            if 'ROI' in stain.df.columns:
+                for v in stain.df['ROI'].dropna().astype(str).unique():
+                    all_roi_bases.add(extract_region_base(v))
+        if not all_roi_bases:
+            all_roi_bases = {'SCN'}
 
-            for block in [mean_df, count_df, combo_count_df, combo_mean_intden_df, sum_df, combo_intden_df, other_df]:
-                summary_dfs.append(_ensure_animalname_column(block))
-            tracker.finish_item(getattr(stain, "name", type(stain).__name__))
-
-        self.summary = reduce(
-            lambda l, r: pd.merge(l, r, left_on='AnimalName', right_on='AnimalName', how='outer'),
-            summary_dfs
+        tracker = ProgressTracker(
+            f"{self.name} createSummary",
+            total=len(all_roi_bases) * len(stains),
+            unit="table",
+            enabled=progress and len(stains) > 0,
         )
-        if "AnimalName" in self.summary.columns:
-            self.summary["Condition"] = _condition_from_animal_name(self.summary["AnimalName"])
-        else:
-            self.summary["Condition"] = _condition_from_animal_name(self.summary.index)
 
-        try:
-            sections = (self.data['ROI Properties'].df
-                        .groupby('AnimalName')['SCN'].nunique()
-                        .reset_index(name='numSections'))
-            self.summary = self.summary.merge(sections, on='AnimalName', how='left')
-        except KeyError:
-            self.summary['numSections'] = 1
+        self.summaries = {}
+        for roi_base in sorted(all_roi_bases):
+            summary_dfs = []
 
-        summed_cols = get_columns(self.summary, regex_string="Count|IntDen|Volume|Surface",
-                                   exclude=["Mean", "%"])
-        self.summary[summed_cols] = self.summary[summed_cols].div(
-            self.summary['numSections'], axis=0
-        )
-        self.summary = adjust_for_volumemm(self.summary, summed_cols, 'AreaMean')
-        self.summary = _add_marker_scores(self.summary)
+            for stain in stains:
+                tracker.start_item(f"{roi_base}/{getattr(stain, 'name', type(stain).__name__)}")
+                stain_df = stain.df.copy()
 
-        # Mark only behavior-only animals (no IF-source rows at all) as not included
-        # for IF-derived columns. Keep analytical NaNs (e.g. undefined coloc metrics)
-        # as NaN for animals that are present in IF sources.
-        if_animals = set()
-        if_columns = set()
-        for stain in self.data.values():
-            if not isinstance(stain, (objectMarker, cellMarker, Antibody)):
-                continue
-            stain_df = stain.df
-            if "AnimalName" in stain_df.columns:
-                if_animals.update(stain_df["AnimalName"].dropna().astype(str).tolist())
-            marker_prefix = f"{stain.name.split('_ROI')[0]}_"
-            for col in self.summary.columns:
-                if str(col).startswith(marker_prefix):
-                    if_columns.add(col)
+                # Filter to this ROI base
+                if 'ROI' in stain_df.columns:
+                    mask = stain_df['ROI'].fillna('').astype(str).apply(
+                        lambda v, rb=roi_base: extract_region_base(v) == rb
+                    )
+                    stain_df = stain_df[mask]
+                if stain_df.empty:
+                    tracker.finish_item(f"{roi_base}/{getattr(stain, 'name', type(stain).__name__)}")
+                    continue
 
-        if len(if_columns) > 0:
-            if "AnimalName" in self.summary.columns:
-                animal_series = self.summary["AnimalName"].astype(str)
-            else:
-                animal_series = pd.Series(self.summary.index.astype(str), index=self.summary.index)
-            no_if_mask = ~animal_series.isin(if_animals)
-            if no_if_mask.any():
-                cols = list(if_columns)
-                block = _replace_not_included_with_nan(self.summary.loc[no_if_mask, cols], columns=cols)
-                self.summary.loc[no_if_mask, cols] = block.where(
-                    ~block.isna(),
-                    NOT_INCLUDED_SENTINEL,
+                existing = _combo_indicator_columns(stain_df, stain.name)
+                if len(existing) > 0:
+                    stain_df = stain_df.drop(columns=existing, errors='ignore')
+                metric_cols = [c for c in stain_df.columns if c not in to_drop]
+                stain_df = _replace_not_included_with_nan(stain_df, columns=metric_cols)
+                animal_index = stain_df.groupby('AnimalName').size().index
+
+                mean_candidate_cols = get_columns(stain_df, regex_string='^(?!.*Count).*', exclude=to_drop)
+                if len(mean_candidate_cols) > 0:
+                    mean_source = stain_df[mean_candidate_cols].copy()
+                    mean_numeric = mean_source.apply(pd.to_numeric, errors='coerce')
+                else:
+                    mean_source = pd.DataFrame(index=stain_df.index)
+                    mean_numeric = mean_source
+
+                mean_cols = [c for c in mean_numeric.columns if mean_numeric[c].notna().any()]
+                other_cols = [c for c in mean_candidate_cols if c not in mean_cols]
+
+                if len(mean_cols) > 0:
+                    grouped_numeric = pd.concat(
+                        [stain_df[['AnimalName']], mean_numeric[mean_cols]],
+                        axis=1
+                    ).groupby('AnimalName')[mean_cols].mean()
+                    mean_df = grouped_numeric.add_suffix('Mean')
+                    contains_mean_cols = [c for c in mean_df.columns if '_Contains_' in str(c)]
+                    if len(contains_mean_cols) > 0:
+                        mean_df[contains_mean_cols] = mean_df[contains_mean_cols] * 100.0
+                else:
+                    mean_df = pd.DataFrame(index=animal_index.copy())
+
+                if len(other_cols) > 0:
+                    other_df = stain_df.groupby('AnimalName')[other_cols].first()
+                else:
+                    other_df = pd.DataFrame(index=animal_index.copy())
+
+                count_cols = get_columns(stain_df, regex_string='Count')
+                if len(count_cols) > 0:
+                    count_numeric = stain_df[count_cols].apply(pd.to_numeric, errors='coerce')
+                    count_numeric = count_numeric.where((count_numeric <= 1) | count_numeric.isna(), 1)
+                    count_numeric['AnimalName'] = stain_df['AnimalName']
+                    count_df = count_numeric.groupby('AnimalName')[count_cols].sum()
+                    count_df = add_coloc_percentages(count_df)
+                else:
+                    count_df = pd.DataFrame(index=animal_index.copy())
+
+                _, combo_count_df, combo_intden_df, combo_mean_intden_df = _build_coloc_combo_summaries(
+                    stain_df, stain.name,
                 )
-        self.summary = _fill_intden_totals_with_zero(self.summary)
-        self._last_summary_summary = f"{self.summary.shape[0]} animals x {self.summary.shape[1]} columns"
+
+                sum_cols = get_columns(stain_df, regex_string='Volume|IntDen|Surface',
+                                       exclude=['Mean', 'ROI', 'Ratio'])
+                if len(sum_cols) > 0:
+                    sum_numeric = stain_df[sum_cols].apply(pd.to_numeric, errors='coerce')
+                    sum_numeric['AnimalName'] = stain_df['AnimalName']
+                    sum_df = sum_numeric.groupby('AnimalName')[sum_cols].sum().add_suffix('Total')
+                else:
+                    sum_df = pd.DataFrame(index=animal_index.copy())
+
+                for block in [mean_df, count_df, combo_count_df, combo_mean_intden_df,
+                              sum_df, combo_intden_df, other_df]:
+                    summary_dfs.append(_ensure_animalname_column(block))
+                tracker.finish_item(f"{roi_base}/{getattr(stain, 'name', type(stain).__name__)}")
+
+            if not summary_dfs:
+                continue
+
+            roi_summary = reduce(
+                lambda l, r: pd.merge(l, r, left_on='AnimalName', right_on='AnimalName', how='outer'),
+                summary_dfs
+            )
+            if "AnimalName" in roi_summary.columns:
+                roi_summary["Condition"] = _condition_from_animal_name(roi_summary["AnimalName"])
+            else:
+                roi_summary["Condition"] = _condition_from_animal_name(roi_summary.index)
+
+            # numSections: count unique Regions per animal within this ROI base
+            try:
+                roi_props = self.data['ROI Properties'].df
+                if 'ROI' in roi_props.columns:
+                    roi_mask = roi_props['ROI'].fillna('').astype(str).apply(
+                        lambda v, rb=roi_base: extract_region_base(v) == rb
+                    )
+                    roi_props_filtered = roi_props[roi_mask]
+                else:
+                    roi_props_filtered = roi_props
+                sections = (roi_props_filtered
+                            .groupby('AnimalName')['Region'].nunique()
+                            .reset_index(name='numSections'))
+                roi_summary = roi_summary.merge(sections, on='AnimalName', how='left')
+            except KeyError:
+                roi_summary['numSections'] = 1
+
+            summed_cols = get_columns(roi_summary, regex_string="Count|IntDen|Volume|Surface",
+                                       exclude=["Mean", "%"])
+            roi_summary[summed_cols] = roi_summary[summed_cols].div(
+                roi_summary['numSections'], axis=0
+            )
+            roi_summary = adjust_for_volumemm(roi_summary, summed_cols, 'AreaMean')
+            roi_summary = _add_marker_scores(roi_summary)
+
+            # Mark behavior-only animals as not included for IF columns
+            if_animals = set()
+            if_columns = set()
+            for stain in self.data.values():
+                if not isinstance(stain, (objectMarker, cellMarker, Antibody)):
+                    continue
+                sdf = stain.df
+                if "AnimalName" in sdf.columns:
+                    if_animals.update(sdf["AnimalName"].dropna().astype(str).tolist())
+                marker_prefix = f"{stain.name.split('_ROI')[0]}_"
+                for col in roi_summary.columns:
+                    if str(col).startswith(marker_prefix):
+                        if_columns.add(col)
+
+            if len(if_columns) > 0:
+                if "AnimalName" in roi_summary.columns:
+                    animal_series = roi_summary["AnimalName"].astype(str)
+                else:
+                    animal_series = pd.Series(roi_summary.index.astype(str), index=roi_summary.index)
+                no_if_mask = ~animal_series.isin(if_animals)
+                if no_if_mask.any():
+                    cols = list(if_columns)
+                    block = _replace_not_included_with_nan(roi_summary.loc[no_if_mask, cols], columns=cols)
+                    roi_summary.loc[no_if_mask, cols] = block.where(
+                        ~block.isna(),
+                        NOT_INCLUDED_SENTINEL,
+                    )
+            roi_summary = _fill_intden_totals_with_zero(roi_summary)
+            self.summaries[roi_base] = roi_summary
+
+        total_animals = max((s.shape[0] for s in self.summaries.values()), default=0)
+        total_cols = sum(s.shape[1] for s in self.summaries.values())
+        self._last_summary_summary = (
+            f"{len(self.summaries)} ROI(s) | {total_animals} animals x {total_cols} total columns"
+        )
         tracker.close(self._last_summary_summary)
-        return self.summary
+        return self.summaries
 
     # ── Distance computations ──────────────────────────────────────────
 
@@ -1624,11 +1718,12 @@ class Experiment:
         self.factorDict = condition_list.factorDict
         for f in self.factor:
             names = '|'.join([c.name for c in self.factorDict[f]])
-            self.summary['Condition'] = [
-                ''.join(filter(str.isalpha, n))
-                for n in self.summary.reset_index()['AnimalName'].tolist()
-            ]
-            self.summary[f] = self.summary['Condition'].str.extract(f'({names})', expand=False)
+            for roi_base, summary_df in self.summaries.items():
+                summary_df['Condition'] = [
+                    ''.join(filter(str.isalpha, n))
+                    for n in summary_df.reset_index()['AnimalName'].tolist()
+                ]
+                summary_df[f] = summary_df['Condition'].str.extract(f'({names})', expand=False)
             for key in self.data:
                 df = self.data[key].df
                 if 'Condition' in df.columns:
@@ -1637,105 +1732,113 @@ class Experiment:
             self.images = _attach_image_metadata(self, self.images)
         return self.condition_list
 
-    # ── SCN assignment ─────────────────────────────────────────────────
+    # ── Region assignment ────────────────────────────────────────────────
 
-    def assign_scn_number(self):
+    def assign_region(self):
+        """Assign Region identifiers and ImageROI labels to all data tables."""
         roi_dfs = [self.data[k].df.copy() for k in self.data if 'ROI Properties' in k]
         if len(roi_dfs) == 0:
-            self.master_scn = pd.DataFrame(columns=["AnimalName", "SCN", "ImageROI"])
-            self._last_scn_summary = "No ROI Properties tables found"
-            return self.master_scn
+            self.master_region = pd.DataFrame(columns=["AnimalName", "Region", "ImageROI"])
+            self._last_region_summary = "No ROI Properties tables found"
+            return self.master_region
 
-        for roi_df in roi_dfs:
-            roi_df["SCN"] = (
-                roi_df["AnimalName"]
-                + roi_df.groupby("AnimalName")["SCN"]
-                    .transform(lambda s: (pd.factorize(s, sort=True)[0] + 1).astype(str))
-            )
-
+        # Reset index (Region) back to column for all data tables
         failures = []
         for data in self.data.values():
             data.df.reset_index(inplace=True)
-            try:
-                data.df["SCN"] = (
-                    data.df["AnimalName"]
-                    + data.df.groupby("AnimalName")["SCN"]
-                        .transform(lambda s: (pd.factorize(s, sort=True)[0] + 1).astype(str))
-                )
-            except KeyError:
+            if "Region" not in data.df.columns:
                 failures.append(data.name)
 
         roi_name_map = pd.DataFrame()
         rois_obj = self.data.get("ROIs", None)
         if rois_obj is not None and hasattr(rois_obj, "df") and isinstance(rois_obj.df, pd.DataFrame):
             rois_df = rois_obj.df.copy()
-            if {"AnimalName", "SCN"}.issubset(rois_df.columns):
+            if {"AnimalName", "Region"}.issubset(rois_df.columns):
                 roi_name_map = _finalize_roi_name_labels(rois_df)
 
         if not roi_name_map.empty:
-            self.master_scn = (
-                roi_name_map[["AnimalName", "SCN", "ImageROI"]]
-                .drop_duplicates(subset=["AnimalName", "SCN"], keep="first")
-                .drop_duplicates(subset=["AnimalName", "SCN"], keep="first")
+            self.master_region = (
+                roi_name_map[["AnimalName", "Region", "ImageROI"]]
+                .drop_duplicates(subset=["AnimalName", "Region"], keep="first")
                 .reset_index(drop=True)
             )
             for data in self.data.values():
                 if isinstance(getattr(data, "df", None), pd.DataFrame):
                     data.df = _apply_roi_name_map(data.df.copy(), roi_name_map)
         else:
-            self.master_scn = (
-                pd.concat(roi_dfs, ignore_index=True)[["AnimalName", "SCN"]]
+            self.master_region = (
+                pd.concat(roi_dfs, ignore_index=True)[["AnimalName", "Region"]]
                 .drop_duplicates()
-                .sort_values(["AnimalName", "SCN"])
+                .sort_values(["AnimalName", "Region"])
                 .reset_index(drop=True)
             )
-            self.master_scn["ImageROI"] = self.master_scn["SCN"]
+            # Construct ImageROI from Hemisphere + Region if available
+            if "Hemisphere" in pd.concat(roi_dfs, ignore_index=True).columns:
+                hemi_df = pd.concat(roi_dfs, ignore_index=True)[["AnimalName", "Region", "Hemisphere"]].drop_duplicates(
+                    subset=["AnimalName", "Region"], keep="first"
+                )
+                self.master_region = self.master_region.merge(
+                    hemi_df, on=["AnimalName", "Region"], how="left"
+                )
+                hemi = self.master_region["Hemisphere"].fillna("").astype(str)
+                self.master_region["ImageROI"] = hemi + self.master_region["Region"]
+                self.master_region = self.master_region.drop(columns=["Hemisphere"], errors="ignore")
+            else:
+                self.master_region["ImageROI"] = self.master_region["Region"]
 
         source_order = _source_panel_order_rows(self)
         if not source_order.empty:
-            scn_order = source_order[["AnimalName", "SCN", "__source_order__"]].drop_duplicates(
-                subset=["AnimalName", "SCN"],
+            region_order = source_order[["AnimalName", "Region", "__source_order__"]].drop_duplicates(
+                subset=["AnimalName", "Region"],
                 keep="first",
             )
-            self.master_scn = self.master_scn.merge(
-                scn_order,
-                on=["AnimalName", "SCN"],
+            self.master_region = self.master_region.merge(
+                region_order,
+                on=["AnimalName", "Region"],
                 how="left",
             )
-            self.master_scn["__source_missing__"] = self.master_scn["__source_order__"].isna().astype(int)
-            self.master_scn = (
-                self.master_scn
+            self.master_region["__source_missing__"] = self.master_region["__source_order__"].isna().astype(int)
+            self.master_region = (
+                self.master_region
                 .sort_values(
-                    ["AnimalName", "__source_missing__", "__source_order__", "ImageROI", "SCN"],
+                    ["AnimalName", "__source_missing__", "__source_order__", "ImageROI", "Region"],
                     kind="stable",
                 )
                 .drop(columns=["__source_order__", "__source_missing__"], errors="ignore")
                 .reset_index(drop=True)
             )
         else:
-            self.master_scn = (
-                self.master_scn
-                .sort_values(["AnimalName", "ImageROI", "SCN"], kind="stable")
+            self.master_region = (
+                self.master_region
+                .sort_values(["AnimalName", "ImageROI", "Region"], kind="stable")
                 .reset_index(drop=True)
             )
 
-        aligned_roi_map = _align_image_roi_to_master_order(self.master_scn)
+        aligned_roi_map = _align_image_roi_to_master_order(self.master_region)
         if not aligned_roi_map.empty:
-            self.master_scn = (
-                self.master_scn
+            self.master_region = (
+                self.master_region
                 .drop(columns=["ImageROI"], errors="ignore")
-                .merge(aligned_roi_map, on=["AnimalName", "SCN"], how="left")
+                .merge(aligned_roi_map, on=["AnimalName", "Region"], how="left")
                 .reset_index(drop=True)
             )
             for data in self.data.values():
                 if isinstance(getattr(data, "df", None), pd.DataFrame):
                     data.df = _apply_roi_name_map(data.df.copy(), aligned_roi_map)
 
-        summary = f"{self.master_scn['AnimalName'].nunique()} animals | {len(self.master_scn)} SCNs"
+        n_animals = self.master_region['AnimalName'].nunique()
+        n_regions = len(self.master_region)
+        summary = f"{n_animals} animals | {n_regions} regions"
         if len(failures) > 0:
             summary += f" | skipped: {_summarize_name_list(failures)}"
-        self._last_scn_summary = summary
-        return self.master_scn
+        self._last_region_summary = summary
+        # Backward compat aliases
+        self.master_scn = self.master_region
+        self._last_scn_summary = self._last_region_summary
+        return self.master_region
+
+    # Backward compat alias
+    assign_scn_number = assign_region
 
     # ── Path management ────────────────────────────────────────────────
 
@@ -1857,21 +1960,46 @@ class Experiment:
 
     # ── Lookup helpers ─────────────────────────────────────────────────
 
-    def getSCNDict(self):
+    def getRegionDict(self, roi_base=None):
+        """Return {roi_base: {condition: {animal: [region_values]}}}.
+
+        If roi_base is given, return just {condition: {animal: [regions]}} for that ROI.
+        """
         try:
-            df = self.master_scn
-            return {
-                cond: {
-                    animal: df[df['AnimalName'] == animal]['SCN'].unique().tolist()
-                    for animal in self.summary[self.summary['Condition'] == cond]['AnimalName'].unique()
+            df = self.master_region
+            result = {}
+            # Group master_region by ROI base
+            if 'ROI' in df.columns:
+                roi_bases = df['ROI'].fillna('').astype(str).apply(extract_region_base).unique()
+            else:
+                roi_bases = ['SCN']
+
+            for rb in roi_bases:
+                if 'ROI' in df.columns:
+                    rb_df = df[df['ROI'].fillna('').astype(str).apply(extract_region_base) == rb]
+                else:
+                    rb_df = df
+                summary_df = self.summaries.get(rb, self.summary)
+                result[rb] = {
+                    cond: {
+                        animal: rb_df[rb_df['AnimalName'] == animal]['Region'].unique().tolist()
+                        for animal in summary_df[summary_df['Condition'] == cond]['AnimalName'].unique()
+                    }
+                    for cond in [c.name for c in self.condition_list]
                 }
-                for cond in [c.name for c in self.condition_list]
-            }
         except (KeyError, AttributeError):
-            return {
+            result = {'SCN': {
                 cond: self.summary[self.summary['Condition'] == cond]['AnimalName'].unique().tolist()
                 for cond in [c.name for c in self.condition_list]
-            }
+            }}
+
+        if roi_base is not None:
+            return result.get(roi_base, {})
+        return result
+
+    def getSCNDict(self):
+        """Backward compat alias — returns region dict for SCN ROIs."""
+        return self.getRegionDict(roi_base='SCN')
 
     def info(self):
         print(f"Experiment: {self.name}")

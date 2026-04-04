@@ -36,8 +36,8 @@ class Config:
     # ── Display labels ─────────────────────────────────────────────────
     AB = 'Aβ'
     CK = 'CK1δ'
-    TOTAL_LABEL = 'Total Particle Integrated Density / micron³'
-    COUNT_LABEL = 'Count / 1000000 microns³'
+    TOTAL_LABEL = 'Total Particle Integrated Density / 0.1mm³'
+    COUNT_LABEL = 'Count / 0.1mm³'
     CUBED = '³'
 
     # ── Hex color palette ──────────────────────────────────────────────

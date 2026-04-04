@@ -845,6 +845,214 @@ def _leave_one_out_mae_matrix_fast(
     return mae, (actual or []), (predicted or []), last_params, fold_mae_list
 
 
+# ---------------------------------------------------------------------------
+# Batched scoring — vectorised across all model subsets at a given level k
+# ---------------------------------------------------------------------------
+
+def _batch_press_mae(x1, y, idx_arr, chunk_size=5000):
+    """
+    Batch LOO MAE for many models using the PRESS identity.
+
+    Parameters
+    ----------
+    x1 : ndarray (n, p+1)
+        Full design matrix (intercept at column 0, all candidate predictors).
+    y : ndarray (n,)
+        Response vector.
+    idx_arr : ndarray (M, k+1), int
+        Column indices into *x1* for each model (col 0 = intercept).
+    chunk_size : int
+        Models per vectorised batch (controls peak memory).
+
+    Returns
+    -------
+    mae : ndarray (M,)
+        LOO MAE per model (``inf`` for degenerate models).
+    """
+    n = x1.shape[0]
+    M, k1 = idx_arr.shape
+    mae = np.full(M, np.inf)
+
+    G_full = x1.T @ x1          # (p+1, p+1)
+    c_full = x1.T @ y            # (p+1,)
+
+    for start in range(0, M, chunk_size):
+        end = min(start + chunk_size, M)
+        idx = idx_arr[start:end]                    # (C, k+1)
+        C = end - start
+
+        # Sub-Gram matrices via advanced indexing
+        G_sub = G_full[idx[:, :, None], idx[:, None, :]]   # (C, k+1, k+1)
+        c_sub = c_full[idx]                                  # (C, k+1)
+
+        # Batch invert — singular models handled below
+        try:
+            G_inv = np.linalg.inv(G_sub)
+        except np.linalg.LinAlgError:
+            # At least one singular model in the chunk — fall back per-model
+            G_inv = np.empty_like(G_sub)
+            ok = np.ones(C, dtype=bool)
+            for j in range(C):
+                try:
+                    G_inv[j] = np.linalg.inv(G_sub[j])
+                except np.linalg.LinAlgError:
+                    G_inv[j] = 0.0
+                    ok[j] = False
+            mae[start:end][~ok] = np.inf
+            if not ok.any():
+                continue
+            # Zero out bad entries so downstream math doesn't NaN-propagate;
+            # their mae slots are already inf and will be skipped.
+
+        beta = np.einsum("cij,cj->ci", G_inv, c_sub)       # (C, k+1)
+
+        # X_batch: (C, n, k+1)
+        X_batch = x1[:, idx.ravel()].reshape(n, C, k1).transpose(1, 0, 2)
+
+        yhat = np.einsum("cnj,cj->cn", X_batch, beta)       # (C, n)
+        resid = y[None, :] - yhat                            # (C, n)
+
+        # Hat-matrix diagonal
+        XG = np.einsum("cnj,cjk->cnk", X_batch, G_inv)      # (C, n, k+1)
+        h = np.einsum("cnk,cnk->cn", XG, X_batch)            # (C, n)
+        del XG
+
+        denom = 1.0 - h
+        bad_lev = np.abs(denom) <= 1e-10
+        denom[bad_lev] = 1.0                                  # avoid /0
+        press = resid / denom
+
+        mae_chunk = np.mean(np.abs(press), axis=1)
+        mae_chunk[bad_lev.any(axis=1)] = np.inf
+        mae_chunk[~np.isfinite(mae_chunk)] = np.inf
+        mae[start:end] = mae_chunk
+
+    return mae
+
+
+def _batch_group_loo_mae(x1, y, idx_arr, group_indices, chunk_size=5000):
+    """
+    Batch group-LOO MAE for many models.
+
+    Same signature contract as :func:`_batch_press_mae` but folds are
+    defined by *group_indices* (list of 1-d int arrays, one per group).
+    """
+    M, k1 = idx_arr.shape
+    G_num = len(group_indices)
+    mae = np.full(M, np.inf)
+
+    G_full = x1.T @ x1
+    c_full = x1.T @ y
+
+    G_groups = []
+    c_groups = []
+    for gidx in group_indices:
+        xg = x1[gidx]
+        yg = y[gidx]
+        G_groups.append(xg.T @ xg)
+        c_groups.append(xg.T @ yg)
+
+    for start in range(0, M, chunk_size):
+        end = min(start + chunk_size, M)
+        idx = idx_arr[start:end]
+        C = end - start
+
+        G_sub_full = G_full[idx[:, :, None], idx[:, None, :]]
+        c_sub_full = c_full[idx]
+
+        fold_mae = np.zeros((C, G_num))
+        valid = np.ones((C, G_num), dtype=bool)
+
+        for g, gidx_g in enumerate(group_indices):
+            G_g_sub = G_groups[g][idx[:, :, None], idx[:, None, :]]
+            c_g_sub = c_groups[g][idx]
+
+            A_train = G_sub_full - G_g_sub
+            b_train = c_sub_full - c_g_sub
+
+            try:
+                # b needs trailing dim so numpy uses batched vector solve
+                beta = np.linalg.solve(
+                    A_train, b_train[..., np.newaxis],
+                )[..., 0]
+            except np.linalg.LinAlgError:
+                beta = np.full((C, k1), np.nan)
+                for j in range(C):
+                    try:
+                        beta[j] = np.linalg.solve(A_train[j], b_train[j])
+                    except Exception:
+                        valid[j, g] = False
+
+            # Test-set predictions
+            xg_full = x1[gidx_g]          # (m, p+1)
+            yg = y[gidx_g]                 # (m,)
+            m = len(gidx_g)
+
+            X_test = xg_full[:, idx.ravel()].reshape(m, C, k1).transpose(1, 0, 2)
+            yhat = np.einsum("cmj,cj->cm", X_test, beta)
+
+            err = np.abs(yg[None, :] - yhat)
+            fold_mae[:, g] = np.mean(err, axis=1)
+            valid[~np.isfinite(yhat).all(axis=1), g] = False
+
+        mae_chunk = np.mean(fold_mae, axis=1)
+        mae_chunk[~valid.all(axis=1)] = np.inf
+        mae_chunk[~np.isfinite(mae_chunk)] = np.inf
+        mae[start:end] = mae_chunk
+
+    return mae
+
+
+def _batch_score(x1, y, idx_arr, group_indices, chunk_size=5000):
+    """Dispatch to PRESS (row-LOO) or group-LOO batch scorer."""
+    if group_indices is not None and len(group_indices) >= 2:
+        return _batch_group_loo_mae(x1, y, idx_arr, group_indices, chunk_size)
+    return _batch_press_mae(x1, y, idx_arr, chunk_size)
+
+
+# ---------------------------------------------------------------------------
+# Beam-search expansion
+# ---------------------------------------------------------------------------
+
+def _beam_expand(surviving, n_predictors, repeat_features, prefix_list):
+    """
+    Expand a beam of surviving subsets by adding one predictor.
+
+    Parameters
+    ----------
+    surviving : list[tuple[int, ...]]
+        Current beam (predictor *index* tuples, 0-based).
+    n_predictors : int
+        Total number of candidate predictors.
+    repeat_features : bool
+        Allow same-prefix predictors in one subset.
+    prefix_list : list[str]
+        ``prefix_list[i]`` = prefix for predictor *i*.
+
+    Returns
+    -------
+    candidates : list[tuple[int, ...]]
+        Unique expanded subsets (sorted internally, deduplicated).
+    """
+    seen = set()
+    out = []
+    for sub in surviving:
+        sub_set = set(sub)
+        for p in range(n_predictors):
+            if p in sub_set:
+                continue
+            new_sub = tuple(sorted(sub + (p,)))
+            if new_sub in seen:
+                continue
+            if not repeat_features:
+                prefixes = [prefix_list[i] for i in new_sub]
+                if len(prefixes) != len(set(prefixes)):
+                    continue
+            seen.add(new_sub)
+            out.append(new_sub)
+    return out
+
+
 def _iter_feature_combinations(
     predictors: list[str],
     max_features: int,
@@ -965,6 +1173,9 @@ def iterative_best_fit(
     cv_backend: str = "fast",
     plot_insights: bool = True,
     top_n_single_predictors: int = 3,
+    search_strategy: str = "exhaustive",
+    beam_width: int = 100,
+    batch_chunk_size: int = 5000,
 ):
     """
     Iterative leave-one-out CV search for the best linear formula fit.
@@ -987,6 +1198,13 @@ def iterative_best_fit(
     - plot_insights: plot feature-addition insight bar plots.
     - top_n_single_predictors: number of top single-feature models to report.
     - return_details: return rich result dict (instead of tuple)
+    - search_strategy: 'exhaustive' (test every combination) or 'beam'
+      (forward beam search — much faster for large predictor pools, may miss
+      the global optimum in rare cases).
+    - beam_width: how many top models to carry forward at each level when
+      search_strategy='beam'. Default 100.
+    - batch_chunk_size: number of models per vectorised batch in the ultra
+      backend.  Controls peak memory; default 5000 is fine for n < 1000.
     """
     if not hasattr(batch, "summary"):
         raise ValueError("First argument must be a batch-like object exposing .summary.")
@@ -1021,6 +1239,9 @@ def iterative_best_fit(
                 exclude=exclude,
                 cv_group_column=cv_group_column,
                 cv_backend=cv_backend,
+                search_strategy=search_strategy,
+                beam_width=beam_width,
+                batch_chunk_size=batch_chunk_size,
             )
         return queued_outputs
 
@@ -1117,16 +1338,21 @@ def iterative_best_fit(
     # Keep target on original scale.
     model_df[dependent_variable] = work_df[dependent_variable]
 
-    combinations = _iter_feature_combinations(
-        predictors,
-        max_features=max_features_i,
-        repeat_features=bool(repeat_features),
+    # Validate search strategy
+    search_strat = str(search_strategy).strip().lower()
+    if search_strat not in {"exhaustive", "beam"}:
+        raise ValueError("search_strategy must be 'exhaustive' or 'beam'.")
+
+    from math import comb as _comb_func
+    total_exhaustive_estimate = sum(
+        _comb_func(len(predictors), k) for k in range(1, max_features_i + 1)
     )
-    if len(combinations) == 0:
-        raise ValueError("No predictor combinations to test.")
 
     if verbose:
-        _log.status(f"Total combinations: {len(combinations)}")
+        _log.status(f"Total combinations (exhaustive): ~{total_exhaustive_estimate}")
+        _log.status(f"Search strategy: {search_strat}")
+        if search_strat == "beam":
+            _log.status(f"Beam width: {int(beam_width)}")
         _log.status(f"CV backend: {str(cv_backend).strip().lower()}")
         if cv_group_column is not None and cv_group_column in model_df.columns:
             n_groups = int(model_df[cv_group_column].dropna().astype(str).nunique())
@@ -1217,135 +1443,377 @@ def iterative_best_fit(
     if verbose and backend != requested_backend:
         _log.hint(f"[iterative_best_fit] Effective backend: {backend}")
 
-    from IF_analysis.utils import ProgressTracker
-    _tracker = ProgressTracker(
-        "iterative_best_fit", len(combinations), unit="model", enabled=verbose,
-    )
+    # Determine whether to use the vectorised batched path.
+    use_batched = backend == "ultra" and simple_backend_ready
+    if search_strat == "beam" and not use_batched:
+        if verbose:
+            _log.hint(
+                "[iterative_best_fit] Beam search requires the ultra backend; "
+                "falling back to exhaustive."
+            )
+        search_strat = "exhaustive"
 
-    for i, subset in enumerate(combinations, start=1):
-        _tracker.start_item(" + ".join(str(s) for s in subset))
-        if backend == "ultra":
-            idx = [simple_col_idx[str(c)] for c in subset]
-            x_sub = x_simple_all[:, idx]
-            mae, actual, predicted, params, fold_mae = _leave_one_out_mae_matrix_fast(
-                x_sub,
-                y_simple_all,
-                predictor_names=[str(c) for c in subset],
-                group_values=simple_group_values,
-                group_indices=simple_group_indices,
-                collect_predictions=False,
-            )
-        elif backend == "fast":
-            formula = _formula_for_subset(subset)
-            mae, actual, predicted, params, fold_mae = _leave_one_out_mae_fast(
-                model_df,
-                formula,
-                dependent_variable=dependent_variable,
-                group_column=cv_group_column,
-                collect_predictions=False,
-            )
-        else:
-            formula = _formula_for_subset(subset)
-            mae, actual, predicted, params, fold_mae = _leave_one_out_mae(
-                model_df,
-                formula,
-                dependent_variable=dependent_variable,
-                group_column=cv_group_column,
-                collect_predictions=False,
-            )
-        if np.isfinite(mae):
-            valid_models += 1
-            subset_key = _subset_key(subset)
-            score_val = float(mae)
-            formula = _formula_for_subset(subset)
-            model_score_by_subset[subset_key] = score_val
-            all_model_rows.append({
-                "subset": subset_key,
-                "subset_size": int(len(subset_key)),
-                "score": score_val,
-                "formula": formula,
-            })
-            if len(subset_key) == 1:
-                single_model_rows.append({
-                    "predictor": subset_key[0],
-                    "score": score_val,
+    # ------------------------------------------------------------------
+    # BATCHED PATH  (ultra backend — exhaustive or beam)
+    # ------------------------------------------------------------------
+    if use_batched:
+        n_obs = x_simple_all.shape[0]
+        n_pred = len(predictors)
+        x1_batched = np.column_stack(
+            [np.ones((n_obs, 1), dtype=float), x_simple_all],
+        )
+        prefix_list = [_safe_predictor_prefix(str(p)) for p in predictors]
+
+        batch_group_idx = simple_group_indices
+        if batch_group_idx is not None and len(batch_group_idx) < 2:
+            batch_group_idx = None
+
+        def _record_scores(subsets_idx, mae_arr):
+            """Post-process a batch of scores into the bookkeeping dicts."""
+            nonlocal valid_models, best_score, best_formula, best_subset
+            for j, sub_idx in enumerate(subsets_idx):
+                mae_val = float(mae_arr[j])
+                pred_names = tuple(str(predictors[i]) for i in sub_idx)
+                formula = _formula_for_subset(pred_names)
+                if not np.isfinite(mae_val):
+                    continue
+                valid_models += 1
+                model_score_by_subset[pred_names] = mae_val
+                all_model_rows.append({
+                    "subset": pred_names,
+                    "subset_size": len(pred_names),
+                    "score": mae_val,
                     "formula": formula,
                 })
-            elif len(subset_key) > 1:
-                for added_feature in subset_key:
-                    parent_subset = tuple([s for s in subset_key if s != added_feature])
-                    parent_score = model_score_by_subset.get(parent_subset, None)
-                    if parent_score is None or (not np.isfinite(parent_score)):
-                        continue
-                    delta = float(parent_score - score_val)
-                    pct_delta = np.nan
-                    if float(parent_score) != 0:
-                        pct_delta = float((delta / abs(float(parent_score))) * 100.0)
-                    stats = feature_add_stats.setdefault(
-                        str(added_feature),
-                        {
-                            "n_added": 0,
-                            "improved_count": 0,
-                            "reduced_count": 0,
-                            "unchanged_count": 0,
-                            "delta": [],
-                            "pct_delta": [],
-                        },
+                if len(pred_names) == 1:
+                    single_model_rows.append({
+                        "predictor": pred_names[0],
+                        "score": mae_val,
+                        "formula": formula,
+                    })
+                if mae_val < best_score:
+                    best_score = mae_val
+                    best_formula = formula
+                    best_subset = pred_names
+                    if verbose:
+                        _log.status(
+                            f"Best so far: {best_formula} | "
+                            f"LOO MAE: {best_score:.6g}"
+                        )
+
+        if search_strat == "beam":
+            # ---------- BEAM SEARCH ----------
+            beam_w = max(1, int(beam_width))
+            models_scored = 0
+
+            for k in range(1, max_features_i + 1):
+                if k == 1:
+                    candidates = [(i,) for i in range(n_pred)]
+                    if not repeat_features:
+                        seen_pfx = set()
+                        filtered = []
+                        for c in candidates:
+                            pfx = prefix_list[c[0]]
+                            if pfx not in seen_pfx:
+                                seen_pfx.add(pfx)
+                                filtered.append(c)
+                        candidates = filtered
+                else:
+                    prev_scored = [
+                        (s, sc)
+                        for s, sc in model_score_by_subset.items()
+                        if len(s) == k - 1 and np.isfinite(sc)
+                    ]
+                    prev_scored.sort(key=lambda x: x[1])
+                    prev_beam_names = [s for s, _ in prev_scored[:beam_w]]
+                    # Convert name-tuples back to index-tuples
+                    name_to_idx = {str(predictors[i]): i for i in range(n_pred)}
+                    prev_beam_idx = [
+                        tuple(name_to_idx[n] for n in names)
+                        for names in prev_beam_names
+                    ]
+                    candidates = _beam_expand(
+                        prev_beam_idx, n_pred, repeat_features, prefix_list,
                     )
-                    stats["n_added"] += 1
-                    stats["delta"].append(delta)
-                    if np.isfinite(pct_delta):
-                        stats["pct_delta"].append(pct_delta)
-                    if delta > 0:
-                        stats["improved_count"] += 1
-                    elif delta < 0:
-                        stats["reduced_count"] += 1
-                    else:
-                        stats["unchanged_count"] += 1
-            if mae < best_score:
-                if backend == "ultra":
-                    idx = [simple_col_idx[str(c)] for c in subset]
-                    x_sub = x_simple_all[:, idx]
-                    mae_full, actual, predicted, params, fold_mae = _leave_one_out_mae_matrix_fast(
+
+                if len(candidates) == 0:
+                    break
+
+                idx_arr = np.array(
+                    [[0] + [ci + 1 for ci in sub] for sub in candidates],
+                    dtype=int,
+                )
+                if verbose:
+                    _log.status(
+                        f"Beam level {k}: scoring {len(candidates)} candidates"
+                    )
+
+                mae_arr = _batch_score(
+                    x1_batched, y_simple_all, idx_arr,
+                    batch_group_idx, int(batch_chunk_size),
+                )
+                _record_scores(candidates, mae_arr)
+                models_scored += len(candidates)
+
+            _total_models_scored = models_scored
+            if verbose:
+                _log.status(
+                    f"Beam search complete: {models_scored} models scored "
+                    f"({valid_models} valid)"
+                )
+
+        else:
+            # ---------- EXHAUSTIVE BATCHED ----------
+            models_done = 0
+            for k in range(1, max_features_i + 1):
+                subsets_k = [
+                    combo
+                    for combo in itertools.combinations(range(n_pred), k)
+                    if repeat_features
+                    or len(set(prefix_list[i] for i in combo)) == k
+                ]
+                if len(subsets_k) == 0:
+                    continue
+
+                idx_arr = np.array(
+                    [[0] + [ci + 1 for ci in sub] for sub in subsets_k],
+                    dtype=int,
+                )
+                if verbose:
+                    _log.status(
+                        f"Level {k}: scoring {len(subsets_k)} "
+                        f"{k}-feature models (batched)"
+                    )
+
+                mae_arr = _batch_score(
+                    x1_batched, y_simple_all, idx_arr,
+                    batch_group_idx, int(batch_chunk_size),
+                )
+                _record_scores(subsets_k, mae_arr)
+                models_done += len(subsets_k)
+
+            _total_models_scored = models_done
+            if verbose:
+                _log.status(
+                    f"Batched search complete: {models_done} models scored "
+                    f"({valid_models} valid)"
+                )
+
+        # Build feature_add_stats from all recorded scores.
+        for subset_key, score_val in model_score_by_subset.items():
+            if len(subset_key) <= 1:
+                continue
+            for added_feature in subset_key:
+                parent_subset = tuple(s for s in subset_key if s != added_feature)
+                parent_score = model_score_by_subset.get(parent_subset, None)
+                if parent_score is None or not np.isfinite(parent_score):
+                    continue
+                delta = float(parent_score - score_val)
+                pct_delta = np.nan
+                if float(parent_score) != 0:
+                    pct_delta = float((delta / abs(float(parent_score))) * 100.0)
+                stats = feature_add_stats.setdefault(
+                    str(added_feature),
+                    {
+                        "n_added": 0, "improved_count": 0,
+                        "reduced_count": 0, "unchanged_count": 0,
+                        "delta": [], "pct_delta": [],
+                    },
+                )
+                stats["n_added"] += 1
+                stats["delta"].append(delta)
+                if np.isfinite(pct_delta):
+                    stats["pct_delta"].append(pct_delta)
+                if delta > 0:
+                    stats["improved_count"] += 1
+                elif delta < 0:
+                    stats["reduced_count"] += 1
+                else:
+                    stats["unchanged_count"] += 1
+
+        # Collect predictions for the winning model only (single CV run).
+        if best_subset is not None:
+            best_col_idx = [simple_col_idx[str(c)] for c in best_subset]
+            x_sub = x_simple_all[:, best_col_idx]
+            _, best_actual, best_predicted, best_cv_params, best_fold_mae = (
+                _leave_one_out_mae_matrix_fast(
+                    x_sub,
+                    y_simple_all,
+                    predictor_names=[str(c) for c in best_subset],
+                    group_values=simple_group_values,
+                    group_indices=simple_group_indices,
+                    collect_predictions=True,
+                )
+            )
+
+    # ------------------------------------------------------------------
+    # SEQUENTIAL PATH  (fast / statsmodels fallback)
+    # ------------------------------------------------------------------
+    else:
+        combinations = _iter_feature_combinations(
+            predictors,
+            max_features=max_features_i,
+            repeat_features=bool(repeat_features),
+        )
+        if len(combinations) == 0:
+            raise ValueError("No predictor combinations to test.")
+
+        from IF_analysis.utils import ProgressTracker
+        _tracker = ProgressTracker(
+            "iterative_best_fit", len(combinations), unit="model",
+            enabled=verbose,
+        )
+
+        for i, subset in enumerate(combinations, start=1):
+            _tracker.start_item(" + ".join(str(s) for s in subset))
+            if backend == "ultra":
+                idx = [simple_col_idx[str(c)] for c in subset]
+                x_sub = x_simple_all[:, idx]
+                mae, actual, predicted, params, fold_mae = (
+                    _leave_one_out_mae_matrix_fast(
                         x_sub,
                         y_simple_all,
                         predictor_names=[str(c) for c in subset],
                         group_values=simple_group_values,
                         group_indices=simple_group_indices,
-                        collect_predictions=True,
+                        collect_predictions=False,
                     )
-                elif backend == "fast":
-                    mae_full, actual, predicted, params, fold_mae = _leave_one_out_mae_fast(
+                )
+            elif backend == "fast":
+                formula = _formula_for_subset(subset)
+                mae, actual, predicted, params, fold_mae = (
+                    _leave_one_out_mae_fast(
                         model_df,
                         formula,
                         dependent_variable=dependent_variable,
                         group_column=cv_group_column,
-                        collect_predictions=True,
+                        collect_predictions=False,
                     )
-                else:
-                    mae_full, actual, predicted, params, fold_mae = _leave_one_out_mae(
-                        model_df,
-                        formula,
-                        dependent_variable=dependent_variable,
-                        group_column=cv_group_column,
-                        collect_predictions=True,
-                    )
-                if not np.isfinite(mae_full):
-                    continue
-                best_score = float(mae_full)
-                best_formula = formula
-                best_subset = subset
-                best_actual = actual
-                best_predicted = predicted
-                best_cv_params = params
-                best_fold_mae = fold_mae
-                if verbose:
-                    _log.status(f"Best so far: {best_formula} | LOO MAE: {best_score:.6g}")
+                )
+            else:
+                formula = _formula_for_subset(subset)
+                mae, actual, predicted, params, fold_mae = _leave_one_out_mae(
+                    model_df,
+                    formula,
+                    dependent_variable=dependent_variable,
+                    group_column=cv_group_column,
+                    collect_predictions=False,
+                )
+            if np.isfinite(mae):
+                valid_models += 1
+                subset_key = _subset_key(subset)
+                score_val = float(mae)
+                formula = _formula_for_subset(subset)
+                model_score_by_subset[subset_key] = score_val
+                all_model_rows.append({
+                    "subset": subset_key,
+                    "subset_size": int(len(subset_key)),
+                    "score": score_val,
+                    "formula": formula,
+                })
+                if len(subset_key) == 1:
+                    single_model_rows.append({
+                        "predictor": subset_key[0],
+                        "score": score_val,
+                        "formula": formula,
+                    })
+                elif len(subset_key) > 1:
+                    for added_feature in subset_key:
+                        parent_subset = tuple(
+                            [s for s in subset_key if s != added_feature]
+                        )
+                        parent_score = model_score_by_subset.get(
+                            parent_subset, None,
+                        )
+                        if parent_score is None or (
+                            not np.isfinite(parent_score)
+                        ):
+                            continue
+                        delta = float(parent_score - score_val)
+                        pct_delta = np.nan
+                        if float(parent_score) != 0:
+                            pct_delta = float(
+                                (delta / abs(float(parent_score))) * 100.0
+                            )
+                        stats = feature_add_stats.setdefault(
+                            str(added_feature),
+                            {
+                                "n_added": 0,
+                                "improved_count": 0,
+                                "reduced_count": 0,
+                                "unchanged_count": 0,
+                                "delta": [],
+                                "pct_delta": [],
+                            },
+                        )
+                        stats["n_added"] += 1
+                        stats["delta"].append(delta)
+                        if np.isfinite(pct_delta):
+                            stats["pct_delta"].append(pct_delta)
+                        if delta > 0:
+                            stats["improved_count"] += 1
+                        elif delta < 0:
+                            stats["reduced_count"] += 1
+                        else:
+                            stats["unchanged_count"] += 1
+                if mae < best_score:
+                    if backend == "ultra":
+                        idx = [simple_col_idx[str(c)] for c in subset]
+                        x_sub = x_simple_all[:, idx]
+                        mae_full, actual, predicted, params, fold_mae = (
+                            _leave_one_out_mae_matrix_fast(
+                                x_sub,
+                                y_simple_all,
+                                predictor_names=[str(c) for c in subset],
+                                group_values=simple_group_values,
+                                group_indices=simple_group_indices,
+                                collect_predictions=True,
+                            )
+                        )
+                    elif backend == "fast":
+                        mae_full, actual, predicted, params, fold_mae = (
+                            _leave_one_out_mae_fast(
+                                model_df,
+                                formula,
+                                dependent_variable=dependent_variable,
+                                group_column=cv_group_column,
+                                collect_predictions=True,
+                            )
+                        )
+                    else:
+                        mae_full, actual, predicted, params, fold_mae = (
+                            _leave_one_out_mae(
+                                model_df,
+                                formula,
+                                dependent_variable=dependent_variable,
+                                group_column=cv_group_column,
+                                collect_predictions=True,
+                            )
+                        )
+                    if not np.isfinite(mae_full):
+                        continue
+                    best_score = float(mae_full)
+                    best_formula = formula
+                    best_subset = subset
+                    best_actual = actual
+                    best_predicted = predicted
+                    best_cv_params = params
+                    best_fold_mae = fold_mae
+                    if verbose:
+                        _log.status(
+                            f"Best so far: {best_formula} | "
+                            f"LOO MAE: {best_score:.6g}"
+                        )
 
-        _tracker.finish_item(
-            detail=f"Best: {best_formula or 'none'} | MAE: {best_score:.6g}" if best_formula else None,
-        )
-    _tracker.close()
+            _tracker.finish_item(
+                detail=(
+                    f"Best: {best_formula or 'none'} | MAE: {best_score:.6g}"
+                    if best_formula
+                    else None
+                ),
+            )
+        _tracker.close()
+        _total_models_scored = len(combinations)
 
     if best_formula is None or best_subset is None or len(best_actual) == 0:
         raise ValueError(
@@ -1382,7 +1850,7 @@ def iterative_best_fit(
         _log.status(f"F-statistic: {best_fit.fvalue}")
         _log.status(f"F-statistic p-value: {best_fit.f_pvalue}")
         _log.status(f"Model Summary:\n{best_fit.summary()}")
-        _log.status(f"Valid models tested: {valid_models}/{len(combinations)}")
+        _log.status(f"Valid models tested: {valid_models}/{_total_models_scored}")
         if len(top_single_df) > 0:
             _log.status(f"Top {top_n_single} single predictors:")
             for _, row in top_single_df.iterrows():
@@ -1647,8 +2115,9 @@ def iterative_best_fit(
         "cv_group_column": cv_group_column,
         "cv_backend": backend,
         "cv_backend_requested": requested_backend,
-        "combinations_tested": len(combinations),
+        "combinations_tested": _total_models_scored,
         "valid_models_tested": valid_models,
+        "search_strategy": search_strat if use_batched else "exhaustive",
         "specificity": specificity,
         "exclude": exclude_filter,
         "removed_rows_sentinel": int(removed_sentinel_rows),

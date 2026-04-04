@@ -29,7 +29,7 @@ Usage:
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional, Callable, Literal
 import numpy as np
 import pandas as pd
@@ -59,8 +59,8 @@ class Context:
     animal: Optional[str] = None
     animal_index: int = 0
 
-    scn: Optional[str] = None
-    scn_index: int = 0
+    region: Optional[str] = None
+    region_index: int = 0
 
     column: Optional[str] = None
     column_index: int = 0
@@ -69,10 +69,15 @@ class Context:
     factor_value: Optional[str] = None
     factor_index: int = 0
 
+    # ── ROI base for multi-region support ──────────────────────
+    roi_base: Optional[str] = None
+
     # ── Lazy data accessors ────────────────────────────────────
 
     @property
     def summary(self) -> pd.DataFrame:
+        if self.roi_base is not None and hasattr(self.experiment, 'summaries'):
+            return self.experiment.summaries.get(self.roi_base, self.experiment.summary)
         return self.experiment.summary
 
     @property
@@ -105,8 +110,13 @@ class Context:
         return self.condition_obj.label if self.condition_obj else (self.condition or '')
 
     @property
+    def region_dict(self):
+        return self.experiment.getRegionDict(roi_base=self.roi_base)
+
+    # Backward compat aliases
+    @property
     def scn_dict(self):
-        return self.experiment.getSCNDict()
+        return self.region_dict
 
     @property
     def num_conditions(self):
@@ -116,13 +126,18 @@ class Context:
     def num_animals(self):
         if self.condition is None:
             return 0
-        return len(self.scn_dict.get(self.condition, {}))
+        return len(self.region_dict.get(self.condition, {}))
 
     @property
-    def num_scns(self):
+    def num_regions(self):
         if self.condition is None or self.animal is None:
             return 0
-        return len(self.scn_dict.get(self.condition, {}).get(self.animal, []))
+        return len(self.region_dict.get(self.condition, {}).get(self.animal, []))
+
+    # Backward compat alias
+    @property
+    def num_scns(self):
+        return self.num_regions
 
     def marker_df(self, marker_name) -> pd.DataFrame:
         """Get marker DataFrame filtered to the current context level."""
@@ -131,8 +146,8 @@ class Context:
             df = df[df['Condition'] == self.condition]
         if self.animal is not None:
             df = df[df['AnimalName'] == self.animal]
-        if self.scn is not None:
-            df = df[df['SCN'] == self.scn]
+        if self.region is not None:
+            df = df[df['Region'] == self.region]
         return df
 
     def col_values(self, by='condition') -> pd.Series:
@@ -155,6 +170,24 @@ class Context:
         }[by]
         return source.groupby('AnimalName')[self.column].mean().dropna()
 
+    # ── Backward compat ───────────────────────────────────────
+
+    @property
+    def scn(self):
+        return self.region
+
+    @scn.setter
+    def scn(self, value):
+        self.region = value
+
+    @property
+    def scn_index(self):
+        return self.region_index
+
+    @scn_index.setter
+    def scn_index(self, value):
+        self.region_index = value
+
     # ── Child context creation ─────────────────────────────────
 
     def _child(self, **overrides) -> 'Context':
@@ -166,13 +199,14 @@ class Context:
             'condition_index': self.condition_index,
             'animal': self.animal,
             'animal_index': self.animal_index,
-            'scn': self.scn,
-            'scn_index': self.scn_index,
+            'region': self.region,
+            'region_index': self.region_index,
             'column': self.column,
             'column_index': self.column_index,
             'factor': self.factor,
             'factor_value': self.factor_value,
             'factor_index': self.factor_index,
+            'roi_base': self.roi_base,
         }
         fields.update(overrides)
         return Context(**fields)
@@ -191,7 +225,7 @@ class Context:
     def iter_animals(self):
         """Yield a child Context for each animal (within current condition, or all)."""
         if self.condition is not None:
-            animals = self.scn_dict.get(self.condition, {})
+            animals = self.region_dict.get(self.condition, {})
             for i, animal in enumerate(animals):
                 yield self._child(animal=animal, animal_index=i)
         else:
@@ -201,13 +235,16 @@ class Context:
                     yield a_ctx._child(animal_index=idx)
                     idx += 1
 
-    def iter_scns(self):
-        """Yield a child Context for each SCN in the current animal."""
+    def iter_regions(self):
+        """Yield a child Context for each region (section) in the current animal."""
         if self.animal is None:
-            raise ValueError("Must be at animal level to iterate SCNs")
-        scns = self.scn_dict.get(self.condition, {}).get(self.animal, [])
-        for i, scn in enumerate(scns):
-            yield self._child(scn=scn, scn_index=i)
+            raise ValueError("Must be at animal level to iterate regions")
+        regions = self.region_dict.get(self.condition, {}).get(self.animal, [])
+        for i, rgn in enumerate(regions):
+            yield self._child(region=rgn, region_index=i)
+
+    # Backward compat alias
+    iter_scns = iter_regions
 
     def iter_factors(self, factor_name):
         """Yield a child Context for each unique value of a factor."""
@@ -238,13 +275,14 @@ class Context:
 # LEVEL DISPATCH
 # ═══════════════════════════════════════════════════════════════
 
-Level = Literal['columns', 'conditions', 'animals', 'scns', 'factors']
+Level = Literal['columns', 'conditions', 'animals', 'regions', 'scns', 'factors']
 
 _ITER_MAP = {
     'columns':    lambda ctx, kw: ctx.iter_columns(kw['columns']),
     'conditions': lambda ctx, kw: ctx.iter_conditions(),
     'animals':    lambda ctx, kw: ctx.iter_animals(),
-    'scns':       lambda ctx, kw: ctx.iter_scns(),
+    'regions':    lambda ctx, kw: ctx.iter_regions(),
+    'scns':       lambda ctx, kw: ctx.iter_regions(),  # backward compat alias
     'factors':    lambda ctx, kw: ctx.iter_factors(kw['factor']),
 }
 
@@ -255,6 +293,7 @@ _ITER_MAP = {
 
 def run(experiment, over, action,
         columns=None, factor=None, specificity=None,
+        roi_base=None,
         setup=None, teardown=None,
         **action_kwargs) -> dict:
     """
@@ -275,53 +314,39 @@ def run(experiment, over, action,
         Required when 'factors' is in `over`.
     specificity : tuple (column_name, value1, value2, ...) or None
         Filters summary before iteration.
+    roi_base : str or None
+        Which ROI type to use (e.g. 'SCN', 'OC'). Determines which
+        summary and region dict the Context uses.
     setup : callable(ctx, state) -> None
         Called at the start of each outermost iteration.
-        Use to create figures, axes, etc. and store in state.
     teardown : callable(ctx, state, results) -> None
         Called at the end of each outermost iteration.
-        Use to save figures, print summaries, etc.
     **action_kwargs
         Passed through to the action function.
 
     Returns
     -------
     dict of {name: [values]}
-
-    Examples
-    --------
-    # Single level
-    run(batch, over='conditions', action=my_fn)
-
-    # Nested: outer=columns, inner=conditions
-    run(batch, over=['columns', 'conditions'], action=my_fn,
-        columns=filtered_cols)
-
-    # With figure setup/teardown
-    def make_fig(ctx, state):
-        fig, ax = plt.subplots()
-        state['fig'] = fig
-        state['ax'] = ax
-
-    def save_fig_td(ctx, state, results):
-        state['fig'].savefig(f'{ctx.column}.svg')
-        plt.close(state['fig'])
-
-    run(batch, over=['columns', 'conditions'], action=bar_action,
-        columns=cols, setup=make_fig, teardown=save_fig_td)
     """
     if isinstance(over, str):
         over = [over]
 
     # Apply specificity filter
-    _orig_summary = None
+    _orig_summaries = None
     if specificity is not None:
-        _orig_summary = experiment.summary
-        filtered = filter_df_by_specificity(experiment.summary, specificity)
-        if len(filtered) < len(experiment.summary):
-            experiment.summary = filtered.copy()
+        if hasattr(experiment, 'summaries') and experiment.summaries:
+            _orig_summaries = {k: v.copy() for k, v in experiment.summaries.items()}
+            for k, v in experiment.summaries.items():
+                filtered = filter_df_by_specificity(v, specificity)
+                if len(filtered) < len(v):
+                    experiment.summaries[k] = filtered.copy()
+        else:
+            _orig_summaries = {'_legacy': experiment.summary}
+            filtered = filter_df_by_specificity(experiment.summary, specificity)
+            if len(filtered) < len(experiment.summary):
+                experiment.summary = filtered.copy()
 
-    root = Context(experiment=experiment)
+    root = Context(experiment=experiment, roi_base=roi_base)
     iter_kwargs = {'columns': columns, 'factor': factor}
     all_results = {}
     state = {}
@@ -354,8 +379,11 @@ def run(experiment, over, action,
         _recurse(root, over)
     finally:
         # Always restore summary, even if plotting/stats raises.
-        if _orig_summary is not None:
-            experiment.summary = _orig_summary
+        if _orig_summaries is not None:
+            if '_legacy' in _orig_summaries:
+                experiment.summary = _orig_summaries['_legacy']
+            else:
+                experiment.summaries = _orig_summaries
 
     return all_results
 

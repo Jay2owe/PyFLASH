@@ -33,7 +33,6 @@ from matplotlib.ticker import LinearLocator
 
 from IF_analysis.iteration import Context, run
 from IF_analysis.config import Config
-from IF_analysis._logging import logger as _log
 from IF_analysis.experiment import _source_panel_order_rows
 from IF_analysis.image_io import read_image_array, resolve_image_worker_count, get_image_shape
 from IF_analysis.markers import stainColors
@@ -42,7 +41,6 @@ from IF_analysis.stats import (
     test_normality,
     runITTest,
     mwu_multiple_comparisons,
-    stats_cache_key,
 )
 from IF_analysis.export import convert_name, convert_raw_name, convert_behavior_name
 from IF_analysis.utils import (
@@ -52,7 +50,7 @@ from IF_analysis.utils import (
     flatten_specificity_values, is_specificity_queue,
     iter_specificities, filter_df_by_specificity,
     specificity_path_parts, resolve_column_key,
-    build_subfolder, resolve_roi_bases,
+    build_subfolder,
 )
 
 
@@ -171,8 +169,8 @@ def get_display_name(name, minimal=False, compact_per=False):
             label = label.replace('Count', 'Count / ROI' if not minimal else 'N')
     if 'ROI %Area' in label:
         label = label.replace('ROI %Area', '%Area')
-    if is_per_mm3 and (not minimal) and '/ 0.1mm³' not in label:
-        label = f"{label} / 0.1mm³"
+    if is_per_mm3 and (not minimal) and '/ mm3' not in label:
+        label = f"{label} / mm3"
     label = re.sub(r"\s*Mean\s*$", "", label).strip()
     if compact_per:
         label = re.sub(r"\s+per\s+", " / ", label)
@@ -359,19 +357,15 @@ _iter_specificities = iter_specificities
 _flatten_specificity_values = flatten_specificity_values
 _filter_df_by_specificity = filter_df_by_specificity
 _specificity_path_parts = specificity_path_parts
-_resolve_roi_bases = resolve_roi_bases
 
 
-def _filtered_summary_for_specificity(experiment, specificity, roi_base=None):
-    if roi_base is not None and hasattr(experiment, 'summaries') and roi_base in experiment.summaries:
-        summary = experiment.summaries[roi_base]
-    else:
-        summary = experiment.summary
+def _filtered_summary_for_specificity(experiment, specificity):
+    summary = experiment.summary
     return filter_df_by_specificity(summary, specificity)
 
 
-def _count_level_processes(experiment, level, factor=None, specificity=None, roi_base=None):
-    summary = _filtered_summary_for_specificity(experiment, specificity, roi_base=roi_base)
+def _count_level_processes(experiment, level, factor=None, specificity=None):
+    summary = _filtered_summary_for_specificity(experiment, specificity)
     if level == 'conditions':
         return len(experiment.condition_list)
     if level == 'factors':
@@ -380,8 +374,8 @@ def _count_level_processes(experiment, level, factor=None, specificity=None, roi
         return int(summary[factor].dropna().nunique())
     if level == 'animals':
         return int(summary['AnimalName'].dropna().nunique()) if 'AnimalName' in summary.columns else 0
-    if level in ('scns', 'regions'):
-        return int(summary['Region'].dropna().nunique()) if 'Region' in summary.columns else 0
+    if level == 'scns':
+        return int(summary['SCN'].dropna().nunique()) if 'SCN' in summary.columns else 0
     if level == 'columns':
         return int(summary.shape[1])
     return 0
@@ -2698,7 +2692,7 @@ def _draw_image_panel_roi_outline(ax, source, row, *, black_background=False):
 
     exp_obj = _location_source_experiment(source, image_row=ref_row)
     animal_name = str(ref_row.get("AnimalName", "")).strip()
-    scn_name = str(ref_row.get("Region", "")).strip()
+    scn_name = str(ref_row.get("SCN", "")).strip()
     image_roi_name = str(ref_row.get("ImageROI", "")).strip() or str(ref_row.get("ROI", "")).strip()
 
     roi_row = _location_draw_roi_row(
@@ -3500,14 +3494,14 @@ def _filter_marker_df_for_context(ctx: Context, df: pd.DataFrame) -> pd.DataFram
         if "AnimalName" in out.columns:
             target = normalize_animal_name(ctx.animal)
             out = out[_norm_animal(out["AnimalName"]) == target]
-        elif "Region" in out.columns and "Region" in ctx.animal_df.columns:
-            allowed_regions = set(_norm(ctx.animal_df["Region"]).tolist())
-            out = out[_norm(out["Region"]).isin(allowed_regions)]
+        elif "SCN" in out.columns and "SCN" in ctx.animal_df.columns:
+            allowed_scns = set(_norm(ctx.animal_df["SCN"]).tolist())
+            out = out[_norm(out["SCN"]).isin(allowed_scns)]
 
-    # Region context
-    if ctx.region is not None and "Region" in out.columns:
-        target = str(ctx.region).strip().casefold()
-        out = out[_norm(out["Region"]) == target]
+    # SCN context
+    if ctx.scn is not None and "SCN" in out.columns:
+        target = str(ctx.scn).strip().casefold()
+        out = out[_norm(out["SCN"]) == target]
 
     return out
 
@@ -5804,8 +5798,8 @@ def _enrich_df_grouping_columns(df: pd.DataFrame, exp_obj, requested_by: str | N
         if not need_requested:
             return out
 
-    # If Region lives in index, expose it as a column for merge keys.
-    if "Region" not in out.columns and str(out.index.name) == "Region":
+    # If SCN lives in index, expose it as a column for merge keys.
+    if "SCN" not in out.columns and str(out.index.name) == "SCN":
         out = out.reset_index()
 
     summary = getattr(exp_obj, "summary", None)
@@ -5815,16 +5809,16 @@ def _enrich_df_grouping_columns(df: pd.DataFrame, exp_obj, requested_by: str | N
         if need_requested and requested_by in summary_cols and requested_by not in map_targets:
             map_targets.append(requested_by)
 
-        if "Region" in out.columns and "Region" in summary_cols:
-            region_cols = ["Region"] + [c for c in ["AnimalName"] + map_targets if c in summary_cols]
-            region_map = summary[region_cols].dropna(subset=["Region"]).drop_duplicates(subset=["Region"], keep="first")
-            out = out.merge(region_map, on="Region", how="left", suffixes=("", "__region"))
-            for col in [c for c in ["AnimalName"] + map_targets if f"{c}__region" in out.columns]:
+        if "SCN" in out.columns and "SCN" in summary_cols:
+            scn_cols = ["SCN"] + [c for c in ["AnimalName"] + map_targets if c in summary_cols]
+            scn_map = summary[scn_cols].dropna(subset=["SCN"]).drop_duplicates(subset=["SCN"], keep="first")
+            out = out.merge(scn_map, on="SCN", how="left", suffixes=("", "__scn"))
+            for col in [c for c in ["AnimalName"] + map_targets if f"{c}__scn" in out.columns]:
                 if col in out.columns:
-                    out[col] = out[col].where(out[col].notna(), out[f"{col}__region"])
+                    out[col] = out[col].where(out[col].notna(), out[f"{col}__scn"])
                 else:
-                    out[col] = out[f"{col}__region"]
-                out.drop(columns=[f"{col}__region"], inplace=True)
+                    out[col] = out[f"{col}__scn"]
+                out.drop(columns=[f"{col}__scn"], inplace=True)
 
         if "AnimalName" in out.columns and "AnimalName" in summary_cols:
             an_cols = ["AnimalName"] + [c for c in map_targets if c in summary_cols]
@@ -6563,7 +6557,7 @@ def _location_contrast_edgecolor(color, black_background=False):
 
 
 def _filter_image_df_for_context(ctx: Context, df: pd.DataFrame) -> pd.DataFrame:
-    """Apply condition/factor/animal/region filtering to an imported image table."""
+    """Apply condition/factor/animal/SCN filtering to an imported image table."""
     out = df
 
     def _norm(series: pd.Series) -> pd.Series:
@@ -6588,8 +6582,8 @@ def _filter_image_df_for_context(ctx: Context, df: pd.DataFrame) -> pd.DataFrame
         target = normalize_animal_name(ctx.animal)
         out = out[_norm_animal(out["AnimalName"]) == target]
 
-    if ctx.region is not None:
-        target = str(ctx.region).strip().casefold()
+    if ctx.scn is not None:
+        target = str(ctx.scn).strip().casefold()
         if "ROI" in out.columns:
             direct = out[_norm(out["ROI"]) == target]
             if len(direct) > 0:
@@ -6603,12 +6597,12 @@ def _filter_image_df_for_context(ctx: Context, df: pd.DataFrame) -> pd.DataFrame
 
 
 def _location_panel_scn(ctx: Context, df: pd.DataFrame, image_row=None) -> str | None:
-    if getattr(ctx, "region", None) not in (None, ""):
-        return str(ctx.region).strip()
-    if isinstance(df, pd.DataFrame) and "Region" in df.columns:
+    if getattr(ctx, "scn", None) not in (None, ""):
+        return str(ctx.scn).strip()
+    if isinstance(df, pd.DataFrame) and "SCN" in df.columns:
         scns = [
             str(value).strip()
-            for value in df["Region"].dropna().astype(str).tolist()
+            for value in df["SCN"].dropna().astype(str).tolist()
             if str(value).strip() != ""
         ]
         scns = list(dict.fromkeys(scns))
@@ -6796,8 +6790,8 @@ def _location_roi_bounds(exp_obj, scn_name=None, animal_name=None, image_roi_nam
         narrowed = roi_df[mask]
         if not narrowed.empty:
             roi_df = narrowed
-    if scn_name not in (None, "") and "Region" in roi_df.columns:
-        mask = roi_df["Region"].astype(str).str.strip().str.casefold() == str(scn_name).strip().casefold()
+    if scn_name not in (None, "") and "SCN" in roi_df.columns:
+        mask = roi_df["SCN"].astype(str).str.strip().str.casefold() == str(scn_name).strip().casefold()
         narrowed = roi_df[mask]
         if not narrowed.empty:
             roi_df = narrowed
@@ -6870,8 +6864,8 @@ def _location_draw_roi_row(exp_obj, scn_name=None, animal_name=None, image_roi_n
         if not narrowed.empty:
             roi_df = narrowed
 
-    if scn_name not in (None, "") and "Region" in roi_df.columns:
-        mask = roi_df["Region"].astype(str).str.strip().str.casefold() == str(scn_name).strip().casefold()
+    if scn_name not in (None, "") and "SCN" in roi_df.columns:
+        mask = roi_df["SCN"].astype(str).str.strip().str.casefold() == str(scn_name).strip().casefold()
         narrowed = roi_df[mask]
         if not narrowed.empty:
             roi_df = narrowed
@@ -6891,8 +6885,8 @@ def _location_roi_dimensions(exp_obj, scn_name=None, animal_name=None):
         narrowed = roi_props[mask]
         if not narrowed.empty:
             roi_props = narrowed
-    if scn_name not in (None, "") and "Region" in roi_props.columns:
-        mask = roi_props["Region"].astype(str).str.strip().str.casefold() == str(scn_name).strip().casefold()
+    if scn_name not in (None, "") and "SCN" in roi_props.columns:
+        mask = roi_props["SCN"].astype(str).str.strip().str.casefold() == str(scn_name).strip().casefold()
         narrowed = roi_props[mask]
         if not narrowed.empty:
             roi_props = narrowed
@@ -7420,13 +7414,13 @@ def _location_context_name(ctx: Context, level, display=False):
         return str(ctx.condition or "all")
     if level_s == "animals":
         return str(ctx.animal or ctx.condition or "all")
-    if level_s in ("scns", "regions"):
-        return str(ctx.region or ctx.animal or ctx.condition or "all")
+    if level_s == "scns":
+        return str(ctx.scn or ctx.animal or ctx.condition or "all")
     if level_s == "factors":
         return str(ctx.factor_value or ctx.condition or "all")
     if level_s == "columns":
         return str(ctx.column or "all")
-    for value in (ctx.factor_value, ctx.region, ctx.animal, ctx.condition):
+    for value in (ctx.factor_value, ctx.scn, ctx.animal, ctx.condition):
         if value not in (None, ""):
             return str(value)
     return "all"
@@ -7437,8 +7431,8 @@ def _location_join_rows(ctx: Context, join_by):
     join_s = str(join_by).strip().lower()
     if join_s == "animals":
         return max(1, int(ctx.num_animals or 0))
-    if join_s in ("scns", "regions"):
-        return max(1, int(ctx.num_regions or 0))
+    if join_s == "scns":
+        return max(1, int(ctx.num_scns or 0))
     return 1
 
 
@@ -7447,8 +7441,8 @@ def _location_join_index(ctx: Context, join_by):
     join_s = str(join_by).strip().lower()
     if join_s == "animals":
         return int(ctx.animal_index)
-    if join_s in ("scns", "regions"):
-        return int(ctx.region_index)
+    if join_s == "scns":
+        return int(ctx.scn_index)
     return 0
 
 
@@ -7928,13 +7922,13 @@ def _save_plotly_figure(fig, save_path, image_name, subfolder=None, verbose=True
     try:
         fig.write_image(svg_path, format="svg")
         if verbose:
-            _log.confirm(f"Figure saved to {svg_path}")
+            print(f"Figure saved to {svg_path}")
         return svg_path
     except Exception:
         html_path = os.path.join(target_dir, f"{image_name}.html")
         fig.write_html(html_path, include_plotlyjs="cdn")
         if verbose:
-            _log.confirm(f"Figure saved to {html_path} (HTML fallback; install kaleido for SVG export)")
+            print(f"Figure saved to {html_path} (HTML fallback; install kaleido for SVG export)")
         return html_path
 
 
@@ -8308,53 +8302,6 @@ def regression_action(ctx: Context, state: dict,
     }
 
 
-def scatter_3d_action(ctx: Context, state: dict,
-                      x=None, y=None, z=None, **kwargs):
-    """Plot a 3D scatter for one condition/factor."""
-    by = 'factor' if ctx.factor_value is not None else 'condition'
-    idx = ctx.factor_index if by == 'factor' else ctx.condition_index
-    combine = bool(kwargs.get('combine', False))
-    ax_idx = 0 if combine else idx
-    ax = _resolve_action_axis(state, ax_idx)
-    if ax is None:
-        raise IndexError(f"No valid axis available for scatter_3d_action ({by} index={idx}).")
-    group_name, group_color = _resolve_group_label_color(ctx)
-
-    source_df = ctx.factor_df if by == 'factor' else ctx.condition_df
-    df = source_df[[x, y, z]].copy()
-    x_range = kwargs.get('x_range')
-    y_range = kwargs.get('y_range')
-    z_range = kwargs.get('z_range')
-    for col_name in (x, y, z):
-        df[col_name] = _to_numeric_excluding_not_included(df[col_name])
-    df = df.dropna(subset=[x, y, z])
-
-    if df.empty:
-        return {'scatter': None, 'group': group_name}
-
-    point_size = kwargs.get('point_size', 40)
-    alpha = kwargs.get('alpha', 0.7)
-    ax.scatter(
-        df[x], df[y], df[z],
-        c=group_color, s=point_size, alpha=alpha,
-        label=group_name,
-        edgecolors='white', linewidths=0.3,
-    )
-
-    if x_range is not None and len(x_range) == 2:
-        ax.set_xlim3d(x_range[0], x_range[1])
-    if y_range is not None and len(y_range) == 2:
-        ax.set_ylim3d(y_range[0], y_range[1])
-    if z_range is not None and len(z_range) == 2:
-        ax.set_zlim3d(z_range[0], z_range[1])
-
-    ax.set_xlabel(get_display_name(x, compact_per=True), fontsize=12, weight='normal')
-    ax.set_ylabel(get_display_name(y, compact_per=True), fontsize=12, weight='normal')
-    ax.set_zlabel(get_display_name(z, compact_per=True), fontsize=12, weight='normal')
-
-    return {'scatter': ax, 'group': group_name}
-
-
 def location_scatter_action(ctx: Context, state: dict,
                             object_panels=None, merge=True,
                             colocalise=True, **kwargs):
@@ -8622,7 +8569,7 @@ def location_scatter_action(ctx: Context, state: dict,
                     ax.set_facecolor('black')
                 ax.axis("off")
 
-    return {'name': ctx.animal or ctx.region}
+    return {'name': ctx.animal or ctx.scn}
 
 
 def matrix_action(ctx: Context, state: dict,
@@ -8776,53 +8723,18 @@ def _get_annotation(p, ns='ns'):
 
 def plot_mean_bars(experiment, filtered_columns=None,
                    points=True, normalize=False,
-                   specificity=None, roi=None, comparisons=None,
+                   specificity=None, comparisons=None,
                    force_nonparametric=False, ns='ns',
                    multiple_comparison='One-Way',
                    bottom_ticks=False, bottom_tick_labels=False,
                    factor=None, save=True,
                    column_strings=None, regex_string=None, exclude='',
-                   save_normality=True, normality_dpi=96,
-                   dry_run=False):
+                   save_normality=True, normality_dpi=96):
     """
-    Bar chart with individual data points for each column × condition.
+    Bar chart with individual data points for each column Ã— condition.
 
     One figure per column, all conditions side by side.
-
-    When *dry_run* is True, compute stats for every column but skip
-    figure creation/saving.  Returns a pandas DataFrame of results.
     """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_mean_bars(
-                experiment,
-                filtered_columns=filtered_columns,
-                points=points,
-                normalize=normalize,
-                specificity=specificity,
-                roi=_rb,
-                comparisons=comparisons,
-                force_nonparametric=force_nonparametric,
-                ns=ns,
-                multiple_comparison=multiple_comparison,
-                bottom_ticks=bottom_ticks,
-                bottom_tick_labels=bottom_tick_labels,
-                factor=factor,
-                save=save,
-                column_strings=column_strings,
-                regex_string=regex_string,
-                exclude=exclude,
-                save_normality=save_normality,
-                normality_dpi=normality_dpi,
-                dry_run=dry_run,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     # Queue mode: allow multiple specificity filters in one call.
     if _is_specificity_queue(specificity):
         queued_outputs = {}
@@ -8833,7 +8745,6 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 points=points,
                 normalize=normalize,
                 specificity=spec_tuple,
-                roi=roi,
                 comparisons=comparisons,
                 force_nonparametric=force_nonparametric,
                 ns=ns,
@@ -8847,7 +8758,6 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 exclude=exclude,
                 save_normality=save_normality,
                 normality_dpi=normality_dpi,
-                dry_run=dry_run,
             )
         return queued_outputs
 
@@ -9029,9 +8939,8 @@ def plot_mean_bars(experiment, filtered_columns=None,
             else:
                 group_colors = None
             stats_error = None
-            _sc_key = stats_cache_key(col, ordered_keys, specificity) if ordered_keys else None
             try:
-                test_used, posthoc_used, _, _stats_result = multipleComparisons(
+                test_used, posthoc_used, _ = multipleComparisons(
                     experiment,
                     col_dfs,
                     ax=ax,
@@ -9050,7 +8959,6 @@ def plot_mean_bars(experiment, filtered_columns=None,
                     verbose=False,
                     save_normality=save_normality,
                     normality_dpi=normality_dpi,
-                    cache_key=_sc_key,
                 )
                 if test_used == "Error":
                     stats_error = posthoc_used
@@ -9087,7 +8995,6 @@ def plot_mean_bars(experiment, filtered_columns=None,
             marker=marker_name if marker_name != col else None,
             factor=factor, specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
         save_fig(fig, experiment.fig_path, _artifact_name(col) + suffix, subfolder=subfolder, verbose=False)
         saved_columns_log.append(col)
@@ -9117,74 +9024,6 @@ def plot_mean_bars(experiment, filtered_columns=None,
             "Try different filters or remove non-numeric columns."
         )
 
-    # ── Dry-run mode: compute stats without rendering figures ─────────
-    if dry_run:
-        from IF_analysis.stats import test_normality as _test_norm
-        summary = experiment.summary
-        if specificity is not None:
-            from IF_analysis.utils import filter_df_by_specificity as _filt
-            summary = _filt(summary, specificity)
-        if factor:
-            group_col = factor
-        else:
-            group_col = 'Condition'
-        groups = [str(g) for g in summary[group_col].dropna().unique()]
-        rows = []
-        for col in resolved_columns:
-            vals = pd.to_numeric(summary[col], errors='coerce').dropna()
-            if len(vals) == 0:
-                rows.append({'Column': col, 'N': 0, 'Test': 'N/A', 'PostHoc': 'N/A'})
-                continue
-            col_dfs = []
-            for g in groups:
-                g_vals = pd.to_numeric(
-                    summary.loc[summary[group_col] == g, col], errors='coerce'
-                ).dropna()
-                if len(g_vals) > 0:
-                    col_dfs.append(g_vals)
-            if len(col_dfs) < 2:
-                rows.append({'Column': col, 'N': int(len(vals)), 'Test': 'N/A', 'PostHoc': 'N/A'})
-                continue
-            normal, _, _ = _test_norm(col_dfs, make_plot=False)
-            if force_nonparametric:
-                normal = False
-            # Determine test without executing (mirrors multipleComparisons logic)
-            if len(col_dfs) == 2:
-                test_name = 'Independent T-Test' if normal else 'Mann-Whitney U'
-            else:
-                if normal:
-                    test_name = 'One-Way ANOVA' if multiple_comparison == 'One-Way' else 'Two-Way ANOVA'
-                else:
-                    test_name = 'Kruskal-Wallis'
-            # Quick p-value
-            try:
-                if len(col_dfs) == 2:
-                    if normal:
-                        _, p = runITTest(col_dfs[0], col_dfs[1], {}, ns=ns)[:2]
-                        p_val = p[0] if isinstance(p, list) else p
-                    else:
-                        pvals, _, _, _, _ = mwu_multiple_comparisons(col_dfs, ['1-2'], {}, ns=ns)
-                        p_val = pvals[0] if pvals else float('nan')
-                else:
-                    from scipy.stats import kruskal, f_oneway as _fow
-                    if normal:
-                        _, p_val = _fow(*col_dfs)
-                    else:
-                        _, p_val = kruskal(*col_dfs)
-            except Exception:
-                p_val = float('nan')
-            rows.append({
-                'Column': col,
-                'N': int(len(vals)),
-                'Groups': len(col_dfs),
-                'Normal': normal,
-                'Test': test_name,
-                'p_value': float(p_val) if not isinstance(p_val, list) else float(p_val[0]),
-            })
-        df_out = pd.DataFrame(rows)
-        _log.status(df_out.to_string(index=False))
-        return df_out
-
     inner = 'factors' if factor else 'conditions'
     out = None
     try:
@@ -9195,7 +9034,6 @@ def plot_mean_bars(experiment, filtered_columns=None,
             specificity=specificity,
             setup=setup, teardown=teardown,
             points=points, normalize=normalize,
-            roi_base=_roi_base,
         )
     finally:
         # Close the shared canvas once at the end.
@@ -9210,15 +9048,14 @@ def plot_mean_bars(experiment, filtered_columns=None,
     except Exception:
         pass
     saved = saved_columns_log
-    _log.confirm(f"[plot_mean_bars] Saved columns ({len(saved)}): {', '.join(saved)}")
+    print(f"[plot_mean_bars] Saved columns ({len(saved)}): {', '.join(saved)}")
     if len(skipped_columns_log) > 0:
-        _log.hint(f"[plot_mean_bars] Skipped columns ({len(skipped_columns_log)}): {', '.join(skipped_columns_log)}")
+        print(f"[plot_mean_bars] Skipped columns ({len(skipped_columns_log)}): {', '.join(skipped_columns_log)}")
     try:
         if Config.EXPORT_HTML:
             subfolder_html, _ = build_subfolder(
                 plot_type='Bars', factor=factor, specificity=specificity,
                 aliases=getattr(experiment, 'aliases', None),
-                roi_base=_roi_base, multi_roi=_multi_roi,
             )
             html_save_path = os.path.join(experiment.fig_path, subfolder_html) if subfolder_html else experiment.fig_path
             _export_html_bars(experiment, resolved_columns, specificity, html_save_path)
@@ -9245,7 +9082,7 @@ def plot_locations(experiment, objects,
                    image_adjustments=None,
                    edit_mode=False,
                    use_existing_edits=False,
-                   specificity=None, roi=None,
+                   specificity=None,
                    extra_graph=None,
                    merge_extra_graphs=None,
                    overlay_with_images=None,
@@ -9317,35 +9154,6 @@ def plot_locations(experiment, objects,
     legacy_merge_extra = bool(merge_extra_graphs) or bool(overlay_all_extra_graphs)
     image_layout = _normalize_location_image_layout(image_layout)
 
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_locations(
-                experiment, objects,
-                separate_by=separate_by, join_by=join_by,
-                merge=merge, colocalise=colocalise, annotate=annotate,
-                extra_graphs=extra_graphs, images=images, colocaliser=colocaliser,
-                extra_graph_colors=extra_graph_colors,
-                image_layout=image_layout,
-                draw_rois=draw_rois,
-                hue=hue, marker_colors=marker_colors,
-                black_background=black_background,
-                panel_line_width=panel_line_width,
-                fast_loading=fast_loading,
-                preview_max_dim=preview_max_dim,
-                image_adjustments=image_adjustments,
-                edit_mode=edit_mode,
-                use_existing_edits=use_existing_edits,
-                dpi=dpi, save=save,
-                specificity=specificity,
-                roi=_rb,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     if _is_specificity_queue(specificity):
         queued_outputs = {}
         for spec in _iter_specificities(specificity):
@@ -9367,7 +9175,6 @@ def plot_locations(experiment, objects,
                 use_existing_edits=use_existing_edits,
                 dpi=dpi, save=save,
                 specificity=spec,
-                roi=roi,
             )
         return queued_outputs
 
@@ -9636,7 +9443,6 @@ def plot_locations(experiment, objects,
             plot_type='Locations',
             factor=None, specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
         fig.suptitle(title_name, **title_kwargs)
         fig.IF_analysis_image_adjustments = normalized_image_adjustments
@@ -9663,7 +9469,6 @@ def plot_locations(experiment, objects,
         join_by=join_by,
         specificity_filter=specificity,
         specificity=specificity,
-        roi_base=_roi_base,
     )
     if _return_fig:
         return returned_fig.get('fig')
@@ -9674,7 +9479,7 @@ def plot_regressions(experiment, x, y,
                      by='conditions', factor=None,
                      test='pearsonr',
                      normalize_x=True, normalize_y=True,
-                     specificity=None, roi=None, save=True, combine=False,
+                     specificity=None, save=True, combine=False,
                      x_range=None, y_range=None):
     """
     Regression plot: one figure per condition/factor, or a combined overlay.
@@ -9683,22 +9488,6 @@ def plot_regressions(experiment, x, y,
         - x list, y scalar -> one plot per x
         - x list, y list -> all x×y combinations
     """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_regressions(
-                experiment, x, y,
-                by=by, factor=factor, test=test,
-                normalize_x=normalize_x, normalize_y=normalize_y,
-                specificity=specificity, roi=_rb, save=save, combine=combine,
-                x_range=x_range, y_range=y_range,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     queue_types = (list, tuple, set, np.ndarray, pd.Series, pd.Index)
     x_is_queue = isinstance(x, queue_types)
     y_is_queue = isinstance(y, queue_types)
@@ -9721,7 +9510,6 @@ def plot_regressions(experiment, x, y,
                     normalize_x=normalize_x,
                     normalize_y=normalize_y,
                     specificity=specificity,
-                    roi=roi,
                     save=save,
                     combine=combine,
                     x_range=x_range,
@@ -9736,7 +9524,7 @@ def plot_regressions(experiment, x, y,
                 experiment, x, y,
                 by=by, factor=factor, test=test,
                 normalize_x=normalize_x, normalize_y=normalize_y,
-                specificity=spec, roi=roi, save=save, combine=combine,
+                specificity=spec, save=save, combine=combine,
                 x_range=x_range, y_range=y_range,
             )
         return queued_outputs
@@ -9778,7 +9566,6 @@ def plot_regressions(experiment, x, y,
                 plot_type='Regressions',
                 factor=factor, specificity=specificity,
                 aliases=getattr(experiment, 'aliases', None),
-                roi_base=_roi_base, multi_roi=_multi_roi,
             )
             if save:
                 save_fig(fig, experiment.fig_path,
@@ -9791,7 +9578,6 @@ def plot_regressions(experiment, x, y,
             plot_type='Regressions',
             factor=factor, specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
         if save:
             save_fig(fig, experiment.fig_path,
@@ -9804,162 +9590,6 @@ def plot_regressions(experiment, x, y,
         setup=setup, teardown=teardown,
         x=x, y=y, normalize_x=normalize_x, normalize_y=normalize_y, test=test,
         combine=combine, x_range=x_range, y_range=y_range,
-        roi_base=_roi_base,
-    )
-
-
-def plot_scatter_3d(experiment, x, y, z,
-                    by='conditions', factor=None,
-                    specificity=None, roi=None, save=True, combine=False,
-                    x_range=None, y_range=None, z_range=None,
-                    point_size=40, alpha=0.7,
-                    elevation=None, azimuth=None,
-                    figsize=(10, 8)):
-    """
-    3D scatter plot: one figure per condition/factor, or a combined overlay.
-    Supports queued x/y/z inputs:
-        - Any of x, y, z as a list -> one plot per combination
-        - x list, y list, z list -> all x*y*z combinations
-    """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_scatter_3d(
-                experiment, x, y, z,
-                by=by, factor=factor,
-                specificity=specificity, roi=_rb, save=save, combine=combine,
-                x_range=x_range, y_range=y_range, z_range=z_range,
-                point_size=point_size, alpha=alpha,
-                elevation=elevation, azimuth=azimuth,
-                figsize=figsize,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
-    queue_types = (list, tuple, set, np.ndarray, pd.Series, pd.Index)
-    x_is_queue = isinstance(x, queue_types)
-    y_is_queue = isinstance(y, queue_types)
-    z_is_queue = isinstance(z, queue_types)
-    if x_is_queue or y_is_queue or z_is_queue:
-        x_values = _flatten_specificity_values([x]) if x_is_queue else [x]
-        y_values = _flatten_specificity_values([y]) if y_is_queue else [y]
-        z_values = _flatten_specificity_values([z]) if z_is_queue else [z]
-        if len(x_values) == 0 or len(y_values) == 0 or len(z_values) == 0:
-            raise ValueError("Queued x/y/z inputs must contain at least one value.")
-        queued_outputs = {}
-        for x_val in x_values:
-            for y_val in y_values:
-                for z_val in z_values:
-                    key = (x_val, y_val, z_val)
-                    queued_outputs[key] = plot_scatter_3d(
-                        experiment,
-                        x=x_val, y=y_val, z=z_val,
-                        by=by, factor=factor,
-                        specificity=specificity, roi=roi,
-                        save=save, combine=combine,
-                        x_range=x_range, y_range=y_range, z_range=z_range,
-                        point_size=point_size, alpha=alpha,
-                        elevation=elevation, azimuth=azimuth,
-                        figsize=figsize,
-                    )
-        return queued_outputs
-
-    if _is_specificity_queue(specificity):
-        queued_outputs = {}
-        for spec in _iter_specificities(specificity):
-            queued_outputs[spec] = plot_scatter_3d(
-                experiment, x, y, z,
-                by=by, factor=factor,
-                specificity=spec, roi=roi, save=save, combine=combine,
-                x_range=x_range, y_range=y_range, z_range=z_range,
-                point_size=point_size, alpha=alpha,
-                elevation=elevation, azimuth=azimuth,
-                figsize=figsize,
-            )
-        return queued_outputs
-
-    level = 'factors' if factor else by
-
-    def setup(ctx, state):
-        _init_progress_state(
-            state,
-            func_name='plot_scatter_3d',
-            total=_count_level_processes(experiment, level, factor=factor, specificity=specificity),
-        )
-        _progress_start_item(state)
-        if combine:
-            if state.get('fig') is None or state.get('ax') is None:
-                fig = plt.figure(figsize=figsize)
-                ax = fig.add_subplot(111, projection='3d')
-                state['fig'] = fig
-                state['ax'] = ax
-        else:
-            fig = plt.figure(figsize=figsize)
-            ax = fig.add_subplot(111, projection='3d')
-            state['fig'] = fig
-            state['ax'] = ax
-
-    def teardown(ctx, state, results):
-        name, _ = _resolve_group_label_color(ctx)
-        name = name or 'Combined'
-        _progress_finish_item(state, name)
-
-        fig = state.get('fig')
-        ax = state.get('ax')
-
-        if combine:
-            prog = state.get('progress_state', {})
-            is_last = int(prog.get('completed', 0)) >= int(prog.get('total', 1))
-            if not is_last:
-                return
-            if fig is None or ax is None:
-                return
-            ax.legend(fontsize=10, loc='upper left')
-            if elevation is not None or azimuth is not None:
-                ax.view_init(
-                    elev=elevation if elevation is not None else ax.elev,
-                    azim=azimuth if azimuth is not None else ax.azim,
-                )
-            subfolder, suffix = build_subfolder(
-                plot_type='Scatter3D',
-                factor=factor, specificity=specificity,
-                aliases=getattr(experiment, 'aliases', None),
-                roi_base=_roi_base, multi_roi=_multi_roi,
-            )
-            if save:
-                save_fig(fig, experiment.fig_path,
-                         f'{x} vs {y} vs {z} (Combined)' + suffix, subfolder=subfolder)
-            plt.close(fig)
-            return
-
-        if elevation is not None or azimuth is not None:
-            ax.view_init(
-                elev=elevation if elevation is not None else ax.elev,
-                azim=azimuth if azimuth is not None else ax.azim,
-            )
-        subfolder, suffix = build_subfolder(
-            plot_type='Scatter3D',
-            factor=factor, specificity=specificity,
-            aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
-        )
-        if save:
-            save_fig(fig, experiment.fig_path,
-                     f'{x} vs {y} vs {z} ({name})' + suffix, subfolder=subfolder)
-        plt.close(fig)
-
-    return run(
-        experiment, over=level, action=scatter_3d_action,
-        factor=factor, specificity=specificity,
-        setup=setup, teardown=teardown,
-        x=x, y=y, z=z,
-        combine=combine,
-        x_range=x_range, y_range=y_range, z_range=z_range,
-        point_size=point_size, alpha=alpha,
-        roi_base=_roi_base,
     )
 
 
@@ -9968,7 +9598,7 @@ def plot_histograms(experiment, marker, x_attr,
                     bins=30, binwidth=None, kde=False,
                     alpha=0.5, stat='count',
                     merge=False, combine=False, invert_x=False, ymax=None, save=True,
-                    specificity=None, roi=None,
+                    specificity=None,
                     bin_range=None, bin_edges=None, share_bins=False):
     """
     Histogram: one figure per condition/factor, or a combined overlay.
@@ -9987,24 +9617,6 @@ def plot_histograms(experiment, marker, x_attr,
     - Use bin_range=(min, max) for exact histogram range.
     - Use bin_edges=[...] for exact shared bin edges.
     """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_histograms(
-                experiment, marker, x_attr,
-                by=by, factor=factor,
-                bins=bins, binwidth=binwidth, kde=kde,
-                alpha=alpha, stat=stat,
-                merge=merge, combine=combine, invert_x=invert_x, ymax=ymax, save=save,
-                specificity=specificity, roi=_rb,
-                bin_range=bin_range, bin_edges=bin_edges, share_bins=share_bins,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     queue_types = (list, tuple, set, np.ndarray, pd.Series, pd.Index)
     marker_is_queue = isinstance(marker, queue_types) and not isinstance(marker, str)
     xattr_is_queue = isinstance(x_attr, queue_types) and not isinstance(x_attr, str)
@@ -10037,7 +9649,6 @@ def plot_histograms(experiment, marker, x_attr,
                     ymax=ymax,
                     save=save,
                     specificity=specificity,
-                    roi=roi,
                 )
         return queued_outputs
 
@@ -10050,7 +9661,7 @@ def plot_histograms(experiment, marker, x_attr,
                 bins=bins, binwidth=binwidth, bin_range=bin_range,
                 bin_edges=bin_edges, share_bins=share_bins, kde=kde,
                 alpha=alpha, stat=stat, merge=merge, combine=combine, invert_x=invert_x,
-                ymax=ymax, save=save, specificity=spec, roi=roi,
+                ymax=ymax, save=save, specificity=spec,
             )
         return queued_outputs
 
@@ -10111,7 +9722,6 @@ def plot_histograms(experiment, marker, x_attr,
             plot_type='Histograms', marker=marker_key,
             factor=factor, specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
         _progress_finish_item(state, name)
 
@@ -10151,7 +9761,6 @@ def plot_histograms(experiment, marker, x_attr,
         bin_range=bin_range_norm, bins_spec=bins_spec, ymax=ymax,
         kde=kde, alpha=alpha, stat=stat, invert_x=invert_x,
         merge=combine_mode, combine=combine_mode,
-        roi_base=_roi_base,
     )
     if not combine_mode and _hist_shared_fig_ref.get("fig") is not None:
         plt.close(_hist_shared_fig_ref["fig"])
@@ -10161,7 +9770,6 @@ def plot_histograms(experiment, marker, x_attr,
                 plot_type='Histograms', marker=marker_key, factor=factor,
                 specificity=specificity,
                 aliases=getattr(experiment, 'aliases', None),
-                roi_base=_roi_base, multi_roi=_multi_roi,
             )
             html_save_path = os.path.join(experiment.fig_path, subfolder_html) if subfolder_html else experiment.fig_path
             _export_html_histogram(experiment, marker, x_attr, specificity, html_save_path, by, factor)
@@ -10174,7 +9782,7 @@ def plot_ridgeline(experiment, marker, x_attr,
                    by='conditions', factor=None,
                    ridge_height=0.85, alpha=0.55,
                    line_width=1.5, bw_adjust=1.0,
-                   save=True, specificity=None, roi=None,
+                   save=True, specificity=None,
                    bottom_ticks=True, bottom_tick_labels=True):
     """
     Ridgeline density plot by condition/factor for one marker attribute.
@@ -10183,23 +9791,6 @@ def plot_ridgeline(experiment, marker, x_attr,
     - accepts marker and x_attr scalar or list-like (all combinations)
     - supports specificity queue mode
     """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_ridgeline(
-                experiment, marker, x_attr,
-                by=by, factor=factor,
-                ridge_height=ridge_height, alpha=alpha,
-                line_width=line_width, bw_adjust=bw_adjust,
-                save=save, specificity=specificity, roi=_rb,
-                bottom_ticks=bottom_ticks, bottom_tick_labels=bottom_tick_labels,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     queue_types = (list, tuple, set, np.ndarray, pd.Series, pd.Index)
     marker_is_queue = isinstance(marker, queue_types) and not isinstance(marker, str)
     xattr_is_queue = isinstance(x_attr, queue_types) and not isinstance(x_attr, str)
@@ -10224,7 +9815,6 @@ def plot_ridgeline(experiment, marker, x_attr,
                     bw_adjust=bw_adjust,
                     save=save,
                     specificity=specificity,
-                    roi=roi,
                     bottom_ticks=bottom_ticks,
                     bottom_tick_labels=bottom_tick_labels,
                 )
@@ -10245,7 +9835,6 @@ def plot_ridgeline(experiment, marker, x_attr,
                 bw_adjust=bw_adjust,
                 save=save,
                 specificity=spec,
-                roi=roi,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
             )
@@ -10355,7 +9944,6 @@ def plot_ridgeline(experiment, marker, x_attr,
             plot_type='Ridgelines', marker=marker_key,
             factor=factor, specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
         if save:
             save_fig(fig, experiment.fig_path, f'{x} Ridgeline' + suffix, subfolder=subfolder)
@@ -10372,7 +9960,6 @@ def plot_ridgeline(experiment, marker, x_attr,
         alpha=alpha_f,
         line_width=line_width_f,
         bw_adjust=bw_adjust_f,
-        roi_base=_roi_base,
     )
 
 
@@ -10433,7 +10020,7 @@ def plot_ecdf(experiment, marker, x_attr,
               by='conditions', factor=None,
               line_width=2.0, alpha=1.0,
               stat='proportion', complementary=False,
-              save=True, specificity=None, roi=None,
+              save=True, specificity=None,
               bottom_ticks=True, bottom_tick_labels=True):
     """
     ECDF plot by condition/factor for one marker attribute.
@@ -10442,23 +10029,6 @@ def plot_ecdf(experiment, marker, x_attr,
     - accepts marker and x_attr scalar or list-like (all combinations)
     - supports specificity queue mode
     """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_ecdf(
-                experiment, marker, x_attr,
-                by=by, factor=factor,
-                line_width=line_width, alpha=alpha,
-                stat=stat, complementary=complementary,
-                save=save, specificity=specificity, roi=_rb,
-                bottom_ticks=bottom_ticks, bottom_tick_labels=bottom_tick_labels,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     queue_types = (list, tuple, set, np.ndarray, pd.Series, pd.Index)
     marker_is_queue = isinstance(marker, queue_types) and not isinstance(marker, str)
     xattr_is_queue = isinstance(x_attr, queue_types) and not isinstance(x_attr, str)
@@ -10483,7 +10053,6 @@ def plot_ecdf(experiment, marker, x_attr,
                     complementary=complementary,
                     save=save,
                     specificity=specificity,
-                    roi=roi,
                     bottom_ticks=bottom_ticks,
                     bottom_tick_labels=bottom_tick_labels,
                 )
@@ -10504,7 +10073,6 @@ def plot_ecdf(experiment, marker, x_attr,
                 complementary=complementary,
                 save=save,
                 specificity=spec,
-                roi=roi,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
             )
@@ -10555,7 +10123,6 @@ def plot_ecdf(experiment, marker, x_attr,
             plot_type='ECDFs', marker=marker_key,
             factor=factor, specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
         if save:
             save_fig(fig, experiment.fig_path, f'{x} ECDF {name}' + suffix, subfolder=subfolder)
@@ -10573,7 +10140,6 @@ def plot_ecdf(experiment, marker, x_attr,
         stat=stat_key,
         complementary=bool(complementary),
         specificity_filter=specificity,
-        roi_base=_roi_base,
     )
 
 
@@ -10805,7 +10371,7 @@ def volcano_action(ctx: Context, state: dict,
 def plot_volcano(experiment, filtered_columns=None,
                  by='conditions', factor=None,
                  control=None,
-                 specificity=None, roi=None,
+                 specificity=None,
                  force_nonparametric=False,
                  p_threshold=0.05,
                  label_points='significant',
@@ -10824,26 +10390,6 @@ def plot_volcano(experiment, filtered_columns=None,
     - 'both'
     - 'none'
     """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_volcano(
-                experiment,
-                filtered_columns=filtered_columns,
-                by=by, factor=factor, control=control,
-                specificity=specificity, roi=_rb,
-                force_nonparametric=force_nonparametric,
-                p_threshold=p_threshold,
-                label_points=label_points,
-                save=save,
-                column_strings=column_strings, regex_string=regex_string, exclude=exclude,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     if _is_specificity_queue(specificity):
         queued_outputs = {}
         for spec in _iter_specificities(specificity):
@@ -10854,7 +10400,6 @@ def plot_volcano(experiment, filtered_columns=None,
                 factor=factor,
                 control=control,
                 specificity=spec,
-                roi=roi,
                 force_nonparametric=force_nonparametric,
                 p_threshold=p_threshold,
                 label_points=label_points,
@@ -10933,7 +10478,6 @@ def plot_volcano(experiment, filtered_columns=None,
             plot_type='Volcano',
             factor=factor, specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
 
         if save and not bool(state.get('volcano_skip_save', False)):
@@ -10954,21 +10498,9 @@ def plot_volcano(experiment, filtered_columns=None,
         force_nonparametric=force_nonparametric,
         p_threshold=p_threshold,
         label_points=label_points,
-        roi_base=_roi_base,
     )
     if _volcano_shared_fig_ref.get("fig") is not None:
         plt.close(_volcano_shared_fig_ref["fig"])
-    try:
-        if Config.EXPORT_HTML:
-            subfolder_html, _ = build_subfolder(
-                plot_type='Volcano', factor=factor, specificity=specificity,
-                aliases=getattr(experiment, 'aliases', None),
-                roi_base=_roi_base, multi_roi=_multi_roi,
-            )
-            html_save_path = os.path.join(experiment.fig_path, subfolder_html) if subfolder_html else experiment.fig_path
-            _export_html_volcano(experiment, resolved_columns, specificity, html_save_path, control_name)
-    except Exception:
-        pass
     return result
 
 
@@ -10976,7 +10508,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                     by='conditions', factor=None,
                     threshold=None,
                     start_angle=90, line_width=1.0,
-                    save=True, specificity=None, roi=None,
+                    save=True, specificity=None,
                     plot_format='pie', as_counts=False,
                     bottom_ticks=False, bottom_tick_labels=False):
     """
@@ -10998,23 +10530,6 @@ def plot_pie_charts(experiment, marker, x_attr,
     - as_counts: if True, use raw counts; otherwise percentages.
     - bottom_ticks / bottom_tick_labels: x-axis tick visibility for bar mode.
     """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_pie_charts(
-                experiment, marker, x_attr,
-                by=by, factor=factor, threshold=threshold,
-                start_angle=start_angle, line_width=line_width,
-                save=save, specificity=specificity, roi=_rb,
-                plot_format=plot_format, as_counts=as_counts,
-                bottom_ticks=bottom_ticks, bottom_tick_labels=bottom_tick_labels,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     queue_types = (list, tuple, set, np.ndarray, pd.Series, pd.Index)
     marker_is_queue = isinstance(marker, queue_types) and not isinstance(marker, str)
     xattr_is_queue = isinstance(x_attr, queue_types) and not isinstance(x_attr, str)
@@ -11038,7 +10553,6 @@ def plot_pie_charts(experiment, marker, x_attr,
                     line_width=line_width,
                     save=save,
                     specificity=specificity,
-                    roi=roi,
                     plot_format=plot_format,
                     as_counts=as_counts,
                     bottom_ticks=bottom_ticks,
@@ -11060,7 +10574,6 @@ def plot_pie_charts(experiment, marker, x_attr,
                 line_width=line_width,
                 save=save,
                 specificity=spec,
-                roi=roi,
                 plot_format=plot_format,
                 as_counts=as_counts,
                 bottom_ticks=bottom_ticks,
@@ -11114,7 +10627,6 @@ def plot_pie_charts(experiment, marker, x_attr,
             plot_type='PieCharts', marker=marker_key,
             factor=factor, specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
         _progress_finish_item(state, name)
 
@@ -11229,7 +10741,6 @@ def plot_pie_charts(experiment, marker, x_attr,
         line_width=line_width_f,
         plot_format=plot_mode,
         as_counts=bool(as_counts),
-        roi_base=_roi_base,
     )
 
 
@@ -11237,33 +10748,13 @@ def plot_matrices(experiment, filtered_columns=None,
                   by='conditions', factor=None,
                   correlation='pearsonr',
                   first_columns=None, tick_label_size=20,
-                  marker=None, specificity=None, roi=None, save=True,
+                  marker=None, specificity=None, save=True,
                   column_strings=None, regex_string=None, exclude='',
                   prefix_order=None, marker_order=None,
                   share_columns_across_panels=True):
     """
     Correlation matrix: one figure per condition or factor value.
     """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_matrices(
-                experiment,
-                filtered_columns=filtered_columns,
-                by=by, factor=factor,
-                correlation=correlation,
-                first_columns=first_columns, tick_label_size=tick_label_size,
-                marker=marker, specificity=specificity, roi=_rb, save=save,
-                column_strings=column_strings, regex_string=regex_string, exclude=exclude,
-                prefix_order=prefix_order, marker_order=marker_order,
-                share_columns_across_panels=share_columns_across_panels,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     if _is_specificity_queue(specificity):
         queued_outputs = {}
         for spec in _iter_specificities(specificity):
@@ -11280,7 +10771,6 @@ def plot_matrices(experiment, filtered_columns=None,
                 marker_order=marker_order,
                 share_columns_across_panels=share_columns_across_panels,
                 specificity=spec,
-                roi=roi,
                 save=save,
                 column_strings=column_strings,
                 regex_string=regex_string,
@@ -11373,7 +10863,7 @@ def plot_matrices(experiment, filtered_columns=None,
             shared_cols = [c for c in resolved_columns if c in shared_set]
             resolved_columns = shared_cols
             if len(resolved_columns) == 0:
-                _log.warn("[plot_matrices] No shared valid columns across panels after NaN/sentinel filtering.")
+                print("[plot_matrices] No shared valid columns across panels after NaN/sentinel filtering.")
 
     n = len(resolved_columns)
     fig_w = min(max(6.0, n * 0.35), 30.0)
@@ -11410,7 +10900,6 @@ def plot_matrices(experiment, filtered_columns=None,
             factor=factor if factor is not None else str(by).rstrip('s'),
             specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
         if save:
             title = f'{name} Correlation Matrix'
@@ -11430,23 +10919,9 @@ def plot_matrices(experiment, filtered_columns=None,
         drop_duplicate_columns=drop_duplicate_columns_for_action,
         enforce_shared_columns=bool(share_columns_across_panels),
         shared_columns=resolved_columns,
-        roi_base=_roi_base,
     )
     if _matrix_shared_fig_ref.get("fig") is not None:
         plt.close(_matrix_shared_fig_ref["fig"])
-    try:
-        if Config.EXPORT_HTML:
-            subfolder_html, _ = build_subfolder(
-                plot_type='Matrices',
-                factor=factor if factor is not None else str(by).rstrip('s'),
-                specificity=specificity,
-                aliases=getattr(experiment, 'aliases', None),
-                roi_base=_roi_base, multi_roi=_multi_roi,
-            )
-            html_save_path = os.path.join(experiment.fig_path, subfolder_html) if subfolder_html else experiment.fig_path
-            _export_html_matrix(experiment, resolved_columns, specificity, html_save_path, by, factor, correlation)
-    except Exception:
-        pass
     return result
 
 
@@ -11457,7 +10932,6 @@ def plot_rect_matrices(
     by='conditions',
     factor=None,
     specificity=None,
-    roi=None,
     save=True,
     correlation='pearsonr',
     tick_label_size=20,
@@ -11484,32 +10958,6 @@ def plot_rect_matrices(
     - blank_panel_on_nan: keep requested columns and annotate only NaN
       matrix cells with "NaN" (instead of dropping columns).
     """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_rect_matrices(
-                experiment,
-                filtered_columns=filtered_columns,
-                against_columns=against_columns,
-                by=by, factor=factor,
-                specificity=specificity, roi=_rb,
-                save=save, correlation=correlation,
-                tick_label_size=tick_label_size,
-                column_strings=column_strings, regex_string=regex_string, exclude=exclude,
-                against_column_strings=against_column_strings,
-                against_regex_string=against_regex_string, against_exclude=against_exclude,
-                conditions=conditions, encode_x_categorical=encode_x_categorical,
-                combine_conditions=combine_conditions,
-                column_order=column_order, against_order=against_order,
-                share_columns_across_panels=share_columns_across_panels,
-                blank_panel_on_nan=blank_panel_on_nan,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     if _is_specificity_queue(specificity):
         queued_outputs = {}
         for spec in _iter_specificities(specificity):
@@ -11520,7 +10968,6 @@ def plot_rect_matrices(
                 by=by,
                 factor=factor,
                 specificity=spec,
-                roi=roi,
                 save=save,
                 correlation=correlation,
                 tick_label_size=tick_label_size,
@@ -11906,7 +11353,6 @@ def plot_rect_matrices(
             factor=factor if factor is not None else str(by).rstrip('s'),
             specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
         panel_names = " and ".join([p[1] for p in panels[:3]])
         if len(panels) > 3:
@@ -11922,7 +11368,6 @@ def plot_coloc_upset(
     marker: "str|list[str]|tuple[str, ...]",
     *,
     specificity=None,
-    roi=None,
     by: str | None = None,          # None = auto (condition panels if available); "conditions"/"Condition"; or a factor column name
     remove_closest: bool = False,
     include_neither: bool = False,
@@ -11965,25 +11410,6 @@ def plot_coloc_upset(
             "Missing optional dependency 'upsetplot'. Install with: pip install upsetplot"
         ) from e
 
-    # ROI queue mode — iterate over ROI bases
-    _exp_for_roi = source if not isinstance(source, pd.DataFrame) else experiment
-    _roi_bases = _resolve_roi_bases(roi, _exp_for_roi)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_coloc_upset(
-                source, marker,
-                specificity=specificity, roi=_rb,
-                by=by, remove_closest=remove_closest,
-                include_neither=include_neither, min_count=min_count,
-                normalize=normalize, sort_by=sort_by,
-                title=title, save=save, df=df,
-                experiment=experiment, dpi=dpi,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, _exp_for_roi)) > 1
-
     # Marker queue mode: pass a list/tuple of markers and run one UpSet per marker.
     if isinstance(marker, (list, tuple, set, np.ndarray, pd.Series, pd.Index)) and not isinstance(marker, str):
         marker_list = []
@@ -12005,7 +11431,6 @@ def plot_coloc_upset(
                 source,
                 m,
                 specificity=specificity,
-                roi=roi,
                 by=by,
                 remove_closest=remove_closest,
                 include_neither=include_neither,
@@ -12036,7 +11461,6 @@ def plot_coloc_upset(
                 source,
                 marker,
                 specificity=spec,
-                roi=roi,
                 by=by_mode,
                 remove_closest=remove_closest,
                 include_neither=include_neither,
@@ -12308,7 +11732,6 @@ def plot_coloc_upset(
                 factor=by_mode if by_mode is not None and by_mode != "conditions" else None,
                 specificity=specificity,
                 aliases=getattr(exp_obj, 'aliases', None),
-                roi_base=_roi_base, multi_roi=_multi_roi,
             )
             norm_tag = "normalized" if normalize else "rawcounts"
             closest_tag = "noClosest" if remove_closest else "withClosest"
@@ -12344,7 +11767,6 @@ def plot_coloc_sankey(
     *,
     df: "pd.DataFrame|None" = None,
     specificity=None,
-    roi=None,
     by: str | None = None,
     remove_closest: bool = False,
     false_bottom: bool = False,      # True => True nodes at top, False nodes at bottom per layer
@@ -12394,25 +11816,6 @@ def plot_coloc_sankey(
     except Exception:
         to_rgb = None
 
-    # ROI queue mode — iterate over ROI bases
-    _exp_for_roi = source if not isinstance(source, pd.DataFrame) else experiment
-    _roi_bases = _resolve_roi_bases(roi, _exp_for_roi)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_coloc_sankey(
-                source, marker,
-                df=df, specificity=specificity, roi=_rb,
-                by=by, remove_closest=remove_closest,
-                false_bottom=false_bottom, include_neither=include_neither,
-                min_count=min_count, normalize=normalize,
-                order=order, title=title, save=save,
-                experiment=experiment, dpi=dpi,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, _exp_for_roi)) > 1
-
     # Marker queue mode: pass a list/tuple of markers and run one Sankey per marker.
     if isinstance(marker, (list, tuple, set, np.ndarray, pd.Series, pd.Index)) and not isinstance(marker, str):
         marker_list = []
@@ -12435,7 +11838,6 @@ def plot_coloc_sankey(
                 m,
                 df=None,
                 specificity=specificity,
-                roi=roi,
                 by=by,
                 remove_closest=remove_closest,
                 false_bottom=false_bottom,
@@ -12476,7 +11878,6 @@ def plot_coloc_sankey(
                 marker,
                 df=source_df,
                 specificity=spec,
-                roi=roi,
                 by=by_mode,
                 remove_closest=remove_closest,
                 false_bottom=false_bottom,
@@ -13025,7 +12426,6 @@ def plot_coloc_sankey(
                 factor=by_mode if by_mode is not None and by_mode != "conditions" else None,
                 specificity=specificity,
                 aliases=getattr(exp_obj, 'aliases', None),
-                roi_base=_roi_base, multi_roi=_multi_roi,
             )
 
             norm_tag = "normalized" if normalize else "rawcounts"
@@ -13056,242 +12456,3 @@ def plot_coloc_sankey(
     if len(outputs) == 1 and by_mode is None and auto_group_by is None:
         return outputs["Combined"]
     return outputs
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Cheat-sheet utility
-# ═══════════════════════════════════════════════════════════════════════
-
-_PARAM_DESCRIPTIONS = {
-    # ── Common to most functions ─────────────────────────────────────
-    'experiment':           'Experiment or Batch object containing your data.',
-    'source':               'Experiment, Batch, or MiniExperiment data source.',
-    'filtered_columns':     'List of column names to plot (e.g. ["DAPI_Count", "Iba1_Volume"]).',
-    'column_strings':       'Substring filter — include columns whose names contain this string.',
-    'regex_string':         'Regex filter — include columns whose names match this pattern.',
-    'exclude':              'Exclude columns whose names contain this substring.',
-    'specificity':          'Filter data by a factor value. Tuple: ("Time", "WeekEight"). '
-                            'Queue: [("Time","WeekEight"), ("Time","WeekFour")].',
-    'save':                 'Whether to save figures to disk (default True).',
-    'factor':               'Group by a factor column instead of Condition (e.g. "Genotype").',
-    'by':                   'Grouping mode: "conditions" (default) or a factor column name.',
-    'comparisons':          'Explicit pairwise comparisons for stats, e.g. ["1-2", "1-3"].',
-    'normalize':            'Normalize values to the first condition (fold-change).',
-    'ns':                   'Label for non-significant results (default "ns").',
-    'multiple_comparison':  'Stats test type: "One-Way" (ANOVA/Kruskal) or "Two-Way".',
-    'force_nonparametric':  'Force non-parametric tests regardless of normality.',
-    'bottom_ticks':         'Show tick marks on the bottom axis.',
-    'bottom_tick_labels':   'Show tick labels on the bottom axis.',
-    'save_normality':       'Save normality test Q-Q plots as PNG.',
-    'normality_dpi':        'DPI for normality test figures.',
-    'dry_run':              'Compute stats without rendering; returns a DataFrame summary.',
-    'combine':              'Overlay all groups on one panel instead of separate figures.',
-    'merge':                'Synonym for combine in some functions.',
-    # ── Marker-based functions ───────────────────────────────────────
-    'marker':               'Marker name (e.g. "Iba1") or list of markers.',
-    'markers':              'List of marker names to include (None = all).',
-    'x_attr':               'Attribute suffix to plot (e.g. "Volume", "Count", "IntDen").',
-    'x':                    'X-axis column name or marker attribute.',
-    'y':                    'Y-axis column name or marker attribute.',
-    # ── Histogram / density ──────────────────────────────────────────
-    'bins':                 'Number of histogram bins (default 30).',
-    'binwidth':             'Fixed bin width (overrides bins if set).',
-    'bin_range':            'Explicit (min, max) range for bins.',
-    'bin_edges':            'Explicit array of bin edges.',
-    'share_bins':           'Use identical bin edges across all panels.',
-    'kde':                  'Overlay a kernel density estimate curve.',
-    'alpha':                'Transparency of bars/fills (0-1).',
-    'stat':                 'Y-axis statistic: "count", "proportion", "density".',
-    'invert_x':             'Flip the x-axis direction.',
-    'ymax':                 'Manual upper limit for y-axis.',
-    # ── Ridgeline ────────────────────────────────────────────────────
-    'ridge_height':         'Overlap fraction between ridgeline rows (default 0.85).',
-    'bw_adjust':            'Bandwidth multiplier for KDE smoothing.',
-    'line_width':           'Width of density outline strokes.',
-    # ── ECDF ─────────────────────────────────────────────────────────
-    'complementary':        'Plot 1-ECDF (survival function) instead of ECDF.',
-    # ── Regression ───────────────────────────────────────────────────
-    'test':                 'Correlation test: "pearsonr" or "spearmanr".',
-    'normalize_x':          'Normalize x-axis values by condition (default True).',
-    'normalize_y':          'Normalize y-axis values by condition (default True).',
-    'x_range':              'Manual (min, max) for x-axis.',
-    'y_range':              'Manual (min, max) for y-axis.',
-    # ── Volcano ──────────────────────────────────────────────────────
-    'control':              'Name of the control condition for fold-change calculation.',
-    'p_threshold':          'Significance threshold for highlighting (default 0.05).',
-    'label_points':         '"significant" to label sig. points, "all", or None.',
-    # ── Pie charts ───────────────────────────────────────────────────
-    'threshold':            'Value(s) for binning data into groups.',
-    'start_angle':          'Rotation angle for the first slice (default 90).',
-    'plot_format':          '"pie" for pie chart, "bar" for stacked bar.',
-    'as_counts':            'Show raw counts instead of percentages.',
-    # ── Correlation matrices ─────────────────────────────────────────
-    'correlation':          'Correlation method: "pearsonr" or "spearmanr".',
-    'first_columns':        'Pin these columns to the left of the matrix.',
-    'tick_label_size':      'Font size for axis tick labels.',
-    'prefix_order':         'Custom ordering of column prefixes.',
-    'marker_order':         'Custom ordering of markers.',
-    'share_columns_across_panels': 'Use same columns in every panel (default True).',
-    'drop_duplicate_columns':      'Remove duplicate column entries.',
-    # ── Rectangular matrices ─────────────────────────────────────────
-    'against_columns':          'Columns for the second axis (rows vs columns).',
-    'against_column_strings':   'Substring filter for second-axis columns.',
-    'against_regex_string':     'Regex filter for second-axis columns.',
-    'against_exclude':          'Exclude filter for second-axis columns.',
-    'conditions':               'Subset of conditions to include.',
-    'encode_x_categorical':     'Treat x-axis as categorical.',
-    'combine_conditions':       'Combine all conditions into one panel.',
-    'column_order':             'Custom ordering for primary columns.',
-    'against_order':            'Custom ordering for second-axis columns.',
-    'blank_panel_on_nan':       'Show blank panel when all values are NaN.',
-    # ── Images ───────────────────────────────────────────────────────
-    'animal_filter':        'Show only specific animals (name or list).',
-    'roi_filter':           'Show only specific ROIs.',
-    'ncols':                'Number of columns in the image grid.',
-    'max_images':           'Maximum number of images to show.',
-    'tile_size':            'Size of each image tile in inches.',
-    'title':                'Custom title for the figure.',
-    'show':                 'Display the figure interactively.',
-    'verbose':              'Print detailed progress messages.',
-    'tile_gap':             'Gap between tiles.',
-    'tile_gap_units':       'Units for tile_gap: "points" or "inches".',
-    'image_backend':        'Image loading backend: "auto", "tifffile", "pil".',
-    'draw_rois':            'Draw ROI outlines on images.',
-    'scale_bar':            'Add a scale bar to images.',
-    'scale_bar_location':   'Position: "bottom left", "bottom right", etc.',
-    'scale_bar_size':       'Scale bar length in microns.',
-    'scale_bar_units':      '"microns" or "pixels".',
-    'image_width_microns':  'Known image width for scale bar calculation.',
-    'pixel_size':           'Microns per pixel (overrides Config.PIXEL_SIZE).',
-    # ── Representative images ────────────────────────────────────────
-    'fast_loading':         'Use lower-resolution loading for speed.',
-    'preview_max_dim':      'Max dimension in pixels for preview thumbnails.',
-    'image_adjustments':    'Dict of per-marker brightness/contrast adjustments.',
-    'edit_mode':            'Launch interactive editor for selecting images.',
-    'use_existing_edits':   'Reuse previously saved edit selections.',
-    'progress':             'Show progress bar during loading.',
-    'image_workers':        'Number of parallel workers for image loading.',
-    # ── Locations ────────────────────────────────────────────────────
-    'objects':              'Marker(s) to plot as scatter points.',
-    'separate_by':          'Panel separation mode: "conditions", "animals".',
-    'join_by':              'What to combine within a panel: "animals", "rois".',
-    'colocalise':           'Show colocalisation overlay.',
-    'annotate':             'Add text annotations to panels.',
-    'extra_graphs':         'Additional markers to overlay as separate graphs.',
-    'images':               'Background image marker(s).',
-    'colocaliser':          'Colocalisation marker to highlight.',
-    'extra_graph_colors':   'Colors for extra graph overlays.',
-    'image_layout':         '"shared" or "per_panel" image arrangement.',
-    'hue':                  'Color-code points by group.',
-    'marker_colors':        'Custom color dict for markers.',
-    'black_background':     'Use black background for location plots.',
-    'panel_line_width':     'Border line width for panels.',
-    'dpi':                  'Resolution for raster elements.',
-    # ── Colocalisation plots ─────────────────────────────────────────
-    'remove_closest':       'Remove closest-neighbour coloc artifacts.',
-    'include_neither':      'Include "neither" category in upset/sankey.',
-    'min_count':            'Minimum count threshold for display.',
-    'sort_by':              'Upset sorting: "cardinality" or "degree".',
-    'df':                   'Optional pre-filtered DataFrame override.',
-    'false_bottom':         'Sankey: True nodes at top, False at bottom.',
-    'order':                'Sankey layer ordering: "auto" or list of markers.',
-    # ── Shared ───────────────────────────────────────────────────────
-    'points':               'Overlay individual data points on bar charts.',
-    'enforce_shared_columns': 'Force all panels to use the same column set.',
-    'shared_columns':       'Explicit list of columns to share across panels.',
-}
-
-
-def cheat_sheet(func_name=None):
-    """Print a parameter reference for plot functions.
-
-    Call with no arguments to list all plot functions.
-    Call with a function name for detailed parameter info.
-
-    Examples
-    --------
-    >>> cheat_sheet()                    # list all plot functions
-    >>> cheat_sheet('plot_mean_bars')    # detailed params for one function
-    >>> cheat_sheet('histograms')        # shorthand without plot_ prefix
-    """
-    import inspect as _inspect
-    import sys as _sys
-
-    _this = _sys.modules[__name__]
-    plot_funcs = {}
-    for _n in dir(_this):
-        if _n.startswith('plot_') and callable(getattr(_this, _n)):
-            _obj = getattr(_this, _n)
-            if hasattr(_obj, '__code__'):
-                plot_funcs[_n] = _obj
-
-    if func_name is None:
-        print("=" * 70)
-        print("  IF_analysis — Plot Function Reference")
-        print("=" * 70)
-        print()
-        for name in sorted(plot_funcs):
-            doc = (plot_funcs[name].__doc__ or '').strip().split('\n')[0]
-            print(f"  {name}")
-            if doc:
-                print(f"    {doc}")
-            print()
-        print("-" * 70)
-        print("  Call cheat_sheet('function_name') for detailed parameters.")
-        print("  e.g. cheat_sheet('plot_mean_bars') or cheat_sheet('histograms')")
-        print("=" * 70)
-        return
-
-    # Resolve name (supports shorthand without 'plot_' prefix)
-    key = func_name
-    if key not in plot_funcs:
-        key = f"plot_{func_name}"
-    if key not in plot_funcs:
-        matches = [n for n in plot_funcs if func_name in n]
-        if len(matches) == 1:
-            key = matches[0]
-        else:
-            print(f"Unknown function '{func_name}'. Available:")
-            for n in sorted(plot_funcs):
-                print(f"  {n}")
-            return
-
-    func = plot_funcs[key]
-    sig = _inspect.signature(func)
-    doc = (func.__doc__ or '').strip()
-    first_line = doc.split('\n')[0] if doc else ''
-
-    print()
-    print("=" * 70)
-    print(f"  {key}")
-    if first_line:
-        print(f"  {first_line}")
-    print("=" * 70)
-    print()
-
-    for p in sig.parameters.values():
-        name = p.name
-        default = p.default
-
-        if name.startswith('_'):
-            continue
-        desc = _PARAM_DESCRIPTIONS.get(name, '')
-
-        if default is _inspect.Parameter.empty:
-            default_str = '(required)'
-        elif default is None:
-            default_str = 'None'
-        elif isinstance(default, str):
-            default_str = f'"{default}"'
-        else:
-            default_str = str(default)
-
-        req = '*' if default is _inspect.Parameter.empty else ' '
-        print(f"  {req} {name:<30s} = {default_str}")
-        if desc:
-            print(f"    {desc}")
-        print()
-
-    print("-" * 70)
-    print("  * = required parameter")
-    print("=" * 70)

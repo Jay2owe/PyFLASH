@@ -11457,7 +11457,6 @@ def plot_rect_matrices(
     by='conditions',
     factor=None,
     specificity=None,
-    roi=None,
     save=True,
     correlation='pearsonr',
     tick_label_size=20,
@@ -11484,32 +11483,6 @@ def plot_rect_matrices(
     - blank_panel_on_nan: keep requested columns and annotate only NaN
       matrix cells with "NaN" (instead of dropping columns).
     """
-    # ROI queue mode — iterate over ROI bases
-    _roi_bases = _resolve_roi_bases(roi, experiment)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_rect_matrices(
-                experiment,
-                filtered_columns=filtered_columns,
-                against_columns=against_columns,
-                by=by, factor=factor,
-                specificity=specificity, roi=_rb,
-                save=save, correlation=correlation,
-                tick_label_size=tick_label_size,
-                column_strings=column_strings, regex_string=regex_string, exclude=exclude,
-                against_column_strings=against_column_strings,
-                against_regex_string=against_regex_string, against_exclude=against_exclude,
-                conditions=conditions, encode_x_categorical=encode_x_categorical,
-                combine_conditions=combine_conditions,
-                column_order=column_order, against_order=against_order,
-                share_columns_across_panels=share_columns_across_panels,
-                blank_panel_on_nan=blank_panel_on_nan,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
-
     if _is_specificity_queue(specificity):
         queued_outputs = {}
         for spec in _iter_specificities(specificity):
@@ -11520,7 +11493,6 @@ def plot_rect_matrices(
                 by=by,
                 factor=factor,
                 specificity=spec,
-                roi=roi,
                 save=save,
                 correlation=correlation,
                 tick_label_size=tick_label_size,
@@ -11906,7 +11878,6 @@ def plot_rect_matrices(
             factor=factor if factor is not None else str(by).rstrip('s'),
             specificity=specificity,
             aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
         )
         panel_names = " and ".join([p[1] for p in panels[:3]])
         if len(panels) > 3:
@@ -11922,7 +11893,6 @@ def plot_coloc_upset(
     marker: "str|list[str]|tuple[str, ...]",
     *,
     specificity=None,
-    roi=None,
     by: str | None = None,          # None = auto (condition panels if available); "conditions"/"Condition"; or a factor column name
     remove_closest: bool = False,
     include_neither: bool = False,
@@ -11965,25 +11935,6 @@ def plot_coloc_upset(
             "Missing optional dependency 'upsetplot'. Install with: pip install upsetplot"
         ) from e
 
-    # ROI queue mode — iterate over ROI bases
-    _exp_for_roi = source if not isinstance(source, pd.DataFrame) else experiment
-    _roi_bases = _resolve_roi_bases(roi, _exp_for_roi)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_coloc_upset(
-                source, marker,
-                specificity=specificity, roi=_rb,
-                by=by, remove_closest=remove_closest,
-                include_neither=include_neither, min_count=min_count,
-                normalize=normalize, sort_by=sort_by,
-                title=title, save=save, df=df,
-                experiment=experiment, dpi=dpi,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, _exp_for_roi)) > 1
-
     # Marker queue mode: pass a list/tuple of markers and run one UpSet per marker.
     if isinstance(marker, (list, tuple, set, np.ndarray, pd.Series, pd.Index)) and not isinstance(marker, str):
         marker_list = []
@@ -12005,7 +11956,6 @@ def plot_coloc_upset(
                 source,
                 m,
                 specificity=specificity,
-                roi=roi,
                 by=by,
                 remove_closest=remove_closest,
                 include_neither=include_neither,
@@ -12036,7 +11986,6 @@ def plot_coloc_upset(
                 source,
                 marker,
                 specificity=spec,
-                roi=roi,
                 by=by_mode,
                 remove_closest=remove_closest,
                 include_neither=include_neither,
@@ -12308,7 +12257,6 @@ def plot_coloc_upset(
                 factor=by_mode if by_mode is not None and by_mode != "conditions" else None,
                 specificity=specificity,
                 aliases=getattr(exp_obj, 'aliases', None),
-                roi_base=_roi_base, multi_roi=_multi_roi,
             )
             norm_tag = "normalized" if normalize else "rawcounts"
             closest_tag = "noClosest" if remove_closest else "withClosest"
@@ -12344,7 +12292,6 @@ def plot_coloc_sankey(
     *,
     df: "pd.DataFrame|None" = None,
     specificity=None,
-    roi=None,
     by: str | None = None,
     remove_closest: bool = False,
     false_bottom: bool = False,      # True => True nodes at top, False nodes at bottom per layer
@@ -12394,25 +12341,6 @@ def plot_coloc_sankey(
     except Exception:
         to_rgb = None
 
-    # ROI queue mode — iterate over ROI bases
-    _exp_for_roi = source if not isinstance(source, pd.DataFrame) else experiment
-    _roi_bases = _resolve_roi_bases(roi, _exp_for_roi)
-    if len(_roi_bases) > 1:
-        _queued = {}
-        for _rb in _roi_bases:
-            _queued[_rb] = plot_coloc_sankey(
-                source, marker,
-                df=df, specificity=specificity, roi=_rb,
-                by=by, remove_closest=remove_closest,
-                false_bottom=false_bottom, include_neither=include_neither,
-                min_count=min_count, normalize=normalize,
-                order=order, title=title, save=save,
-                experiment=experiment, dpi=dpi,
-            )
-        return _queued
-    _roi_base = _roi_bases[0]
-    _multi_roi = len(_resolve_roi_bases(None, _exp_for_roi)) > 1
-
     # Marker queue mode: pass a list/tuple of markers and run one Sankey per marker.
     if isinstance(marker, (list, tuple, set, np.ndarray, pd.Series, pd.Index)) and not isinstance(marker, str):
         marker_list = []
@@ -12435,7 +12363,6 @@ def plot_coloc_sankey(
                 m,
                 df=None,
                 specificity=specificity,
-                roi=roi,
                 by=by,
                 remove_closest=remove_closest,
                 false_bottom=false_bottom,
@@ -12476,7 +12403,6 @@ def plot_coloc_sankey(
                 marker,
                 df=source_df,
                 specificity=spec,
-                roi=roi,
                 by=by_mode,
                 remove_closest=remove_closest,
                 false_bottom=false_bottom,
@@ -13025,7 +12951,6 @@ def plot_coloc_sankey(
                 factor=by_mode if by_mode is not None and by_mode != "conditions" else None,
                 specificity=specificity,
                 aliases=getattr(exp_obj, 'aliases', None),
-                roi_base=_roi_base, multi_roi=_multi_roi,
             )
 
             norm_tag = "normalized" if normalize else "rawcounts"

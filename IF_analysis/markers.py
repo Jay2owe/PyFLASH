@@ -27,6 +27,9 @@ class Attribute:
         self.experiment = experiment
         self.name = name
         self.df.columns = [clean_column_name(c) for c in self.df.columns]
+        # Ensure Region column exists (ZIP-loaded data may still have SCN)
+        if 'SCN' in self.df.columns and 'Region' not in self.df.columns:
+            self.df = self.df.rename(columns={'SCN': 'Region'})
         if hasattr(self.experiment, 'condition_labels'):
             label_map = dict(zip(
                 self.experiment.condition_labels.iloc[:, 0],
@@ -67,13 +70,13 @@ class Antibody(Attribute):
             self._adjust_coordinates()
         if isinstance(self, objectMarker):
             self.addColocData(Config.THRESHOLD)
-        self.df.set_index('SCN', inplace=True)
+        self.df.set_index('Region', inplace=True)
         _log.confirm(f'{self.name} data processing complete.')
         return self.df
 
     def _clean_columns(self):
         _log.status(f"Cleaning {self.name} DataFrame...")
-        no_rename = ['SCN', 'Animal Name']
+        no_rename = ['Region', 'Hemisphere', 'ROI', 'Animal Name']
         label_map = None
         if hasattr(self.experiment, 'condition_labels'):
             label_map = dict(zip(
@@ -94,7 +97,7 @@ class Antibody(Attribute):
             ]
         else:
             # Object/cell marker data
-            protected_cols = ['SCN', 'Animal Name', 'Count']
+            protected_cols = ['Region', 'Hemisphere', 'ROI', 'Animal Name', 'Count']
             self.df['Count'] = np.where(self.df['Volume (micron^3)'] > 0, 1, 0)
             no_data_mask = self.df['Count'] == 0
             cols_to_nan = self.df.columns.difference(protected_cols)
@@ -122,7 +125,7 @@ class Antibody(Attribute):
         try:
             _log.status(f"Adjusting coordinates for {name} points...")
             area = self.experiment.data['ROI Properties'].df
-            self.df = self.df.merge(area, left_on='SCN', right_on='SCN')
+            self.df = self.df.merge(area, left_on='Region', right_on='Region')
             self.df = self.df.drop(columns=["AnimalName_y"]).rename(
                 columns={"AnimalName_x": "AnimalName"}
             )
@@ -189,9 +192,9 @@ class Antibody(Attribute):
     def find_distance_to_ventricle(self, rois):
         rois = self.experiment.data['ROIs'].df
         all_distances = []
-        for s in self.df['SCN'].unique():
-            SCN_df = self.df[self.df['SCN'] == s]
-            roi_df = rois[rois['SCN'] == s]
+        for s in self.df['Region'].unique():
+            SCN_df = self.df[self.df['Region'] == s]
+            roi_df = rois[rois['Region'] == s]
             if SCN_df.empty or SCN_df[f'{self.name}_ZM'].iloc[0] == 0 or roi_df.empty:
                 dists = np.full(SCN_df.shape[0], np.inf)
             elif roi_df.isna()['x'].any():

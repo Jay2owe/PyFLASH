@@ -90,7 +90,9 @@ class Batch(Experiment):
         )
         tracker.start_item("Create Batch Summary")
         self._create_batch_summary()
-        tracker.finish_item("Create Batch Summary", detail=f"{self.summary.shape[0]} animals x {self.summary.shape[1]} columns")
+        n_rois = len(self.summaries)
+        n_animals = max((s.shape[0] for s in self.summaries.values()), default=0)
+        tracker.finish_item("Create Batch Summary", detail=f"{n_rois} ROI(s) | {n_animals} animals")
         tracker.start_item("Set Batch Conditions")
         self.set_condition_list(self.condition_list)
         tracker.finish_item("Set Batch Conditions")
@@ -106,9 +108,9 @@ class Batch(Experiment):
             self.imagesDict = {}
             image_detail = "Skipped image import"
         tracker.finish_item("Import Images" if import_images else "Skip Images", detail=image_detail)
-        tracker.start_item("Assign SCNs")
-        self.assign_scn_number()
-        tracker.finish_item("Assign SCNs", detail=getattr(self, "_last_scn_summary", None))
+        tracker.start_item("Assign Regions")
+        self.assign_region()
+        tracker.finish_item("Assign Regions", detail=getattr(self, "_last_region_summary", None))
         self._last_process_summary = f"{len(self.experiment_list)} experiments | {self.summary.shape[0]} animals"
         tracker.close(self._last_process_summary)
 
@@ -254,104 +256,123 @@ class Batch(Experiment):
 
     def _create_batch_summary(self):
         if len(self.experiment_list) == 0:
-            self.summary = pd.DataFrame(columns=["AnimalName"])
-            return self.summary
+            self.summaries = {'SCN': pd.DataFrame(columns=["AnimalName"])}
+            return self.summaries
 
         # Ensure marker score columns exist on every experiment summary before merge.
         for exp in self.experiment_list:
-            if hasattr(exp, "summary") and isinstance(exp.summary, pd.DataFrame):
+            if hasattr(exp, 'summaries') and exp.summaries:
+                for rb, s in exp.summaries.items():
+                    exp.summaries[rb] = _add_marker_scores(s.copy())
+            elif hasattr(exp, "summary") and isinstance(exp.summary, pd.DataFrame):
                 exp.summary = _add_marker_scores(exp.summary.copy())
 
-        id_cols = {"AnimalName", "Condition", "SCN"}
-        # Include factor columns as IDs when available, so only metric columns
-        # get the not-included sentinel.
+        # Collect all ROI bases across experiments
+        all_roi_bases = set()
+        for exp in self.experiment_list:
+            if hasattr(exp, 'summaries') and exp.summaries:
+                all_roi_bases.update(exp.summaries.keys())
+            else:
+                all_roi_bases.add('SCN')
+        if not all_roi_bases:
+            all_roi_bases = {'SCN'}
+
+        id_cols = {"AnimalName", "Condition", "Region"}
         if hasattr(self, "condition_list") and hasattr(self.condition_list, "factor"):
             try:
                 id_cols.update(list(self.condition_list.factor))
             except Exception:
                 pass
 
-        # Start from first experiment summary.
-        first = self._canonicalize_not_included_cells(
-            self.experiment_list[0].summary.copy(),
-            id_cols=id_cols,
-        )
-        summary = first.copy()
-        exp_animals = []
-        exp_metric_cols = []
+        self.summaries = {}
+        for roi_base in sorted(all_roi_bases):
+            # Get each experiment's summary for this ROI base
+            exp_summaries = []
+            for exp in self.experiment_list:
+                if hasattr(exp, 'summaries') and roi_base in exp.summaries:
+                    exp_summaries.append(exp.summaries[roi_base])
+                elif roi_base == 'SCN' and hasattr(exp, 'summary'):
+                    exp_summaries.append(exp.summary)
+            if not exp_summaries:
+                continue
 
-        animals0 = set(first["AnimalName"].dropna().astype(str).tolist()) if "AnimalName" in first.columns else set()
-        exp_animals.append(animals0)
-        exp_metric_cols.append([c for c in first.columns if c not in id_cols])
-
-        # Merge remaining experiments with temporary unique suffixes, so we can
-        # track exactly which columns came from which experiment.
-        for exp_idx, exp in enumerate(self.experiment_list[1:], start=1):
-            right = self._canonicalize_not_included_cells(
-                exp.summary.copy(),
-                id_cols=id_cols,
+            first = self._canonicalize_not_included_cells(
+                exp_summaries[0].copy(), id_cols=id_cols,
             )
-            animals = set(right["AnimalName"].dropna().astype(str).tolist()) if "AnimalName" in right.columns else set()
-            exp_animals.append(animals)
+            summary = first.copy()
+            exp_animals = []
+            exp_metric_cols = []
 
-            rename_map = {
-                c: f"{c}__exp{exp_idx}"
-                for c in right.columns
-                if c != "AnimalName"
-            }
-            right = right.rename(columns=rename_map)
-            summary = pd.merge(summary, right, on="AnimalName", how="outer")
+            animals0 = set(first["AnimalName"].dropna().astype(str).tolist()) if "AnimalName" in first.columns else set()
+            exp_animals.append(animals0)
+            exp_metric_cols.append([c for c in first.columns if c not in id_cols])
 
-            right_metric_cols = []
-            for col in exp.summary.columns:
-                if col in id_cols or col == "AnimalName":
+            for exp_idx, exp_sum in enumerate(exp_summaries[1:], start=1):
+                right = self._canonicalize_not_included_cells(
+                    exp_sum.copy(), id_cols=id_cols,
+                )
+                animals = set(right["AnimalName"].dropna().astype(str).tolist()) if "AnimalName" in right.columns else set()
+                exp_animals.append(animals)
+
+                rename_map = {
+                    c: f"{c}__exp{exp_idx}"
+                    for c in right.columns
+                    if c != "AnimalName"
+                }
+                right = right.rename(columns=rename_map)
+                summary = pd.merge(summary, right, on="AnimalName", how="outer")
+
+                right_metric_cols = []
+                for col in exp_sum.columns:
+                    if col in id_cols or col == "AnimalName":
+                        continue
+                    right_metric_cols.append(f"{col}__exp{exp_idx}")
+                exp_metric_cols.append(right_metric_cols)
+
+            animal_series = summary["AnimalName"].astype(str) if "AnimalName" in summary.columns else pd.Series(dtype=str)
+            for i, cols in enumerate(exp_metric_cols):
+                if len(cols) == 0:
                     continue
-                right_metric_cols.append(f"{col}__exp{exp_idx}")
-            exp_metric_cols.append(right_metric_cols)
+                absent_mask = ~animal_series.isin(exp_animals[i])
+                present_cols = [c for c in cols if c in summary.columns]
+                if len(present_cols) == 0:
+                    continue
+                summary.loc[absent_mask, present_cols] = NOT_INCLUDED_SENTINEL
 
-        # Mark rows for animals absent from each experiment with sentinel string,
-        # but only in that experiment's metric columns.
-        animal_series = summary["AnimalName"].astype(str) if "AnimalName" in summary.columns else pd.Series(dtype=str)
-        for i, cols in enumerate(exp_metric_cols):
-            if len(cols) == 0:
-                continue
-            absent_mask = ~animal_series.isin(exp_animals[i])
-            present_cols = [c for c in cols if c in summary.columns]
-            if len(present_cols) == 0:
-                continue
-            summary.loc[absent_mask, present_cols] = NOT_INCLUDED_SENTINEL
+            summary = self._canonicalize_not_included_cells(summary, id_cols=id_cols)
+            summary = self._label_duplicate_metric_columns_with_experiment(summary, id_cols=id_cols)
+            self.summaries[roi_base] = self._dedup_columns(summary)
 
-        # Safety pass: collapse any accidental concatenated sentinel strings.
-        summary = self._canonicalize_not_included_cells(summary, id_cols=id_cols)
-
-        # Replace generic duplicate numbering with experiment-aware names
-        # for repeated metric columns (e.g. CK1d_Count.exp1, CK1d_Count.exp2).
-        summary = self._label_duplicate_metric_columns_with_experiment(summary, id_cols=id_cols)
-        self.summary = self._dedup_columns(summary)
-        return self.summary
+        return self.summaries
 
     def save_csvs(self):
         for exp in self.experiment_list:
             exp.save_csvs()
 
     def export_all_excel(self, save_path=None):
-        if save_path == None: save_path = self.export_path
-
-        self.export_IF_summary_excel(save_path)
+        if save_path is None:
+            save_path = self.export_path
+        for roi_base in self.summaries:
+            roi_path = os.path.join(save_path, roi_base.lower())
+            os.makedirs(roi_path, exist_ok=True)
+            self.export_IF_summary_excel(roi_path, roi_base=roi_base)
+            self.export_extended_data_excel(roi_path, roi_base=roi_base)
+        # Behavior data is region-independent
         self.export_behavior_summary_excel(save_path)
-        self.export_extended_data_excel(save_path)
 
         # Alternative optimized version using the cache
-    def export_extended_data_excel(self, save_path=None, verbose=True, use_tqdm=False):
+    def export_extended_data_excel(self, save_path=None, verbose=True, use_tqdm=False, roi_base=None):
         """
         Further optimized version using caching and additional performance improvements.
-        
+
         Args:
             save_path: Path to save the Excel file
             verbose: If True, print progress updates (default: True)
             use_tqdm: If True, use tqdm progress bar instead of print statements (default: False)
+            roi_base: Which ROI type to export (e.g. 'SCN', 'OC'). None exports all.
         """
-        if save_path == None: save_path = self.export_path
+        if save_path is None:
+            save_path = self.export_path
         import time
         
         # Try to import tqdm if requested
@@ -542,9 +563,13 @@ class Batch(Experiment):
 
         _log.confirm(f"Exported extended IF data to {os.path.join(save_path, 'IF_Extended.xlsx')}")
 
-    def export_IF_summary_excel(self, save_path=None):
-        if save_path == None: save_path = self.export_path
-        summary = self.summary
+    def export_IF_summary_excel(self, save_path=None, roi_base=None):
+        if save_path is None:
+            save_path = self.export_path
+        if roi_base is not None and roi_base in self.summaries:
+            summary = self.summaries[roi_base]
+        else:
+            summary = self.summary
         factors = self.factor
         condition_list = self.condition_list
         columns_to_save = (col for col in summary.columns if col not in ['Condition', 'AnimalName'] + factors and any(data in col for data in self.data.keys())) # Only save relevant columns

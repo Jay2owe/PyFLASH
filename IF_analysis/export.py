@@ -31,19 +31,19 @@ _MULTICOLOC = (
 
 IF_NAME_MAP = {
     "<ab>_Count": {
-        "label": "<ab> Count per mm³",
+        "label": "<ab> Count per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}The number of segmented <ab> objects was summed and {_PER_VOL}.",
     },
     "<ab>_IntDenTotal": {
-        "label": "<ab> IntDen (A.U.) per mm³",
+        "label": "<ab> IntDen (A.U.) per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}The integrated density across all segmented <ab> objects was summed and {_PER_VOL}.",
     },
     "<ab>_VolumeTotal": {
-        "label": "<ab> Volume (µm³) per mm³",
+        "label": "<ab> Volume (µm³) per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}The volume of all segmented <ab> objects was summed and {_PER_VOL}.",
     },
     "<ab>_SurfaceTotal": {
-        "label": "<ab> SA (µm²) per mm³",
+        "label": "<ab> SA (µm²) per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}The surface area of all segmented <ab> objects was summed and {_PER_VOL}.",
     },
     "<ab>_IntDenMean": {
@@ -71,7 +71,7 @@ IF_NAME_MAP = {
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The mean % voxel overlap of each segmented <ab> object by <ab2> {_QUANTIFIED}.",
     },
     "<ab>_ColocCount<ab2>": {
-        "label": "<ab2>+<ab> per mm³",
+        "label": "<ab2>+<ab> per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The % of segmented <ab> objects with a greater than {threshold}% overlap by <ab2> objects {_QUANTIFIED}.",
     },
     "<ab>_ColocCount<ab2>%": {
@@ -291,6 +291,26 @@ def _groups_for_column(colname: str) -> dict:
             return m.groupdict()
     raise KeyError(colname)
 
+
+def _summary_marker_for_column(colname: str) -> str:
+    """
+    Return the real marker represented by a summary column.
+
+    Combo-derived summary columns are named like
+    ``DAPI_Combo_wCK1d_Count``. Those should still be documented under the
+    base marker ``DAPI`` in the Excel "Data Summary" sheet rather than being
+    treated as standalone markers.
+    """
+    base, _ = _strip_exp_suffix(colname)
+    if "_Combo_" in base:
+        return base.split("_Combo_", 1)[0]
+
+    groups = _groups_for_column(colname)
+    marker = groups.get("ab")
+    if marker:
+        return normalize_marker_name(marker)
+    raise KeyError(colname)
+
 def autosize_columns(worksheet, df, padding=2, max_width=120):
     for col_idx, col_name in enumerate(df.columns):
         series = df[col_name].astype(str).fillna("")
@@ -398,13 +418,13 @@ def write_experiment_data_list_sheet(writer, experiment_list, sheet_name="Data o
         for col in summary_cols:
             try:
                 label, _ = convert_name(col)  # SAME logic as export_summary_excel
-                groups = _groups_for_column(col)
             except KeyError:
                 continue  # not in NAME_MAP → skip
 
-            # Identify marker (collapse ROI + non-ROI)
-            marker = groups.get("ab")  # PRIMARY marker (directionally correct)
-            if not marker:
+            # Document combo-derived summary columns under their parent marker.
+            try:
+                marker = _summary_marker_for_column(col)
+            except KeyError:
                 continue
 
             analysis = "ROI" if "_ROI" in col else "Object"
