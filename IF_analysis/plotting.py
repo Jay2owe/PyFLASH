@@ -5857,6 +5857,43 @@ def _combo_collapse_save_suffix(collapse_markers):
     return f"--collapse-{safe}"
 
 
+def _normalize_pie_labels_map(labels):
+    if labels is None:
+        return {}
+    if not isinstance(labels, dict):
+        raise TypeError("labels must be a dict mapping raw labels to display labels.")
+    out = {}
+    for raw_label, display_label in labels.items():
+        raw_s = str(raw_label).strip()
+        display_s = str(display_label).strip()
+        if raw_s == "":
+            raise ValueError("labels keys must not be empty.")
+        if display_s == "":
+            raise ValueError("labels values must not be empty.")
+        out[raw_s] = display_s
+    return out
+
+
+def _apply_pie_labels_map(raw_labels, labels_map):
+    raw_labels_s = [str(label) for label in raw_labels]
+    if len(labels_map) == 0:
+        return raw_labels_s
+
+    mapped = []
+    seen_display = {}
+    for raw_label in raw_labels_s:
+        display_label = str(labels_map.get(raw_label, raw_label))
+        prev_raw = seen_display.get(display_label)
+        if prev_raw is not None and prev_raw != raw_label:
+            raise ValueError(
+                "labels maps multiple categories to the same display label. "
+                "Use collapse_markers for category merging instead."
+            )
+        seen_display[display_label] = raw_label
+        mapped.append(display_label)
+    return mapped
+
+
 def _count_unique_animals(df: pd.DataFrame, mask=None):
     if "AnimalName" not in df.columns:
         return None
@@ -8719,11 +8756,13 @@ def pie_chart_action(ctx: Context, state: dict,
     if x not in df.columns:
         raise ValueError(f"Column '{x}' not found in marker '{marker}' dataframe.")
 
-    labels, counts = _build_pie_counts_from_series(
+    raw_labels, counts = _build_pie_counts_from_series(
         df[x],
         threshold=threshold,
         drop_zeros=(str(plot_format).strip().casefold() != 'bar'),
     )
+    labels_map = _normalize_pie_labels_map(kwargs.get("labels"))
+    labels = _apply_pie_labels_map(raw_labels, labels_map)
     percentages = _counts_to_percentages(counts)
     n_animals = _count_unique_animals(df, mask=_pie_valid_row_mask(df[x], threshold=threshold))
     show_counts, show_pct = _resolve_pie_value_flags(
@@ -8800,6 +8839,7 @@ def pie_chart_action(ctx: Context, state: dict,
     sns.despine(trim=False, ax=ax)
     return {
         'pie_labels': labels,
+        'pie_raw_labels': raw_labels,
         'pie_counts': counts,
         'pie_percentages': percentages,
         'group': group_name,
@@ -8848,11 +8888,13 @@ def combo_pie_action(ctx: Context, state: dict,
         collapse_markers=collapse_markers,
         include_none=bool(include_none),
     )
-    labels, counts = _build_combo_counts_from_series(
+    raw_labels, counts = _build_combo_counts_from_series(
         signature_series,
         category_order=category_order,
         drop_zeros=(str(plot_format).strip().casefold() != 'bar'),
     )
+    labels_map = _normalize_pie_labels_map(kwargs.get("labels"))
+    labels = _apply_pie_labels_map(raw_labels, labels_map)
     percentages = _counts_to_percentages(counts)
     valid_mask = signature_series.notna() & signature_series.astype(str).str.strip().ne("")
     n_animals = _count_unique_animals(df, mask=valid_mask)
@@ -8924,6 +8966,7 @@ def combo_pie_action(ctx: Context, state: dict,
     sns.despine(trim=False, ax=ax)
     return {
         'pie_labels': labels,
+        'pie_raw_labels': raw_labels,
         'pie_counts': counts,
         'pie_percentages': percentages,
         'group': group_name,
@@ -11815,6 +11858,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                     start_angle=90, line_width=1.0,
                     save=True, specificity=None, roi=None,
                     plot_format='pie', show_counts=None, show_pct=None,
+                    labels=None,
                     include_N=False, as_counts=None, include_n=None,
                     bottom_ticks=False, bottom_tick_labels=False):
     """
@@ -11835,6 +11879,7 @@ def plot_pie_charts(experiment, marker, x_attr,
       For 'bar', all conditions/factor groups are shown on one stacked bar chart.
     - show_counts: display counts.
     - show_pct: display percentages.
+    - labels: optional dict mapping plotted labels/bins to display text.
     - include_N: append the number of contributing animals (unique AnimalName).
     - as_counts/include_n: backward-compatible aliases.
     - bottom_ticks / bottom_tick_labels: x-axis tick visibility for bar mode.
@@ -11858,6 +11903,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                 plot_format=plot_format,
                 show_counts=show_counts_flag,
                 show_pct=show_pct_flag,
+                labels=labels,
                 include_N=include_N_flag,
                 bottom_ticks=bottom_ticks, bottom_tick_labels=bottom_tick_labels,
             )
@@ -11892,6 +11938,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                     plot_format=plot_format,
                     show_counts=show_counts_flag,
                     show_pct=show_pct_flag,
+                    labels=labels,
                     include_N=include_N_flag,
                     bottom_ticks=bottom_ticks,
                     bottom_tick_labels=bottom_tick_labels,
@@ -11916,6 +11963,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                 plot_format=plot_format,
                 show_counts=show_counts_flag,
                 show_pct=show_pct_flag,
+                labels=labels,
                 include_N=include_N_flag,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
@@ -12121,6 +12169,7 @@ def plot_pie_charts(experiment, marker, x_attr,
         plot_format=plot_mode,
         show_counts=bool(show_counts_flag),
         show_pct=bool(show_pct_flag),
+        labels=labels,
         include_N=bool(include_N_flag),
         specificity_filter=specificity,
         roi_base=_roi_base,
@@ -12133,6 +12182,7 @@ def plot_combo_pies(experiment, marker,
                     start_angle=90, line_width=1.0,
                     save=True, specificity=None, roi=None,
                     plot_format='pie', show_counts=None, show_pct=None,
+                    labels=None,
                     include_none=True,
                     collapse_markers=None,
                     include_N=False, as_counts=None, include_n=None,
@@ -12147,7 +12197,8 @@ def plot_combo_pies(experiment, marker,
     Each object contributes to exactly one category, so the family partitions
     the marker population. `include_none=True` retains the explicit `None`
     category when present. `include_N=True` appends the number of
-    contributing animals (unique AnimalName). `as_counts/include_n` are
+    contributing animals (unique AnimalName). `labels` remaps the final
+    displayed combo signatures after any collapse. `as_counts/include_n` are
     backward-compatible aliases.
     """
     show_counts_flag, show_pct_flag = _resolve_pie_value_flags(
@@ -12177,6 +12228,7 @@ def plot_combo_pies(experiment, marker,
                 plot_format=plot_format,
                 show_counts=show_counts_flag,
                 show_pct=show_pct_flag,
+                labels=labels,
                 include_none=include_none,
                 collapse_markers=collapse_markers_norm,
                 include_N=include_N_flag,
@@ -12213,6 +12265,7 @@ def plot_combo_pies(experiment, marker,
                     plot_format=plot_format,
                     show_counts=show_counts_flag,
                     show_pct=show_pct_flag,
+                    labels=labels,
                     include_none=include_none,
                     collapse_markers=collapse_markers_norm,
                     include_N=include_N_flag,
@@ -12238,6 +12291,7 @@ def plot_combo_pies(experiment, marker,
                 plot_format=plot_format,
                 show_counts=show_counts_flag,
                 show_pct=show_pct_flag,
+                labels=labels,
                 include_none=include_none,
                 collapse_markers=collapse_markers_norm,
                 include_N=include_N_flag,
@@ -12444,6 +12498,7 @@ def plot_combo_pies(experiment, marker,
         plot_format=plot_mode,
         show_counts=bool(show_counts_flag),
         show_pct=bool(show_pct_flag),
+        labels=labels,
         include_N=bool(include_N_flag),
         specificity_filter=specificity,
         roi_base=_roi_base,
@@ -14356,6 +14411,7 @@ _PARAM_DESCRIPTIONS = {
     'plot_format':          '"pie" for pie chart, "bar" for stacked bar.',
     'show_counts':          'Display counts. If used alone in bar mode, the y-axis uses raw counts.',
     'show_pct':             'Display percentages. If used in bar mode, the y-axis uses percent.',
+    'labels':               'Optional dict mapping plotted category labels to display labels.',
     'include_N':            'Append contributing animal count (unique AnimalName) to pie titles or group labels.',
     'collapse_markers':     'For combo pies, ignore these partner markers and re-aggregate signatures at plot time.',
     'as_counts':            'Legacy alias: show counts only when true, percent only when false.',

@@ -405,6 +405,26 @@ def test_plot_combo_pies_show_counts_and_pct_builds_dual_pie_labels(monkeypatch)
     assert any("\n" in label and "%" in label for label in autopct_seen)
 
 
+def test_plot_pie_charts_labels_remap_displayed_bins():
+    experiment = _build_marker_specificity_experiment()
+
+    result = plotting.plot_pie_charts(
+        experiment,
+        marker="CK1d",
+        x_attr="Coloc_mCherry",
+        threshold=[30],
+        factor="Genotype",
+        specificity=("Time", "WeekFour"),
+        show_counts=True,
+        show_pct=False,
+        labels={"<= 30": "Negative", "> 30": "Positive"},
+        save=False,
+    )
+
+    assert result["pie_raw_labels"] == [["<= 30", "> 30"], ["> 30"]]
+    assert result["pie_labels"] == [["Negative", "Positive"], ["Positive"]]
+
+
 def test_plot_combo_pies_can_collapse_comboany_marker_at_plot_time():
     experiment = _build_marker_specificity_experiment()
 
@@ -467,6 +487,33 @@ def test_plot_combo_pies_can_collapse_detailed_combo_marker_at_plot_time():
         ["None", "wmCherry"],
     ]
     assert week_eight["pie_counts"] == [[1, 2], [2, 2]]
+
+
+def test_plot_combo_pies_labels_remap_collapsed_signatures():
+    experiment = _build_marker_specificity_experiment()
+
+    result = plotting.plot_combo_pies(
+        experiment,
+        marker="CK1d",
+        family="comboany",
+        show_counts=True,
+        show_pct=False,
+        plot_format="pie",
+        factor="Genotype",
+        specificity=("Time", "WeekFour"),
+        collapse_markers="GFAP",
+        labels={
+            "None": "Non-mCherry and Non-Nuclear",
+            "mCherry+": "mCherry Cytoplasm",
+        },
+        save=False,
+    )
+
+    assert result["pie_raw_labels"] == [["None"], ["None", "mCherry+"]]
+    assert result["pie_labels"] == [
+        ["Non-mCherry and Non-Nuclear"],
+        ["Non-mCherry and Non-Nuclear", "mCherry Cytoplasm"],
+    ]
 
 
 def test_plot_ecdf_specificity_queue_filters_each_group_independently():
