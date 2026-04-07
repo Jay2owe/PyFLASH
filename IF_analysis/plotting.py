@@ -3436,6 +3436,247 @@ def _to_numeric_excluding_not_included(series, sentinel="NOT_INCLUDED_IN_EXPERIM
     return pd.to_numeric(s, errors='coerce')
 
 
+def _scatter_size_norm(reference_df: pd.DataFrame | None, size_col: str):
+    """Return stable min/max normalization for 3D scatter marker sizes."""
+    if not isinstance(reference_df, pd.DataFrame):
+        return None
+    if size_col not in reference_df.columns:
+        raise KeyError(f"Column not found for size_by: {size_col}")
+
+    ref_vals = _to_numeric_excluding_not_included(reference_df[size_col]).to_numpy(dtype=float)
+    ref_finite = ref_vals[np.isfinite(ref_vals)]
+    if ref_finite.size == 0:
+        return None
+
+    vmin = float(np.min(ref_finite))
+    vmax = float(np.max(ref_finite))
+    if not np.isfinite(vmin) or not np.isfinite(vmax):
+        return None
+    return (vmin, vmax)
+
+
+def _scatter_point_sizes(
+    df: pd.DataFrame,
+    *,
+    size_by=None,
+    point_size=40,
+    size_factor=1.0,
+    size_norm=None,
+) -> np.ndarray:
+    """Resolve marker sizes for 3D scatter, optionally scaling by a data column."""
+    n = int(len(df))
+    if n <= 0:
+        return np.asarray([], dtype=float)
+
+    try:
+        factor = float(size_factor)
+    except (TypeError, ValueError):
+        factor = 1.0
+    if not np.isfinite(factor) or factor <= 0:
+        factor = 1.0
+
+    base_size = max(float(point_size), 1.0) * factor
+    out = np.full(n, base_size, dtype=float)
+    if size_by is None:
+        return out
+    if size_by not in df.columns:
+        raise KeyError(f"Column not found for size_by: {size_by}")
+
+    vals = _to_numeric_excluding_not_included(df[size_by]).to_numpy(dtype=float)
+    finite = np.isfinite(vals)
+    if not finite.any():
+        return out
+
+    if size_norm is None:
+        finite_vals = vals[finite]
+        vmin = float(np.min(finite_vals))
+        vmax = float(np.max(finite_vals))
+    else:
+        vmin, vmax = size_norm
+
+    min_size = max(8.0, base_size * 0.5)
+    max_size = max(min_size, base_size * 2.5)
+
+    if np.isfinite(vmin) and np.isfinite(vmax) and vmax > vmin:
+        scaled = (vals[finite] - vmin) / (vmax - vmin)
+        scaled = np.clip(scaled, 0.0, 1.0)
+        out[finite] = min_size + scaled * (max_size - min_size)
+    else:
+        out[finite] = base_size
+
+    return out
+
+
+def _normalize_regression_series(series, mode, axis_name='value'):
+    """Normalize a regression axis series according to the requested mode."""
+    if mode is None or mode is False:
+        return series
+
+    if isinstance(mode, bool):
+        if not mode:
+            return series
+        mode = (0.0, 1.0)
+
+    values = series.to_numpy(dtype=float, copy=True)
+    if values.size == 0:
+        return series.astype(float)
+
+    if isinstance(mode, str):
+        key = str(mode).strip().casefold().replace('-', '').replace('_', '').replace(' ', '')
+        if key != 'zscore':
+            raise ValueError(
+                f"{axis_name} normalization must be False, True, a (min, max) range, or 'Z-score'."
+            )
+        mean = float(np.nanmean(values))
+        std = float(np.nanstd(values, ddof=0))
+        if not np.isfinite(std) or std == 0.0:
+            normalized = np.zeros_like(values, dtype=float)
+        else:
+            normalized = (values - mean) / std
+        return pd.Series(normalized, index=series.index, name=series.name, dtype=float)
+
+    if isinstance(mode, (list, tuple, np.ndarray, pd.Series, pd.Index)):
+        try:
+            target_min, target_max = mode
+        except ValueError as exc:
+            raise ValueError(
+                f"{axis_name} normalization range must contain exactly two values."
+            ) from exc
+
+        target_min = float(target_min)
+        target_max = float(target_max)
+        if not np.isfinite(target_min) or not np.isfinite(target_max):
+            raise ValueError(f"{axis_name} normalization range must be finite.")
+        if target_min == target_max:
+            raise ValueError(f"{axis_name} normalization range min and max must differ.")
+
+        source_min = float(np.nanmin(values))
+        source_max = float(np.nanmax(values))
+        if not np.isfinite(source_min) or not np.isfinite(source_max):
+            return pd.Series(values, index=series.index, name=series.name, dtype=float)
+        if source_min == source_max:
+            normalized = np.full(values.shape, target_min, dtype=float)
+        else:
+            scale = (target_max - target_min) / (source_max - source_min)
+            normalized = ((values - source_min) * scale) + target_min
+        return pd.Series(normalized, index=series.index, name=series.name, dtype=float)
+
+    raise ValueError(
+        f"{axis_name} normalization must be False, True, a (min, max) range, or 'Z-score'."
+    )
+
+
+def _merge_axis_range(axis_range=None, minimum=None, maximum=None):
+    """Merge a `(min, max)` pair with explicit bound overrides."""
+    lower = None
+    upper = None
+
+    if axis_range is not None:
+        try:
+            if len(axis_range) == 2:
+                lower, upper = axis_range
+        except TypeError:
+            pass
+
+    if minimum is not None:
+        lower = minimum
+    if maximum is not None:
+        upper = maximum
+
+    if lower is None and upper is None:
+        return None
+    return (lower, upper)
+
+
+def _apply_axis_range(ax, axis_name, axis_range):
+    """Apply a partial or full axis range, preserving the unset bound."""
+    if axis_range is None:
+        return
+
+    if axis_name == 'x':
+        getter = ax.get_xlim
+        setter = ax.set_xlim
+    elif axis_name == 'y':
+        getter = ax.get_ylim
+        setter = ax.set_ylim
+    else:
+        raise ValueError(f"Unsupported axis '{axis_name}'.")
+
+    current_low, current_high = getter()
+    low, high = axis_range
+    low = current_low if low is None else float(low)
+    high = current_high if high is None else float(high)
+
+    if not np.isfinite(low) or not np.isfinite(high):
+        raise ValueError(f"{axis_name}_axis limits must be finite numbers.")
+
+    setter(low, high)
+
+
+def _clip_segment_to_rect(x0, y0, x1, y1, x_limits, y_limits):
+    """Clip a line segment to an axis-aligned rectangle."""
+    xmin, xmax = sorted((float(x_limits[0]), float(x_limits[1])))
+    ymin, ymax = sorted((float(y_limits[0]), float(y_limits[1])))
+
+    dx = float(x1) - float(x0)
+    dy = float(y1) - float(y0)
+    t0 = 0.0
+    t1 = 1.0
+
+    for p, q in (
+        (-dx, float(x0) - xmin),
+        (dx, xmax - float(x0)),
+        (-dy, float(y0) - ymin),
+        (dy, ymax - float(y0)),
+    ):
+        if p == 0.0:
+            if q < 0.0:
+                return None
+            continue
+
+        t = q / p
+        if p < 0.0:
+            if t > t1:
+                return None
+            t0 = max(t0, t)
+        else:
+            if t < t0:
+                return None
+            t1 = min(t1, t)
+
+    return (
+        (float(x0) + t0 * dx, float(y0) + t0 * dy),
+        (float(x0) + t1 * dx, float(y0) + t1 * dy),
+    )
+
+
+def _clip_regression_line_to_axes(line, x_limits, y_limits):
+    """Trim a regression line so its data stays inside the active axis box."""
+    if line is None:
+        return
+
+    x_data = np.asarray(line.get_xdata(orig=False), dtype=float)
+    y_data = np.asarray(line.get_ydata(orig=False), dtype=float)
+    finite = np.isfinite(x_data) & np.isfinite(y_data)
+    if np.count_nonzero(finite) < 2:
+        return
+
+    x_vals = x_data[finite]
+    y_vals = y_data[finite]
+    clipped = _clip_segment_to_rect(
+        x_vals[0], y_vals[0],
+        x_vals[-1], y_vals[-1],
+        x_limits=x_limits,
+        y_limits=y_limits,
+    )
+    if clipped is None:
+        line.set_data([], [])
+        return
+
+    (x0, y0), (x1, y1) = clipped
+    line.set_data([x0, x1], [y0, y1])
+
+
 def _coerce_bool_like(series: pd.Series) -> pd.Series:
     """Coerce mixed binary-ish values to bool, treating NaN as False."""
     s = series.copy()
@@ -8009,6 +8250,8 @@ def scatter_action(ctx: Context, state: dict,
     """Plot a strip/scatter for one condition."""
     ax = state['ax']
     df = _context_marker_df(ctx, marker) if marker else ctx.condition_df
+    specificity = kwargs.get('specificity_filter', kwargs.get('specificity'))
+    df = _filter_df_by_specificity(df, specificity)
     color = ctx.color
 
     plot = sns.stripplot(
@@ -8032,7 +8275,7 @@ def histogram_action(ctx: Context, state: dict,
         raise IndexError("No valid axis available for histogram_action.")
     df = ctx.experiment.data[marker].df.reset_index()
     df = _filter_marker_df_for_context(ctx, df)
-    specificity = kwargs.get('specificity')
+    specificity = kwargs.get('specificity_filter', kwargs.get('specificity'))
     df = _filter_df_by_specificity(df, specificity)
     if x not in df.columns:
         raise ValueError(f"Column '{x}' not found in marker '{marker}' dataframe.")
@@ -8095,7 +8338,7 @@ def ridgeline_action(ctx: Context, state: dict,
 
     df = ctx.experiment.data[marker].df.reset_index()
     df = _filter_marker_df_for_context(ctx, df)
-    specificity = kwargs.get('specificity')
+    specificity = kwargs.get('specificity_filter', kwargs.get('specificity'))
     df = _filter_df_by_specificity(df, specificity)
     if x not in df.columns:
         raise ValueError(f"Column '{x}' not found in marker '{marker}' dataframe.")
@@ -8142,7 +8385,7 @@ def pie_chart_action(ctx: Context, state: dict,
 
     df = ctx.experiment.data[marker].df.reset_index()
     df = _filter_marker_df_for_context(ctx, df)
-    specificity = kwargs.get('specificity')
+    specificity = kwargs.get('specificity_filter', kwargs.get('specificity'))
     df = _filter_df_by_specificity(df, specificity)
     if x not in df.columns:
         raise ValueError(f"Column '{x}' not found in marker '{marker}' dataframe.")
@@ -8234,16 +8477,25 @@ def regression_action(ctx: Context, state: dict,
     df = source_df[[x, y]].copy()
     x_range = kwargs.get('x_range')
     y_range = kwargs.get('y_range')
+    clip_fit_line = bool(kwargs.get('clip_fit_line', True))
     for col_name in (x, y):
         df[col_name] = _to_numeric_excluding_not_included(df[col_name])
     df = df.dropna(subset=[x, y])
+    df[x] = _normalize_regression_series(df[x], normalize_x, axis_name=x)
+    df[y] = _normalize_regression_series(df[y], normalize_y, axis_name=y)
 
     if df.empty:
         set_display_name(ax, y, x, compact_per=True, fontdict={'weight': 'normal'}, size=25)
         sns.despine(trim=False, ax=ax)
+        entry = {'group': group_name, 'p': np.nan, 'r': np.nan}
+        if combine:
+            state['regression_stats_entries'] = state.get('regression_stats_entries', []) + [entry]
+        else:
+            state['regression_stats_entries'] = [entry]
         return {'regression': None, 'r': np.nan, 'p': np.nan, 'group': group_name}
 
     color = group_color
+    line_count_before = len(ax.lines)
     if len(df) >= 2:
         reg = sns.regplot(
             x=x, y=y, data=df, ax=ax, color=color, ci=None,
@@ -8256,10 +8508,13 @@ def regression_action(ctx: Context, state: dict,
             scatter_kws={'s': 400},
         )
 
-    if x_range is not None and len(x_range) == 2:
-        ax.set_xlim(x_range[0], x_range[1])
-    if y_range is not None and len(y_range) == 2:
-        ax.set_ylim(y_range[0], y_range[1])
+    fit_line = ax.lines[-1] if len(df) >= 2 and len(ax.lines) > line_count_before else None
+
+    _apply_axis_range(ax, 'x', x_range)
+    _apply_axis_range(ax, 'y', y_range)
+
+    if clip_fit_line and fit_line is not None:
+        _clip_regression_line_to_axes(fit_line, ax.get_xlim(), ax.get_ylim())
 
     from scipy import stats as sp_stats
     if len(df) >= 2:
@@ -8279,10 +8534,13 @@ def regression_action(ctx: Context, state: dict,
         corr = np.nan
         pval = np.nan
 
-    corr_text = f'{corr:.2f}' if np.isfinite(corr) else 'n/a'
+    corr_text = _format_regression_rvalue(corr)
     sig_text = _get_annotation(float(pval), ns='') if np.isfinite(pval) else ''
     stats_text = f'r = {corr_text}{(" " + sig_text) if sig_text else ""}'
+
+    entry = {'group': group_name, 'p': pval, 'r': corr}
     if combine:
+        state['regression_stats_entries'] = state.get('regression_stats_entries', []) + [entry]
         note_idx = state.get('combine_rho_note_idx', 0)
         y_pos = max(0.02, 0.96 - (note_idx * 0.055))
         ax.annotate(
@@ -8292,6 +8550,7 @@ def regression_action(ctx: Context, state: dict,
         )
         state['combine_rho_note_idx'] = note_idx + 1
     else:
+        state['regression_stats_entries'] = [entry]
         ax.annotate(
             stats_text,
             xy=(0.98, 0.95), xycoords='axes fraction',
@@ -8308,8 +8567,54 @@ def regression_action(ctx: Context, state: dict,
     }
 
 
+def _format_side_stats_pvalue(p):
+    """Format p-values consistently for compact side-panel summaries."""
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return "n/a"
+    if not np.isfinite(p):
+        return "n/a"
+    if p < 0.0001:
+        return f"{p:.2e}"
+    return f"{p:.4f}".rstrip("0").rstrip(".")
+
+
+def _format_regression_rvalue(r):
+    try:
+        r = float(r)
+    except (TypeError, ValueError):
+        return "n/a"
+    if not np.isfinite(r):
+        return "n/a"
+    return f"{r:.2f}"
+
+
+def _regression_test_display_name(test):
+    return "Spearman" if "spearman" in str(test).lower() else "Pearson"
+
+
+def _annotate_regression_stats_summary(ax, entries, test):
+    """Draw regression stats to the right of the axes, mirroring mean-bar stats."""
+    lines = [f"Test: {_regression_test_display_name(test)}"]
+    for entry in entries or []:
+        label = str(entry.get("group") or "Group")
+        lines.append(f"{label}: p={_format_side_stats_pvalue(entry.get('p'))}")
+
+    ax.text(
+        1.02, 1.0, "\n".join(lines),
+        transform=ax.transAxes,
+        ha="left", va="top",
+        fontsize=10,
+        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85},
+        clip_on=False,
+    )
+
+
 def scatter_3d_action(ctx: Context, state: dict,
-                      x=None, y=None, z=None, **kwargs):
+                      x=None, y=None, z=None,
+                      normalize_x=False, normalize_y=False, normalize_z=False,
+                      **kwargs):
     """Plot a 3D scatter for one condition/factor."""
     by = 'factor' if ctx.factor_value is not None else 'condition'
     idx = ctx.factor_index if by == 'factor' else ctx.condition_index
@@ -8321,22 +8626,37 @@ def scatter_3d_action(ctx: Context, state: dict,
     group_name, group_color = _resolve_group_label_color(ctx)
 
     source_df = ctx.factor_df if by == 'factor' else ctx.condition_df
-    df = source_df[[x, y, z]].copy()
+    size_by = kwargs.get('size_by')
+    cols = [x, y, z]
+    if size_by is not None and size_by not in cols:
+        cols.append(size_by)
+    df = source_df[cols].copy()
     x_range = kwargs.get('x_range')
     y_range = kwargs.get('y_range')
     z_range = kwargs.get('z_range')
     for col_name in (x, y, z):
         df[col_name] = _to_numeric_excluding_not_included(df[col_name])
     df = df.dropna(subset=[x, y, z])
+    df[x] = _normalize_regression_series(df[x], normalize_x, axis_name=x)
+    df[y] = _normalize_regression_series(df[y], normalize_y, axis_name=y)
+    df[z] = _normalize_regression_series(df[z], normalize_z, axis_name=z)
 
     if df.empty:
         return {'scatter': None, 'group': group_name}
 
     point_size = kwargs.get('point_size', 40)
+    size_factor = kwargs.get('size_factor', 1.0)
     alpha = kwargs.get('alpha', 0.7)
+    sizes = _scatter_point_sizes(
+        df,
+        size_by=size_by,
+        point_size=point_size,
+        size_factor=size_factor,
+        size_norm=state.get('size_norm'),
+    )
     ax.scatter(
         df[x], df[y], df[z],
-        c=group_color, s=point_size, alpha=alpha,
+        c=group_color, s=sizes, alpha=alpha,
         label=group_name,
         edgecolors='white', linewidths=0.3,
     )
@@ -8641,6 +8961,8 @@ def matrix_action(ctx: Context, state: dict,
     by = 'factor' if ctx.factor_value else 'condition'
     if marker:
         df = _context_marker_df(ctx, marker)
+        specificity = kwargs.get('specificity_filter', kwargs.get('specificity'))
+        df = _filter_df_by_specificity(df, specificity)
     else:
         df = ctx.factor_df if by == 'factor' else ctx.condition_df
 
@@ -9675,14 +9997,21 @@ def plot_regressions(experiment, x, y,
                      test='pearsonr',
                      normalize_x=True, normalize_y=True,
                      specificity=None, roi=None, save=True, combine=False,
-                     x_range=None, y_range=None):
+                     x_range=None, y_range=None,
+                     xmin=None, xmax=None, ymin=None, ymax=None,
+                     clip_fit_line=True):
     """
     Regression plot: one figure per condition/factor, or a combined overlay.
     Supports queued x/y inputs:
         - x scalar, y list -> one plot per y
         - x list, y scalar -> one plot per x
         - x list, y list -> all x×y combinations
+    `normalize_x` / `normalize_y` accept False, True (= 0-1 min-max), a
+    `(min, max)` output range, or 'Z-score'.
     """
+    x_range = _merge_axis_range(x_range, xmin, xmax)
+    y_range = _merge_axis_range(y_range, ymin, ymax)
+
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -9694,6 +10023,7 @@ def plot_regressions(experiment, x, y,
                 normalize_x=normalize_x, normalize_y=normalize_y,
                 specificity=specificity, roi=_rb, save=save, combine=combine,
                 x_range=x_range, y_range=y_range,
+                clip_fit_line=clip_fit_line,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -9726,6 +10056,7 @@ def plot_regressions(experiment, x, y,
                     combine=combine,
                     x_range=x_range,
                     y_range=y_range,
+                    clip_fit_line=clip_fit_line,
                 )
         return queued_outputs
 
@@ -9738,6 +10069,7 @@ def plot_regressions(experiment, x, y,
                 normalize_x=normalize_x, normalize_y=normalize_y,
                 specificity=spec, roi=roi, save=save, combine=combine,
                 x_range=x_range, y_range=y_range,
+                clip_fit_line=clip_fit_line,
             )
         return queued_outputs
 
@@ -9755,10 +10087,12 @@ def plot_regressions(experiment, x, y,
                 fig, ax = plt.subplots(figsize=(8, 8))
                 state['fig'] = fig
                 state['ax'] = ax
+                state['regression_stats_entries'] = []
         else:
             fig, ax = plt.subplots(figsize=(8, 8))
             state['fig'] = fig
             state['ax'] = ax
+            state['regression_stats_entries'] = []
 
     def teardown(ctx, state, results):
         name, _ = _resolve_group_label_color(ctx)
@@ -9774,6 +10108,11 @@ def plot_regressions(experiment, x, y,
             ax = state.get('ax')
             if fig is None or ax is None:
                 return
+            _annotate_regression_stats_summary(
+                ax,
+                state.get('regression_stats_entries', []),
+                test=test,
+            )
             subfolder, suffix = build_subfolder(
                 plot_type='Regressions',
                 factor=factor, specificity=specificity,
@@ -9787,6 +10126,11 @@ def plot_regressions(experiment, x, y,
             return
 
         fig = state['fig']
+        _annotate_regression_stats_summary(
+            state['ax'],
+            state.get('regression_stats_entries', []),
+            test=test,
+        )
         subfolder, suffix = build_subfolder(
             plot_type='Regressions',
             factor=factor, specificity=specificity,
@@ -9804,6 +10148,7 @@ def plot_regressions(experiment, x, y,
         setup=setup, teardown=teardown,
         x=x, y=y, normalize_x=normalize_x, normalize_y=normalize_y, test=test,
         combine=combine, x_range=x_range, y_range=y_range,
+        clip_fit_line=clip_fit_line,
         roi_base=_roi_base,
     )
 
@@ -9812,7 +10157,8 @@ def plot_scatter_3d(experiment, x, y, z,
                     by='conditions', factor=None,
                     specificity=None, roi=None, save=True, combine=False,
                     x_range=None, y_range=None, z_range=None,
-                    point_size=40, alpha=0.7,
+                    normalize_x=False, normalize_y=False, normalize_z=False,
+                    point_size=40, size_by=None, size_factor=1.0, alpha=0.7,
                     elevation=None, azimuth=None,
                     figsize=(10, 8)):
     """
@@ -9820,6 +10166,12 @@ def plot_scatter_3d(experiment, x, y, z,
     Supports queued x/y/z inputs:
         - Any of x, y, z as a list -> one plot per combination
         - x list, y list, z list -> all x*y*z combinations
+    `normalize_x` / `normalize_y` / `normalize_z` accept False, True
+    (= 0-1 min-max), a `(min, max)` output range, or 'Z-score'.
+    Size controls:
+        - point_size sets the baseline marker area
+        - size_by maps marker size from a numeric summary column
+        - size_factor multiplies the final marker sizes
     """
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
@@ -9831,7 +10183,8 @@ def plot_scatter_3d(experiment, x, y, z,
                 by=by, factor=factor,
                 specificity=specificity, roi=_rb, save=save, combine=combine,
                 x_range=x_range, y_range=y_range, z_range=z_range,
-                point_size=point_size, alpha=alpha,
+                normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
+                point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
                 elevation=elevation, azimuth=azimuth,
                 figsize=figsize,
             )
@@ -9861,7 +10214,8 @@ def plot_scatter_3d(experiment, x, y, z,
                         specificity=specificity, roi=roi,
                         save=save, combine=combine,
                         x_range=x_range, y_range=y_range, z_range=z_range,
-                        point_size=point_size, alpha=alpha,
+                        normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
+                        point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
                         elevation=elevation, azimuth=azimuth,
                         figsize=figsize,
                     )
@@ -9875,7 +10229,8 @@ def plot_scatter_3d(experiment, x, y, z,
                 by=by, factor=factor,
                 specificity=spec, roi=roi, save=save, combine=combine,
                 x_range=x_range, y_range=y_range, z_range=z_range,
-                point_size=point_size, alpha=alpha,
+                normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
+                point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
                 elevation=elevation, azimuth=azimuth,
                 figsize=figsize,
             )
@@ -9890,6 +10245,8 @@ def plot_scatter_3d(experiment, x, y, z,
             total=_count_level_processes(experiment, level, factor=factor, specificity=specificity),
         )
         _progress_start_item(state)
+        if size_by is not None and 'size_norm' not in state:
+            state['size_norm'] = _scatter_size_norm(ctx.summary, size_by)
         if combine:
             if state.get('fig') is None or state.get('ax') is None:
                 fig = plt.figure(figsize=figsize)
@@ -9958,7 +10315,8 @@ def plot_scatter_3d(experiment, x, y, z,
         x=x, y=y, z=z,
         combine=combine,
         x_range=x_range, y_range=y_range, z_range=z_range,
-        point_size=point_size, alpha=alpha,
+        normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
+        point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
         roi_base=_roi_base,
     )
 
@@ -10151,6 +10509,7 @@ def plot_histograms(experiment, marker, x_attr,
         bin_range=bin_range_norm, bins_spec=bins_spec, ymax=ymax,
         kde=kde, alpha=alpha, stat=stat, invert_x=invert_x,
         merge=combine_mode, combine=combine_mode,
+        specificity_filter=specificity,
         roi_base=_roi_base,
     )
     if not combine_mode and _hist_shared_fig_ref.get("fig") is not None:
@@ -10372,6 +10731,7 @@ def plot_ridgeline(experiment, marker, x_attr,
         alpha=alpha_f,
         line_width=line_width_f,
         bw_adjust=bw_adjust_f,
+        specificity_filter=specificity,
         roi_base=_roi_base,
     )
 
@@ -11229,6 +11589,7 @@ def plot_pie_charts(experiment, marker, x_attr,
         line_width=line_width_f,
         plot_format=plot_mode,
         as_counts=bool(as_counts),
+        specificity_filter=specificity,
         roi_base=_roi_base,
     )
 
@@ -11430,6 +11791,7 @@ def plot_matrices(experiment, filtered_columns=None,
         drop_duplicate_columns=drop_duplicate_columns_for_action,
         enforce_shared_columns=bool(share_columns_across_panels),
         shared_columns=resolved_columns,
+        specificity_filter=specificity,
         roi_base=_roi_base,
     )
     if _matrix_shared_fig_ref.get("fig") is not None:
@@ -13112,10 +13474,16 @@ _PARAM_DESCRIPTIONS = {
     'complementary':        'Plot 1-ECDF (survival function) instead of ECDF.',
     # ── Regression ───────────────────────────────────────────────────
     'test':                 'Correlation test: "pearsonr" or "spearmanr".',
-    'normalize_x':          'Normalize x-axis values by condition (default True).',
-    'normalize_y':          'Normalize y-axis values by condition (default True).',
+    'normalize_x':          "X normalization mode: False, True (= 0-1 min-max), "
+                            "(min, max), or 'Z-score'.",
+    'normalize_y':          "Y normalization mode: False, True (= 0-1 min-max), "
+                            "(min, max), or 'Z-score'.",
     'x_range':              'Manual (min, max) for x-axis.',
     'y_range':              'Manual (min, max) for y-axis.',
+    'xmin':                 'Manual lower limit for x-axis.',
+    'xmax':                 'Manual upper limit for x-axis.',
+    'ymin':                 'Manual lower limit for y-axis.',
+    'clip_fit_line':        'Trim the regression line to the active x/y limits (default True).',
     # ── Volcano ──────────────────────────────────────────────────────
     'control':              'Name of the control condition for fold-change calculation.',
     'p_threshold':          'Significance threshold for highlighting (default 0.05).',

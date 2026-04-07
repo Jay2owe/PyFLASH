@@ -32,6 +32,7 @@ from IF_analysis.utils import (
     extract_region_base, normalize_hemisphere,
     ProgressTracker, format_elapsed,
 )
+from IF_analysis.export import format_summary_for_display
 
 # Maps subfolder names to marker class types
 ATTRIBUTE_DICT = {
@@ -751,6 +752,18 @@ def _align_image_roi_to_master_order(master_region: pd.DataFrame) -> pd.DataFram
     return pd.DataFrame.from_records(records)
 
 
+def _normalize_region_key_series(values) -> pd.Series:
+    """Canonicalize region identifiers for safe joins across mixed dtypes."""
+    series = pd.Series(values, copy=False)
+    out = series.fillna("").astype(str).str.strip()
+    out = out.str.replace(r"\.0+$", "", regex=True)
+    numeric_mask = out.str.fullmatch(r"\d+", na=False)
+    out.loc[numeric_mask] = "SCN" + out.loc[numeric_mask]
+    out = out.str.replace(r"^(SCN)\.0+$", r"\1", regex=True)
+    out = out.str.replace(r"^(SCN\d+)\.0+$", r"\1", regex=True)
+    return out
+
+
 def _apply_roi_name_map(df: pd.DataFrame, roi_name_map: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
         return df
@@ -769,16 +782,18 @@ def _apply_roi_name_map(df: pd.DataFrame, roi_name_map: pd.DataFrame) -> pd.Data
     image_roi_cols = [c for c in df.columns if str(c).startswith("ImageROI")]
     base = df.drop(columns=image_roi_cols, errors="ignore").copy()
     base["__AnimalNameKey__"] = base["AnimalName"].map(normalize_animal_name)
+    base["__RegionKey__"] = _normalize_region_key_series(base["Region"])
     roi_map = roi_name_map[["AnimalName", "Region", "ImageROI"]].drop_duplicates(
         subset=["AnimalName", "Region"], keep="first"
     ).copy()
     roi_map["__AnimalNameKey__"] = roi_map["AnimalName"].map(normalize_animal_name)
-    roi_map = roi_map.drop(columns=["AnimalName"], errors="ignore")
+    roi_map["__RegionKey__"] = _normalize_region_key_series(roi_map["Region"])
+    roi_map = roi_map.drop(columns=["AnimalName", "Region"], errors="ignore")
     out = base.merge(
         roi_map,
-        on=["__AnimalNameKey__", "Region"],
+        on=["__AnimalNameKey__", "__RegionKey__"],
         how="left",
-    ).drop(columns=["__AnimalNameKey__"], errors="ignore")
+    ).drop(columns=["__AnimalNameKey__", "__RegionKey__"], errors="ignore")
     if "ImageROI" in out.columns:
         roi_name = out["ImageROI"].fillna("").astype(str).str.strip()
         if preserved_image_roi is not None and len(preserved_image_roi) == len(out):
@@ -820,6 +835,49 @@ def _to_numeric_series_excluding_sentinel(series: pd.Series, sentinel=NOT_INCLUD
         if mask.any():
             s = s.mask(mask)
     return pd.to_numeric(s, errors='coerce')
+
+
+def _fill_missing_behavior_with_sentinel(
+    summary: pd.DataFrame,
+    behavior_cols,
+    behavior_animals=None,
+    sentinel=NOT_INCLUDED_SENTINEL,
+) -> pd.DataFrame:
+    """Fill missing behaviour cells and absent behaviour rows with sentinel text."""
+    out = summary.copy()
+    cols = [
+        col for col in list(behavior_cols or [])
+        if col in out.columns and col != "AnimalName"
+    ]
+    if len(cols) == 0:
+        return out
+
+    animals = {
+        str(animal)
+        for animal in (behavior_animals or [])
+        if pd.notna(animal)
+    }
+    if "AnimalName" in out.columns:
+        animal_series = out["AnimalName"].astype(str)
+    else:
+        animal_series = pd.Series(out.index.astype(str), index=out.index)
+
+    if len(animals) > 0:
+        absent_animals = ~animal_series.isin(animals)
+    else:
+        absent_animals = pd.Series(False, index=out.index, dtype=bool)
+
+    for col in cols:
+        series = out[col].astype("object")
+        series_str = series.astype("string")
+        sentinel_mask = series_str.str.contains(str(sentinel), na=False)
+        blank_mask = series_str.fillna("").str.strip().eq("")
+        missing_mask = series.isna() | blank_mask | sentinel_mask | absent_animals
+        if missing_mask.any():
+            series.loc[missing_mask] = sentinel
+            out[col] = series
+
+    return out
 
 
 def _log1p_nonnegative(series: pd.Series) -> pd.Series:
@@ -1519,10 +1577,13 @@ class Experiment:
         self.summaries = {}
         for roi_base in sorted(all_roi_bases):
             summary_dfs = []
+            behavior_animals = set()
+            behavior_summary_cols = set()
 
             for stain in stains:
                 tracker.start_item(f"{roi_base}/{getattr(stain, 'name', type(stain).__name__)}")
                 stain_df = stain.df.copy()
+                is_behavior = str(getattr(stain, "name", "")).casefold() in {"behaviour", "behavior"}
 
                 # Filter to this ROI base
                 if 'ROI' in stain_df.columns:
@@ -1541,7 +1602,13 @@ class Experiment:
                 stain_df = _replace_not_included_with_nan(stain_df, columns=metric_cols)
                 animal_index = stain_df.groupby('AnimalName').size().index
 
-                mean_candidate_cols = get_columns(stain_df, regex_string='^(?!.*Count).*', exclude=to_drop)
+                if is_behavior and "AnimalName" in stain_df.columns:
+                    behavior_animals.update(stain_df["AnimalName"].dropna().astype(str).tolist())
+
+                mean_candidate_cols = [
+                    c for c in metric_cols
+                    if 'Count' not in str(c)
+                ]
                 if len(mean_candidate_cols) > 0:
                     mean_source = stain_df[mean_candidate_cols].copy()
                     mean_numeric = mean_source.apply(pd.to_numeric, errors='coerce')
@@ -1594,7 +1661,13 @@ class Experiment:
 
                 for block in [mean_df, count_df, combo_count_df, combo_mean_intden_df,
                               sum_df, combo_intden_df, other_df]:
-                    summary_dfs.append(_ensure_animalname_column(block))
+                    block = _ensure_animalname_column(block)
+                    summary_dfs.append(block)
+                    if is_behavior:
+                        behavior_summary_cols.update(
+                            col for col in block.columns
+                            if col != "AnimalName"
+                        )
                 tracker.finish_item(f"{roi_base}/{getattr(stain, 'name', type(stain).__name__)}")
 
             if not summary_dfs:
@@ -1631,7 +1704,68 @@ class Experiment:
             roi_summary[summed_cols] = roi_summary[summed_cols].div(
                 roi_summary['numSections'], axis=0
             )
-            roi_summary = adjust_for_volumemm(roi_summary, summed_cols, 'AreaMean')
+            raw_count_cols = [c for c in summed_cols if str(c).endswith('_Count')]
+            raw_count_df = (
+                roi_summary[raw_count_cols].copy()
+                if len(raw_count_cols) > 0 else pd.DataFrame(index=roi_summary.index)
+            )
+            area_mean = None
+            if 'ROI_Area' in roi_summary.columns:
+                area_mean = pd.to_numeric(roi_summary['ROI_Area'], errors='coerce')
+            elif 'AreaMean' in roi_summary.columns:
+                area_mean = pd.to_numeric(roi_summary['AreaMean'], errors='coerce')
+            elif 'Area(um^2)Mean' in roi_summary.columns:
+                area_mean = pd.to_numeric(roi_summary['Area(um^2)Mean'], errors='coerce')
+            elif 'Area(pixel)Mean' in roi_summary.columns:
+                area_mean = (
+                    pd.to_numeric(roi_summary['Area(pixel)Mean'], errors='coerce')
+                    * (Config.PIXEL_SIZE ** 2)
+                )
+            if area_mean is not None:
+                roi_summary['ROI_Area'] = area_mean
+
+            section_volume_um3 = None
+            if 'VolumeMean' in roi_summary.columns:
+                section_volume_um3 = pd.to_numeric(roi_summary['VolumeMean'], errors='coerce')
+            elif 'Volume(micron^3)Mean' in roi_summary.columns:
+                section_volume_um3 = pd.to_numeric(
+                    roi_summary['Volume(micron^3)Mean'], errors='coerce'
+                )
+            elif 'Volume(mm^3)Mean' in roi_summary.columns:
+                section_volume_um3 = (
+                    pd.to_numeric(roi_summary['Volume(mm^3)Mean'], errors='coerce')
+                    * 1_000_000_000.0
+                )
+            elif area_mean is not None:
+                section_volume_um3 = area_mean * Config.SECTION_THICKNESS_UM
+
+            if section_volume_um3 is None:
+                section_volume_um3 = pd.Series(np.nan, index=roi_summary.index, dtype=float)
+
+            roi_summary['ROI_Volume'] = section_volume_um3
+            roi_summary['Volume0p1mm3'] = section_volume_um3 / 100000000.0
+            roi_summary['CountNormFactor'] = np.where(
+                pd.to_numeric(roi_summary['Volume0p1mm3'], errors='coerce') > 0,
+                1.0 / pd.to_numeric(roi_summary['Volume0p1mm3'], errors='coerce'),
+                np.nan,
+            )
+            if area_mean is not None:
+                roi_summary['ROI_Thickness'] = np.where(
+                    pd.to_numeric(area_mean, errors='coerce') > 0,
+                    pd.to_numeric(section_volume_um3, errors='coerce') / pd.to_numeric(area_mean, errors='coerce'),
+                    np.nan,
+                )
+            else:
+                roi_summary['ROI_Thickness'] = float(Config.SECTION_THICKNESS_UM)
+            roi_summary[summed_cols] = roi_summary[summed_cols].div(
+                roi_summary['Volume0p1mm3'], axis=0
+            )
+            for count_col in raw_count_cols:
+                raw_col = f"{count_col}Raw"
+                if raw_col in roi_summary.columns:
+                    roi_summary = roi_summary.drop(columns=[raw_col])
+                insert_at = roi_summary.columns.get_loc(count_col) + 1
+                roi_summary.insert(insert_at, raw_col, raw_count_df[count_col])
             roi_summary = _add_marker_scores(roi_summary)
 
             # Mark behavior-only animals as not included for IF columns
@@ -1661,6 +1795,11 @@ class Experiment:
                         ~block.isna(),
                         NOT_INCLUDED_SENTINEL,
                     )
+            roi_summary = _fill_missing_behavior_with_sentinel(
+                roi_summary,
+                behavior_summary_cols,
+                behavior_animals=behavior_animals,
+            )
             roi_summary = _fill_intden_totals_with_zero(roi_summary)
             self.summaries[roi_base] = roi_summary
 
@@ -1931,6 +2070,16 @@ class Experiment:
 
     def getImageTable(self, include_summary=True):
         return _get_image_table(self, include_summary=include_summary)
+
+    def getDisplaySummary(self, roi_base=None):
+        """Return a display-only summary copy with unit-labelled column names."""
+        if roi_base is not None and roi_base in getattr(self, "summaries", {}):
+            summary = self.summaries[roi_base]
+        else:
+            summary = getattr(self, "summary", None)
+        if not isinstance(summary, pd.DataFrame):
+            return summary
+        return format_summary_for_display(summary)
 
     # ── CSV export ─────────────────────────────────────────────────────
 

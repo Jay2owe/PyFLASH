@@ -337,7 +337,10 @@ class Batch(Experiment):
                 present_cols = [c for c in cols if c in summary.columns]
                 if len(present_cols) == 0:
                     continue
-                summary.loc[absent_mask, present_cols] = NOT_INCLUDED_SENTINEL
+                for col in present_cols:
+                    series = summary[col].astype("object")
+                    series.loc[absent_mask] = NOT_INCLUDED_SENTINEL
+                    summary[col] = series
 
             summary = self._canonicalize_not_included_cells(summary, id_cols=id_cols)
             summary = self._label_duplicate_metric_columns_with_experiment(summary, id_cols=id_cols)
