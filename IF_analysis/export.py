@@ -474,8 +474,9 @@ def find_details_file(details_dir: str | Path, marker: str) -> Path | None:
 
 # ── Exporter functions ───────────────────────────────────────────────────
 
-def write_experiment_data_list_sheet(writer, experiment_list, sheet_name="Data overview"):
+def write_experiment_data_list_sheet(writer, experiment_list, sheet_name="Data overview", visible_columns=None):
     rows = []
+    visible_set = None if visible_columns is None else {str(col) for col in visible_columns}
 
     for exp_idx, exp in enumerate(experiment_list, start=1):
         exp_name = f"Experiment {exp_idx}"
@@ -484,6 +485,11 @@ def write_experiment_data_list_sheet(writer, experiment_list, sheet_name="Data o
 
         summary_cols = exp.summary.columns
         for col in summary_cols:
+            col_s = str(col)
+            if visible_set is not None:
+                visible_candidates = {col_s, f"{col_s}.exp{exp_idx}"}
+                if not any(candidate in visible_set for candidate in visible_candidates):
+                    continue
             try:
                 label, _ = convert_name(col)  # SAME logic as export_summary_excel
             except KeyError:
