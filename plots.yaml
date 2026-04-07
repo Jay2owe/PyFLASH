@@ -138,7 +138,7 @@ plots:
   - type: pie_charts
     batch: batch1
     marker: [CK1d]
-    x_attr: ColocmCherry
+    x_attr: Coloc_mCherry
     threshold: [30]
     as_counts: true
     plot_format: pie
@@ -152,7 +152,7 @@ plots:
   - type: ridgeline
     batch: NLGFKI
     marker: [AF546]
-    x_attr: [Volume, ColocIba1]
+    x_attr: [Volume, Coloc_Iba1]
 
   # ── Volcano ──────────────────────────────────────────────────────
 

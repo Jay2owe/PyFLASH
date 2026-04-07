@@ -51,7 +51,7 @@ from IF_analysis.utils import (
     normalize_image_roi_name, normalize_animal_name,
     flatten_specificity_values, is_specificity_queue,
     iter_specificities, filter_df_by_specificity,
-    specificity_path_parts, resolve_column_key,
+    specificity_path_parts, resolve_column_key, raw_coloc_column_aliases,
     build_subfolder, resolve_roi_bases,
 )
 
@@ -327,7 +327,8 @@ def _export_html_volcano(experiment, columns, specificity, save_path, control):
 
 
 def _resolve_filtered_columns(experiment, filtered_columns=None,
-                              column_strings=None, regex_string=None, exclude=''):
+                              column_strings=None, regex_string=None, exclude='',
+                              source_df=None):
     """
     Resolve plotting columns from explicit names or inline filters.
 
@@ -335,15 +336,27 @@ def _resolve_filtered_columns(experiment, filtered_columns=None,
         1) `filtered_columns` if provided
         2) `get_columns(experiment.summary, ...)` with inline filters
     """
+    source_df = experiment.summary if source_df is None else source_df
+
     if filtered_columns is not None:
-        resolved = list(filtered_columns)
+        resolved = []
+        missing = []
+        for col in filtered_columns:
+            mapped = resolve_column_key(source_df, col)
+            if mapped is None:
+                missing.append(str(col))
+                continue
+            resolved.append(mapped)
+        if len(missing) > 0:
+            missing_preview = ", ".join(missing[:5])
+            raise ValueError(f"No columns matched the provided names: {missing_preview}")
     else:
         if column_strings is None and regex_string is None:
             # Default behavior: consider all summary columns.
             resolved = experiment.summary.columns.tolist()
         else:
             resolved = get_columns(
-                experiment.summary,
+                source_df,
                 column_strings=column_strings,
                 regex_string=regex_string,
                 exclude=exclude,
@@ -5674,6 +5687,316 @@ def _pie_gradient_colors(base_color, n):
     return out
 
 
+_COMBO_PIE_SUMMARY_SUFFIXES = (
+    "_Count",
+    "_Count%",
+    "_CountRaw",
+    "_IntDenTotal",
+    "_MeanIntDen",
+)
+
+
+def _normalize_combo_pie_family(family):
+    family_key = str(family).strip().casefold().replace("_", "")
+    if family_key in {"combo", "detailed"}:
+        return "combo", "Combo"
+    if family_key in {"comboany", "any", "pooled"}:
+        return "comboany", "ComboAny"
+    raise ValueError("family must be 'combo' or 'comboany'.")
+
+
+def _coerce_combo_indicator_flag(value):
+    if pd.isna(value):
+        return False
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)):
+        return int(value) != 0
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            return False
+        return float(value) != 0.0
+    text = str(value).strip().casefold()
+    if text in {"", "0", "false", "no", "nan", "none"}:
+        return False
+    if "not_included_in_experiment" in text:
+        return False
+    return True
+
+
+def _resolve_combo_family_columns(df, marker, family, include_none=True):
+    _, family_prefix = _normalize_combo_pie_family(family)
+    marker_s = str(marker).strip()
+    prefix = f"{marker_s}_{family_prefix}_"
+    combo_columns = []
+    for col in df.columns:
+        col_s = str(col)
+        if not col_s.startswith(prefix):
+            continue
+        if any(col_s.endswith(suffix) for suffix in _COMBO_PIE_SUMMARY_SUFFIXES):
+            continue
+        signature = col_s[len(prefix):]
+        if not include_none and signature == "None":
+            continue
+        combo_columns.append((col_s, signature))
+    return combo_columns
+
+
+def _build_combo_signature_series(df, combo_columns, include_none=True):
+    category_order = []
+    signature_values = []
+    none_available = any(signature == "None" for _, signature in combo_columns)
+    for _, signature in combo_columns:
+        if signature not in category_order:
+            category_order.append(signature)
+
+    for _, row in df.iterrows():
+        active_signatures = []
+        for col_name, signature in combo_columns:
+            if _coerce_combo_indicator_flag(row.get(col_name)):
+                active_signatures.append(signature)
+        if len(active_signatures) == 0:
+            if include_none and none_available:
+                label = "None"
+            else:
+                label = np.nan
+        elif len(active_signatures) == 1:
+            label = active_signatures[0]
+        else:
+            label = "_".join(active_signatures)
+            if label not in category_order:
+                category_order.append(label)
+        signature_values.append(label)
+
+    return pd.Series(signature_values, index=df.index), category_order
+
+
+def _build_combo_counts_from_series(series: pd.Series, category_order, drop_zeros=True):
+    raw = series.copy()
+    text = raw.dropna().astype(str).str.strip()
+    text = text[text != ""]
+    if len(text) == 0:
+        return [], []
+
+    counts = text.value_counts(sort=False)
+    ordered_categories = [cat for cat in category_order if cat in counts.index]
+    ordered_categories.extend([cat for cat in counts.index.tolist() if cat not in ordered_categories])
+    counts = counts.reindex(ordered_categories, fill_value=0)
+    if drop_zeros:
+        counts = counts[counts > 0]
+    return [str(v) for v in counts.index.tolist()], counts.astype(int).tolist()
+
+
+def _normalize_combo_collapse_markers(collapse_markers):
+    if collapse_markers is None:
+        return []
+    queue_types = (list, tuple, set, np.ndarray, pd.Series, pd.Index)
+    if isinstance(collapse_markers, queue_types) and not isinstance(collapse_markers, str):
+        values = [str(v).strip() for v in collapse_markers]
+    else:
+        values = [str(collapse_markers).strip()]
+    out = []
+    seen = set()
+    for value in values:
+        if value == "":
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _collapse_combo_signature(signature, family, collapse_markers):
+    signature_s = str(signature).strip()
+    if signature_s == "" or signature_s == "None" or len(collapse_markers) == 0:
+        return signature_s or "None"
+
+    family_key, _ = _normalize_combo_pie_family(family)
+    work = f"_{signature_s}_"
+    for marker_name in collapse_markers:
+        tokens = [f"{marker_name}+"]
+        if family_key == "combo":
+            tokens.append(f"w{marker_name}")
+        for token in tokens:
+            work = work.replace(f"_{token}_", "_")
+    work = re.sub(r"_+", "_", work).strip("_")
+    return work if work != "" else "None"
+
+
+def _collapse_combo_signature_series(series: pd.Series, category_order, family, collapse_markers,
+                                     include_none=True):
+    if len(collapse_markers) == 0:
+        return series.copy(), list(category_order)
+
+    collapsed = series.map(lambda v: _collapse_combo_signature(v, family, collapse_markers) if pd.notna(v) else np.nan)
+    if not include_none:
+        collapsed = collapsed.mask(collapsed.astype(str).eq("None"), np.nan)
+
+    collapsed_order = []
+    for signature in category_order:
+        mapped = _collapse_combo_signature(signature, family, collapse_markers)
+        if mapped == "None" and not include_none:
+            continue
+        if mapped not in collapsed_order:
+            collapsed_order.append(mapped)
+    return collapsed, collapsed_order
+
+
+def _combo_collapse_display_suffix(collapse_markers):
+    if len(collapse_markers) == 0:
+        return ""
+    return f" [collapse: {', '.join(collapse_markers)}]"
+
+
+def _combo_collapse_save_suffix(collapse_markers):
+    if len(collapse_markers) == 0:
+        return ""
+    safe = "-".join(strip_name(str(v)) for v in collapse_markers)
+    return f"--collapse-{safe}"
+
+
+def _count_unique_animals(df: pd.DataFrame, mask=None):
+    if "AnimalName" not in df.columns:
+        return None
+    animals = df["AnimalName"] if mask is None else df.loc[mask, "AnimalName"]
+    animals = animals.dropna().astype(str).str.strip()
+    animals = animals[animals != ""]
+    return int(animals.nunique())
+
+
+def _pie_valid_row_mask(series: pd.Series, threshold=None):
+    raw = series.copy()
+    try:
+        sentinel_mask = raw.astype(str).str.contains("NOT_INCLUDED_IN_EXPERIMENT", na=False)
+        raw = raw.mask(sentinel_mask, np.nan)
+    except Exception:
+        pass
+
+    th_vals = _normalize_threshold_values(threshold)
+    if th_vals is not None:
+        numeric = _to_numeric_excluding_not_included(raw)
+        return numeric.notna()
+
+    numeric = _to_numeric_excluding_not_included(raw)
+    numeric_non_na = numeric.dropna()
+    if len(numeric_non_na) > 0:
+        return numeric.notna()
+
+    text = raw.astype(str).str.strip()
+    return raw.notna() & (text != "")
+
+
+def _append_animal_n_inline(label, n_animals=None, include_N=False):
+    if not include_N or n_animals is None:
+        return str(label)
+    return f"{label} (N={int(n_animals)})"
+
+
+def _append_animal_n_multiline(label, n_animals=None, include_N=False):
+    if not include_N or n_animals is None:
+        return str(label)
+    return f"{label}\nN={int(n_animals)}"
+
+
+def _resolve_include_N_flag(include_N=False, include_n=None):
+    if include_n is not None:
+        return bool(include_n)
+    return bool(include_N)
+
+
+def _resolve_pie_value_flags(show_counts=None, show_pct=None, as_counts=None):
+    if show_counts is not None or show_pct is not None:
+        return bool(show_counts), bool(show_pct)
+    if as_counts is not None:
+        return bool(as_counts), not bool(as_counts)
+    return False, True
+
+
+def _pie_uses_count_scale(show_counts=False, show_pct=True):
+    return bool(show_counts) and not bool(show_pct)
+
+
+def _pie_value_save_tag(show_counts=False, show_pct=True):
+    if show_counts and show_pct:
+        return "counts+percent"
+    if show_counts:
+        return "counts"
+    if show_pct:
+        return "percent"
+    return "no-values"
+
+
+def _counts_to_percentages(counts):
+    arr = np.asarray(counts, dtype=float)
+    total = float(arr.sum())
+    if total <= 0:
+        return [0.0 for _ in arr.tolist()]
+    return ((arr / total) * 100.0).tolist()
+
+
+def _format_pie_value_label(count, pct, show_counts=False, show_pct=True):
+    label_parts = []
+    if show_counts:
+        label_parts.append(f"{int(round(float(count)))}")
+    if show_pct:
+        label_parts.append(f"{float(pct):.1f}%")
+    return "\n".join(label_parts)
+
+
+def _build_pie_autopct(total_count, show_counts=False, show_pct=True):
+    if not show_counts and not show_pct:
+        return None
+
+    def _autopct(pct):
+        if pct <= 0:
+            return ""
+        count = int(round((float(pct) / 100.0) * float(total_count)))
+        return _format_pie_value_label(
+            count,
+            pct,
+            show_counts=show_counts,
+            show_pct=show_pct,
+        )
+
+    return _autopct
+
+
+def _annotate_stacked_distribution(ax, x_pos, group_order, group_counts,
+                                   category_order, show_counts=False,
+                                   show_pct=True):
+    if not show_counts and not show_pct:
+        return
+
+    use_count_scale = _pie_uses_count_scale(show_counts=show_counts, show_pct=show_pct)
+    for i, group_name in enumerate(group_order):
+        g_counts = group_counts.get(group_name, {})
+        total = float(sum(float(v) for v in g_counts.values()))
+        bottom = 0.0
+        for cat in category_order:
+            raw_val = float(g_counts.get(cat, 0.0))
+            pct = (raw_val / total) * 100.0 if total > 0 else 0.0
+            val = raw_val if use_count_scale else pct
+            if val <= 0:
+                continue
+            ax.text(
+                x_pos[i],
+                bottom + (val / 2.0),
+                _format_pie_value_label(
+                    raw_val,
+                    pct,
+                    show_counts=show_counts,
+                    show_pct=show_pct,
+                ),
+                ha="center",
+                va="center",
+                fontsize=8,
+                color="black",
+            )
+            bottom += val
+
+
 def _compute_ridgeline_density(values, x_grid, bw_adjust=1.0):
     """Compute a smooth density curve for ridgeline plotting."""
     arr = np.asarray(values, dtype=float).reshape(-1)
@@ -5932,11 +6255,16 @@ def _resolve_histogram_x_column(experiment, marker_key, x_attr):
     marker_prefix = f"{marker_s}_"
     for col in cols:
         _add_alias(col, col)  # full raw column
+        for alias in raw_coloc_column_aliases(col):
+            _add_alias(alias, col)
 
         if col.casefold().startswith(marker_prefix.casefold()):
             suffix = col[len(marker_s) + 1:]
             _add_alias(suffix, col)               # suffix alias, e.g. Volume
             _add_alias(f"{marker_s}_{suffix}", col)  # explicit marker-prefixed alias
+            for alias in raw_coloc_column_aliases(suffix):
+                _add_alias(alias, col)
+                _add_alias(f"{marker_s}_{alias}", col)
 
         # Extended IF export mapping alias (same as convert_raw_name in export)
         try:
@@ -7735,7 +8063,8 @@ def _location_overlay_panel_label(entries):
 
 def _location_legend_label(text):
     """Clean extra-panel legend labels for readability."""
-    out = re.sub(r"\bCombo\b", "", str(text))
+    out = re.sub(r"\bComboAny\b", "", str(text))
+    out = re.sub(r"\bCombo\b", "", out)
     out = re.sub(r"\s+", " ", out).strip()
     return out
 
@@ -8376,7 +8705,7 @@ def ridgeline_action(ctx: Context, state: dict,
 def pie_chart_action(ctx: Context, state: dict,
                      marker=None, x=None, threshold=None,
                      start_angle=90, line_width=1.0,
-                     plot_format='pie', as_counts=False, **kwargs):
+                     plot_format='pie', as_counts=None, **kwargs):
     """Plot a pie chart for one condition/factor group."""
     idx = ctx.factor_index if ctx.factor_value is not None else ctx.condition_index
     ax = _resolve_action_axis(state, idx)
@@ -8394,6 +8723,17 @@ def pie_chart_action(ctx: Context, state: dict,
         df[x],
         threshold=threshold,
         drop_zeros=(str(plot_format).strip().casefold() != 'bar'),
+    )
+    percentages = _counts_to_percentages(counts)
+    n_animals = _count_unique_animals(df, mask=_pie_valid_row_mask(df[x], threshold=threshold))
+    show_counts, show_pct = _resolve_pie_value_flags(
+        show_counts=kwargs.get("show_counts"),
+        show_pct=kwargs.get("show_pct"),
+        as_counts=as_counts,
+    )
+    include_N = _resolve_include_N_flag(
+        include_N=kwargs.get("include_N", False),
+        include_n=kwargs.get("include_n"),
     )
     group_name, group_color = _resolve_group_label_color(ctx)
 
@@ -8421,6 +8761,7 @@ def pie_chart_action(ctx: Context, state: dict,
                 str(k): int(v) for k, v in zip(labels, counts)
             }
             state.setdefault("pie_bar_group_colors", {})[group_name] = group_color
+            state.setdefault("pie_bar_group_n_animals", {})[group_name] = n_animals
             state.setdefault("pie_bar_category_order", [])
             for lab in labels:
                 if lab not in state["pie_bar_category_order"]:
@@ -8431,15 +8772,11 @@ def pie_chart_action(ctx: Context, state: dict,
             edgecolor = group_color if lw > 0 else "none"
             pie_colors = _pie_gradient_colors(group_color, len(counts))
             total_count = int(np.sum(np.asarray(counts, dtype=float)))
-            if as_counts:
-                def _count_autopct(pct):
-                    if pct <= 0:
-                        return ""
-                    val = int(round((pct / 100.0) * total_count))
-                    return f"{val}"
-                autopct = _count_autopct
-            else:
-                autopct = "%1.1f%%"
+            autopct = _build_pie_autopct(
+                total_count,
+                show_counts=show_counts,
+                show_pct=show_pct,
+            )
             ax.pie(
                 counts,
                 labels=labels,
@@ -8451,12 +8788,146 @@ def pie_chart_action(ctx: Context, state: dict,
             )
             ax.axis("equal")
     if str(plot_format).strip().casefold() != "bar":
-        ax.set_title(x_label, fontsize=14, weight="bold")
+        ax.set_title(
+            _append_animal_n_inline(
+                x_label,
+                n_animals=n_animals,
+                include_N=include_N,
+            ),
+            fontsize=14,
+            weight="bold",
+        )
     sns.despine(trim=False, ax=ax)
     return {
         'pie_labels': labels,
         'pie_counts': counts,
+        'pie_percentages': percentages,
         'group': group_name,
+        'n_animals': n_animals,
+    }
+
+
+def combo_pie_action(ctx: Context, state: dict,
+                     marker=None, family="comboany",
+                     include_none=True,
+                     start_angle=90, line_width=1.0,
+                     plot_format='pie', as_counts=None, **kwargs):
+    """Plot a pie chart for mutually exclusive combo or ComboAny membership."""
+    idx = ctx.factor_index if ctx.factor_value is not None else ctx.condition_index
+    ax = _resolve_action_axis(state, idx)
+    if ax is None:
+        raise IndexError("No valid axis available for combo_pie_action.")
+
+    family_key, family_prefix = _normalize_combo_pie_family(family)
+    df = ctx.experiment.data[marker].df.reset_index()
+    df = _filter_marker_df_for_context(ctx, df)
+    specificity = kwargs.get('specificity_filter', kwargs.get('specificity'))
+    df = _filter_df_by_specificity(df, specificity)
+
+    combo_columns = _resolve_combo_family_columns(
+        df,
+        marker=marker,
+        family=family_key,
+        include_none=bool(include_none),
+    )
+    if len(combo_columns) == 0:
+        raise ValueError(
+            f"No {family_prefix} columns found for marker '{marker}'."
+        )
+
+    signature_series, category_order = _build_combo_signature_series(
+        df,
+        combo_columns,
+        include_none=bool(include_none),
+    )
+    collapse_markers = _normalize_combo_collapse_markers(kwargs.get("collapse_markers"))
+    signature_series, category_order = _collapse_combo_signature_series(
+        signature_series,
+        category_order,
+        family=family_key,
+        collapse_markers=collapse_markers,
+        include_none=bool(include_none),
+    )
+    labels, counts = _build_combo_counts_from_series(
+        signature_series,
+        category_order=category_order,
+        drop_zeros=(str(plot_format).strip().casefold() != 'bar'),
+    )
+    percentages = _counts_to_percentages(counts)
+    valid_mask = signature_series.notna() & signature_series.astype(str).str.strip().ne("")
+    n_animals = _count_unique_animals(df, mask=valid_mask)
+    show_counts, show_pct = _resolve_pie_value_flags(
+        show_counts=kwargs.get("show_counts"),
+        show_pct=kwargs.get("show_pct"),
+        as_counts=as_counts,
+    )
+    include_N = _resolve_include_N_flag(
+        include_N=kwargs.get("include_N", False),
+        include_n=kwargs.get("include_n"),
+    )
+    group_name, group_color = _resolve_group_label_color(ctx)
+
+    x_label = (
+        f"{str(marker).strip()} {family_prefix}"
+        f"{_combo_collapse_display_suffix(collapse_markers)}"
+    ).strip()
+    ax.clear()
+    if len(counts) == 0:
+        ax.axis("off")
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center")
+    else:
+        lw = max(0.0, float(line_width))
+        plot_mode = str(plot_format).strip().casefold()
+        if plot_mode == "bar":
+            state.setdefault("pie_bar_group_order", [])
+            if group_name not in state["pie_bar_group_order"]:
+                state["pie_bar_group_order"].append(group_name)
+            state.setdefault("pie_bar_group_counts", {})[group_name] = {
+                str(k): int(v) for k, v in zip(labels, counts)
+            }
+            state.setdefault("pie_bar_group_colors", {})[group_name] = group_color
+            state.setdefault("pie_bar_group_n_animals", {})[group_name] = n_animals
+            state.setdefault("pie_bar_category_order", [])
+            for lab in labels:
+                if lab not in state["pie_bar_category_order"]:
+                    state["pie_bar_category_order"].append(lab)
+            ax.axis("off")
+        else:
+            edgecolor = group_color if lw > 0 else "none"
+            pie_colors = _pie_gradient_colors(group_color, len(counts))
+            total_count = int(np.sum(np.asarray(counts, dtype=float)))
+            autopct = _build_pie_autopct(
+                total_count,
+                show_counts=show_counts,
+                show_pct=show_pct,
+            )
+            ax.pie(
+                counts,
+                labels=labels,
+                startangle=float(start_angle),
+                autopct=autopct,
+                wedgeprops={"linewidth": lw, "edgecolor": edgecolor},
+                colors=pie_colors,
+                textprops={"fontsize": 10},
+            )
+            ax.axis("equal")
+    if str(plot_format).strip().casefold() != "bar":
+        ax.set_title(
+            _append_animal_n_inline(
+                x_label,
+                n_animals=n_animals,
+                include_N=include_N,
+            ),
+            fontsize=14,
+            weight="bold",
+        )
+    sns.despine(trim=False, ax=ax)
+    return {
+        'pie_labels': labels,
+        'pie_counts': counts,
+        'pie_percentages': percentages,
+        'group': group_name,
+        'n_animals': n_animals,
     }
 
 
@@ -9244,7 +9715,13 @@ def plot_mean_bars(experiment, filtered_columns=None,
         state['group_color_map'] = group_color_map
         # Start full per-column timing (setup + actions + stats + save)
 
-    def teardown(ctx, state, results):
+    def teardown(
+        ctx, state, results,
+        _use_count_scale=use_count_scale,
+        _include_N_flag=include_N_flag,
+        _show_counts_flag=show_counts_flag,
+        _show_pct_flag=show_pct_flag,
+    ):
 
         ax = state['ax']
         fig = state['fig']
@@ -11337,7 +11814,8 @@ def plot_pie_charts(experiment, marker, x_attr,
                     threshold=None,
                     start_angle=90, line_width=1.0,
                     save=True, specificity=None, roi=None,
-                    plot_format='pie', as_counts=False,
+                    plot_format='pie', show_counts=None, show_pct=None,
+                    include_N=False, as_counts=None, include_n=None,
                     bottom_ticks=False, bottom_tick_labels=False):
     """
     Pie chart distribution by condition/factor for one marker attribute.
@@ -11355,9 +11833,18 @@ def plot_pie_charts(experiment, marker, x_attr,
     - line_width: wedge border width.
     - plot_format: 'pie' (default) or 'bar'.
       For 'bar', all conditions/factor groups are shown on one stacked bar chart.
-    - as_counts: if True, use raw counts; otherwise percentages.
+    - show_counts: display counts.
+    - show_pct: display percentages.
+    - include_N: append the number of contributing animals (unique AnimalName).
+    - as_counts/include_n: backward-compatible aliases.
     - bottom_ticks / bottom_tick_labels: x-axis tick visibility for bar mode.
     """
+    show_counts_flag, show_pct_flag = _resolve_pie_value_flags(
+        show_counts=show_counts,
+        show_pct=show_pct,
+        as_counts=as_counts,
+    )
+    include_N_flag = _resolve_include_N_flag(include_N=include_N, include_n=include_n)
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -11368,7 +11855,10 @@ def plot_pie_charts(experiment, marker, x_attr,
                 by=by, factor=factor, threshold=threshold,
                 start_angle=start_angle, line_width=line_width,
                 save=save, specificity=specificity, roi=_rb,
-                plot_format=plot_format, as_counts=as_counts,
+                plot_format=plot_format,
+                show_counts=show_counts_flag,
+                show_pct=show_pct_flag,
+                include_N=include_N_flag,
                 bottom_ticks=bottom_ticks, bottom_tick_labels=bottom_tick_labels,
             )
         return _queued
@@ -11400,7 +11890,9 @@ def plot_pie_charts(experiment, marker, x_attr,
                     specificity=specificity,
                     roi=roi,
                     plot_format=plot_format,
-                    as_counts=as_counts,
+                    show_counts=show_counts_flag,
+                    show_pct=show_pct_flag,
+                    include_N=include_N_flag,
                     bottom_ticks=bottom_ticks,
                     bottom_tick_labels=bottom_tick_labels,
                 )
@@ -11422,7 +11914,9 @@ def plot_pie_charts(experiment, marker, x_attr,
                 specificity=spec,
                 roi=roi,
                 plot_format=plot_format,
-                as_counts=as_counts,
+                show_counts=show_counts_flag,
+                show_pct=show_pct_flag,
+                include_N=include_N_flag,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
             )
@@ -11436,6 +11930,10 @@ def plot_pie_charts(experiment, marker, x_attr,
     if plot_mode not in {"pie", "bar"}:
         raise ValueError("plot_format must be 'pie' or 'bar'.")
     combine_bar_mode = (plot_mode == "bar")
+    use_count_scale = _pie_uses_count_scale(
+        show_counts=show_counts_flag,
+        show_pct=show_pct_flag,
+    )
 
     th_vals = _normalize_threshold_values(threshold)
     try:
@@ -11467,7 +11965,13 @@ def plot_pie_charts(experiment, marker, x_attr,
             state['fig'] = fig
             state['ax'] = ax
 
-    def teardown(ctx, state, results):
+    def teardown(
+        ctx, state, results,
+        _use_count_scale=use_count_scale,
+        _include_N_flag=include_N_flag,
+        _show_counts_flag=show_counts_flag,
+        _show_pct_flag=show_pct_flag,
+    ):
         fig = state['fig']
         name = ctx.factor_value or ctx.condition or 'Combined'
         subfolder, suffix = build_subfolder(
@@ -11492,6 +11996,7 @@ def plot_pie_charts(experiment, marker, x_attr,
             group_order = state.get("pie_bar_group_order", [])
             group_counts = state.get("pie_bar_group_counts", {})
             group_colors = state.get("pie_bar_group_colors", {})
+            group_n_animals = state.get("pie_bar_group_n_animals", {})
             category_order = state.get("pie_bar_category_order", [])
 
             if len(group_order) == 0 or len(category_order) == 0:
@@ -11512,7 +12017,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                     grad = _pie_gradient_colors(g_color, n_cat)
                     for j, cat in enumerate(category_order):
                         raw_val = float(g_counts.get(cat, 0.0))
-                        val = raw_val if as_counts else ((raw_val / total) * 100.0 if total > 0 else 0.0)
+                        val = raw_val if _use_count_scale else ((raw_val / total) * 100.0 if total > 0 else 0.0)
                         if val <= 0:
                             continue
                         edgecolor = g_color if line_width_f > 0 else "none"
@@ -11523,7 +12028,27 @@ def plot_pie_charts(experiment, marker, x_attr,
                         bottom += val
 
                 ax.set_xticks(x_pos)
-                ax.set_xticklabels([str(g) for g in group_order], rotation=20, ha="right")
+                ax.set_xticklabels(
+                    [
+                        _append_animal_n_multiline(
+                            g,
+                            n_animals=group_n_animals.get(g),
+                            include_N=_include_N_flag,
+                        )
+                        for g in group_order
+                    ],
+                    rotation=20,
+                    ha="right",
+                )
+                _annotate_stacked_distribution(
+                    ax,
+                    x_pos,
+                    group_order,
+                    group_counts,
+                    category_order,
+                    show_counts=_show_counts_flag,
+                    show_pct=_show_pct_flag,
+                )
                 ax.tick_params(
                     axis='x',
                     which='both',
@@ -11541,9 +12066,9 @@ def plot_pie_charts(experiment, marker, x_attr,
                     leading = f"{marker_s} "
                     if legend_title.casefold().startswith(leading.casefold()):
                         legend_title = legend_title[len(leading):].strip()
-                unit_tag = "counts" if as_counts else "percent"
-                if as_counts:
-                    ax.set_ylabel(f"{axis_label} ({unit_tag})")
+                scale_unit = "counts" if _use_count_scale else "percent"
+                if _use_count_scale:
+                    ax.set_ylabel(f"{axis_label} ({scale_unit})")
                     ymax_bar = round_up_to_nearest_5(max_stack_total)
                     if ymax_bar > 0:
                         ax.set_ylim(0, ymax_bar)
@@ -11551,7 +12076,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                         # cap/tick appears consistently (same style intent as plot_mean_bars).
                         ax.yaxis.set_major_locator(LinearLocator(numticks=5))
                 else:
-                    ax.set_ylabel(f"{axis_label} ({unit_tag})")
+                    ax.set_ylabel(f"{axis_label} ({scale_unit})")
                     ax.set_ylim(0, 100)
                     ax.yaxis.set_major_locator(LinearLocator(numticks=5))
                 ax.set_xlabel("")
@@ -11567,14 +12092,20 @@ def plot_pie_charts(experiment, marker, x_attr,
                 fig.tight_layout()
 
             if save:
-                unit_tag = "counts" if as_counts else "percent"
+                unit_tag = _pie_value_save_tag(
+                    show_counts=_show_counts_flag,
+                    show_pct=_show_pct_flag,
+                )
                 save_fig(fig, experiment.fig_path,
                          f'{x} Bar (Combined) {unit_tag}' + suffix, subfolder=subfolder)
             plt.close(fig)
             return
 
         if save:
-            unit_tag = "counts" if as_counts else "percent"
+            unit_tag = _pie_value_save_tag(
+                show_counts=_show_counts_flag,
+                show_pct=_show_pct_flag,
+            )
             save_fig(fig, experiment.fig_path,
                      f'{x} Pie {name} {unit_tag}' + suffix, subfolder=subfolder)
         plt.close(fig)
@@ -11588,7 +12119,332 @@ def plot_pie_charts(experiment, marker, x_attr,
         start_angle=start_angle_f,
         line_width=line_width_f,
         plot_format=plot_mode,
-        as_counts=bool(as_counts),
+        show_counts=bool(show_counts_flag),
+        show_pct=bool(show_pct_flag),
+        include_N=bool(include_N_flag),
+        specificity_filter=specificity,
+        roi_base=_roi_base,
+    )
+
+
+def plot_combo_pies(experiment, marker,
+                    family='comboany',
+                    by='conditions', factor=None,
+                    start_angle=90, line_width=1.0,
+                    save=True, specificity=None, roi=None,
+                    plot_format='pie', show_counts=None, show_pct=None,
+                    include_none=True,
+                    collapse_markers=None,
+                    include_N=False, as_counts=None, include_n=None,
+                    bottom_ticks=False, bottom_tick_labels=False):
+    """
+    Pie or stacked-bar distributions for mutually exclusive combo families.
+
+    `family` controls which per-object combo columns are used:
+    - 'combo': detailed coloc/contains combo family
+    - 'comboany': pooled Any-based combo family
+
+    Each object contributes to exactly one category, so the family partitions
+    the marker population. `include_none=True` retains the explicit `None`
+    category when present. `include_N=True` appends the number of
+    contributing animals (unique AnimalName). `as_counts/include_n` are
+    backward-compatible aliases.
+    """
+    show_counts_flag, show_pct_flag = _resolve_pie_value_flags(
+        show_counts=show_counts,
+        show_pct=show_pct,
+        as_counts=as_counts,
+    )
+    include_N_flag = _resolve_include_N_flag(include_N=include_N, include_n=include_n)
+    collapse_markers_norm = _normalize_combo_collapse_markers(collapse_markers)
+    collapse_display_suffix = _combo_collapse_display_suffix(collapse_markers_norm)
+    collapse_save_suffix = _combo_collapse_save_suffix(collapse_markers_norm)
+    _roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(_roi_bases) > 1:
+        _queued = {}
+        for _rb in _roi_bases:
+            _queued[_rb] = plot_combo_pies(
+                experiment,
+                marker,
+                family=family,
+                by=by,
+                factor=factor,
+                start_angle=start_angle,
+                line_width=line_width,
+                save=save,
+                specificity=specificity,
+                roi=_rb,
+                plot_format=plot_format,
+                show_counts=show_counts_flag,
+                show_pct=show_pct_flag,
+                include_none=include_none,
+                collapse_markers=collapse_markers_norm,
+                include_N=include_N_flag,
+                bottom_ticks=bottom_ticks,
+                bottom_tick_labels=bottom_tick_labels,
+            )
+        return _queued
+    _roi_base = _roi_bases[0]
+    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+
+    queue_types = (list, tuple, set, np.ndarray, pd.Series, pd.Index)
+    marker_is_queue = isinstance(marker, queue_types) and not isinstance(marker, str)
+    family_is_queue = isinstance(family, queue_types) and not isinstance(family, str)
+    if marker_is_queue or family_is_queue:
+        marker_values = _flatten_specificity_values([marker]) if marker_is_queue else [marker]
+        family_values = _flatten_specificity_values([family]) if family_is_queue else [family]
+        if len(marker_values) == 0 or len(family_values) == 0:
+            raise ValueError("Queued marker/family inputs must contain at least one value.")
+        queued_outputs = {}
+        for m_val in marker_values:
+            for fam_val in family_values:
+                key = (m_val, fam_val)
+                queued_outputs[key] = plot_combo_pies(
+                    experiment,
+                    marker=m_val,
+                    family=fam_val,
+                    by=by,
+                    factor=factor,
+                    start_angle=start_angle,
+                    line_width=line_width,
+                    save=save,
+                    specificity=specificity,
+                    roi=roi,
+                    plot_format=plot_format,
+                    show_counts=show_counts_flag,
+                    show_pct=show_pct_flag,
+                    include_none=include_none,
+                    collapse_markers=collapse_markers_norm,
+                    include_N=include_N_flag,
+                    bottom_ticks=bottom_ticks,
+                    bottom_tick_labels=bottom_tick_labels,
+                )
+        return queued_outputs
+
+    if _is_specificity_queue(specificity):
+        queued_outputs = {}
+        for spec in _iter_specificities(specificity):
+            queued_outputs[spec] = plot_combo_pies(
+                experiment,
+                marker=marker,
+                family=family,
+                by=by,
+                factor=factor,
+                start_angle=start_angle,
+                line_width=line_width,
+                save=save,
+                specificity=spec,
+                roi=roi,
+                plot_format=plot_format,
+                show_counts=show_counts_flag,
+                show_pct=show_pct_flag,
+                include_none=include_none,
+                collapse_markers=collapse_markers_norm,
+                include_N=include_N_flag,
+                bottom_ticks=bottom_ticks,
+                bottom_tick_labels=bottom_tick_labels,
+            )
+        return queued_outputs
+
+    marker_key = _resolve_marker_data_key(experiment, marker)
+    family_key, family_prefix = _normalize_combo_pie_family(family)
+    level = 'factors' if factor else by
+    total_groups = _count_level_processes(experiment, level, factor=factor, specificity=specificity)
+    plot_mode = str(plot_format).strip().casefold()
+    if plot_mode not in {"pie", "bar"}:
+        raise ValueError("plot_format must be 'pie' or 'bar'.")
+    combine_bar_mode = (plot_mode == "bar")
+    use_count_scale = _pie_uses_count_scale(
+        show_counts=show_counts_flag,
+        show_pct=show_pct_flag,
+    )
+
+    try:
+        start_angle_f = float(start_angle)
+    except Exception as e:
+        raise ValueError("start_angle must be numeric.") from e
+    try:
+        line_width_f = float(line_width)
+    except Exception as e:
+        raise ValueError("line_width must be numeric.") from e
+    if line_width_f < 0:
+        raise ValueError("line_width must be >= 0.")
+
+    def setup(ctx, state):
+        _init_progress_state(
+            state,
+            func_name='plot_combo_pies',
+            total=total_groups,
+        )
+        _progress_start_item(state)
+        if combine_bar_mode:
+            if state.get('fig') is None or state.get('ax') is None:
+                fig_w = max(1, int(max(1, total_groups))) * (2.0 / 3.0)
+                fig, ax = plt.subplots(figsize=(fig_w, 5))
+                state['fig'] = fig
+                state['ax'] = ax
+        else:
+            fig, ax = plt.subplots(figsize=(8, 8))
+            state['fig'] = fig
+            state['ax'] = ax
+
+    def teardown(
+        ctx, state, results,
+        _use_count_scale=use_count_scale,
+        _include_N_flag=include_N_flag,
+        _show_counts_flag=show_counts_flag,
+        _show_pct_flag=show_pct_flag,
+    ):
+        fig = state['fig']
+        name = ctx.factor_value or ctx.condition or 'Combined'
+        subfolder, suffix = build_subfolder(
+            plot_type='ComboPies',
+            marker=marker_key,
+            factor=factor,
+            specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+            roi_base=_roi_base,
+            multi_roi=_multi_roi,
+        )
+        _progress_finish_item(state, name)
+
+        if combine_bar_mode:
+            prog = state.get('progress_state', {})
+            is_last = int(prog.get('completed', 0)) >= int(prog.get('total', 1))
+            if not is_last:
+                return
+
+            ax = state.get('ax')
+            if ax is None:
+                return
+            ax.clear()
+
+            group_order = state.get("pie_bar_group_order", [])
+            group_counts = state.get("pie_bar_group_counts", {})
+            group_colors = state.get("pie_bar_group_colors", {})
+            group_n_animals = state.get("pie_bar_group_n_animals", {})
+            category_order = state.get("pie_bar_category_order", [])
+
+            if len(group_order) == 0 or len(category_order) == 0:
+                ax.axis("off")
+                ax.text(0.5, 0.5, "No data available", ha="center", va="center")
+            else:
+                x_pos = np.arange(len(group_order), dtype=float)
+                width = 0.5
+                n_cat = max(1, len(category_order))
+                max_stack_total = 0.0
+                for i, g in enumerate(group_order):
+                    g_counts = group_counts.get(g, {})
+                    total = float(sum(float(v) for v in g_counts.values()))
+                    max_stack_total = max(max_stack_total, total)
+                    bottom = 0.0
+                    g_color = group_colors.get(g, "black")
+                    grad = _pie_gradient_colors(g_color, n_cat)
+                    for j, cat in enumerate(category_order):
+                        raw_val = float(g_counts.get(cat, 0.0))
+                        val = raw_val if use_count_scale else ((raw_val / total) * 100.0 if total > 0 else 0.0)
+                        if val <= 0:
+                            continue
+                        edgecolor = g_color if line_width_f > 0 else "none"
+                        ax.bar(
+                            x_pos[i], val, width=width, bottom=bottom,
+                            color=grad[j], edgecolor=edgecolor, linewidth=line_width_f,
+                        )
+                        bottom += val
+
+                ax.set_xticks(x_pos)
+                ax.set_xticklabels(
+                    [
+                        _append_animal_n_multiline(
+                            g,
+                            n_animals=group_n_animals.get(g),
+                            include_N=include_N_flag,
+                        )
+                        for g in group_order
+                    ],
+                    rotation=20,
+                    ha="right",
+                )
+                _annotate_stacked_distribution(
+                    ax,
+                    x_pos,
+                    group_order,
+                    group_counts,
+                    category_order,
+                    show_counts=show_counts_flag,
+                    show_pct=show_pct_flag,
+                )
+                ax.tick_params(
+                    axis='x',
+                    which='both',
+                    bottom=bool(bottom_ticks),
+                    top=False,
+                    labelbottom=bool(bottom_tick_labels),
+                )
+                axis_label = f"{marker_key} {family_prefix}{collapse_display_suffix}".strip()
+                scale_unit = "counts" if use_count_scale else "percent"
+                ax.set_ylabel(f"{axis_label} ({scale_unit})")
+                if use_count_scale:
+                    ymax_bar = round_up_to_nearest_5(max_stack_total)
+                    if ymax_bar > 0:
+                        ax.set_ylim(0, ymax_bar)
+                        ax.yaxis.set_major_locator(LinearLocator(numticks=5))
+                else:
+                    ax.set_ylim(0, 100)
+                    ax.yaxis.set_major_locator(LinearLocator(numticks=5))
+                ax.set_xlabel("")
+
+                legend_colors = _pie_gradient_colors("black", n_cat)
+                handles = [
+                    plt.Rectangle((0, 0), 1, 1, facecolor=legend_colors[j], edgecolor="none")
+                    for j in range(n_cat)
+                ]
+                ax.legend(handles, category_order, title=axis_label, frameon=False,
+                          bbox_to_anchor=(1.02, 1.0), loc="upper left")
+                sns.despine(trim=False, ax=ax)
+                fig.tight_layout()
+
+            if save:
+                unit_tag = _pie_value_save_tag(
+                    show_counts=show_counts_flag,
+                    show_pct=show_pct_flag,
+                )
+                save_fig(
+                    fig,
+                    experiment.fig_path,
+                    f'{marker_key} {family_prefix} Bar (Combined) {unit_tag}{collapse_save_suffix}' + suffix,
+                    subfolder=subfolder,
+                )
+            plt.close(fig)
+            return
+
+        if save:
+            unit_tag = _pie_value_save_tag(
+                show_counts=show_counts_flag,
+                show_pct=show_pct_flag,
+            )
+            save_fig(
+                fig,
+                experiment.fig_path,
+                f'{marker_key} {family_prefix} Pie {name} {unit_tag}{collapse_save_suffix}' + suffix,
+                subfolder=subfolder,
+            )
+        plt.close(fig)
+
+    return run(
+        experiment, over=level, action=combo_pie_action,
+        factor=factor, specificity=specificity,
+        setup=setup, teardown=teardown,
+        marker=marker_key,
+        family=family_key,
+        include_none=bool(include_none),
+        collapse_markers=collapse_markers_norm,
+        start_angle=start_angle_f,
+        line_width=line_width_f,
+        plot_format=plot_mode,
+        show_counts=bool(show_counts_flag),
+        show_pct=bool(show_pct_flag),
+        include_N=bool(include_N_flag),
         specificity_filter=specificity,
         roi_base=_roi_base,
     )
@@ -11649,12 +12505,18 @@ def plot_matrices(experiment, filtered_columns=None,
             )
         return queued_outputs
 
+    matrix_source_df = experiment.summary
+    if marker is not None:
+        marker_key = _resolve_marker_data_key(experiment, marker)
+        matrix_source_df = experiment.data[marker_key].df
+
     resolved_columns = _resolve_filtered_columns(
         experiment,
         filtered_columns=filtered_columns,
         column_strings=column_strings,
         regex_string=regex_string,
         exclude=exclude,
+        source_df=matrix_source_df,
     )
 
     level = 'factors' if factor else by
@@ -13492,7 +14354,12 @@ _PARAM_DESCRIPTIONS = {
     'threshold':            'Value(s) for binning data into groups.',
     'start_angle':          'Rotation angle for the first slice (default 90).',
     'plot_format':          '"pie" for pie chart, "bar" for stacked bar.',
-    'as_counts':            'Show raw counts instead of percentages.',
+    'show_counts':          'Display counts. If used alone in bar mode, the y-axis uses raw counts.',
+    'show_pct':             'Display percentages. If used in bar mode, the y-axis uses percent.',
+    'include_N':            'Append contributing animal count (unique AnimalName) to pie titles or group labels.',
+    'collapse_markers':     'For combo pies, ignore these partner markers and re-aggregate signatures at plot time.',
+    'as_counts':            'Legacy alias: show counts only when true, percent only when false.',
+    'include_n':            'Legacy alias for include_N.',
     # ── Correlation matrices ─────────────────────────────────────────
     'correlation':          'Correlation method: "pearsonr" or "spearmanr".',
     'first_columns':        'Pin these columns to the left of the matrix.',

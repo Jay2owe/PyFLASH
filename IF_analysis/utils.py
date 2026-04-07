@@ -50,14 +50,100 @@ def iter_specificities(specificity):
 
 
 def resolve_column_key(df, key):
-    """Resolve column key with case-insensitive/trim matching."""
+    """Resolve column key with case-insensitive/trim matching plus legacy aliases."""
     if key in df.columns:
         return key
-    target = str(key).strip().casefold()
+
+    candidates = [str(key).strip()]
+    candidates.extend(summary_column_aliases(key))
+    candidates.extend(raw_coloc_column_aliases(key))
+    targets = {str(candidate).strip().casefold() for candidate in candidates}
+
     for col in df.columns:
-        if str(col).strip().casefold() == target:
+        if str(col).strip().casefold() in targets:
             return col
     return None
+
+
+_LEGACY_SUMMARY_COLOC_MEAN_RE = re.compile(
+    r"^(?P<marker>.+)_Coloc(?P<target>.+)Mean(?P<exp>\.exp\d+)?$"
+)
+_CANONICAL_SUMMARY_COLOC_MEAN_RE = re.compile(
+    r"^(?P<marker>.+)_Coloc_(?P<target>.+)_Mean(?P<exp>\.exp\d+)?$"
+)
+_LEGACY_SUMMARY_COLOC_COUNT_RE = re.compile(
+    r"^(?P<marker>.+)_ColocCount(?P<target>.+?)(?P<pct>%?)(?P<exp>\.exp\d+)?$"
+)
+_CANONICAL_SUMMARY_COLOC_COUNT_RE = re.compile(
+    r"^(?P<marker>.+)_Coloc_(?P<target>.+)_Count(?P<pct>%?)(?P<exp>\.exp\d+)?$"
+)
+
+
+def summary_column_aliases(key):
+    """
+    Return equivalent summary-column spellings for legacy/current coloc names.
+
+    This keeps refactored summary schemas compatible with existing plot configs
+    and any saved column references that still use the legacy coloc naming.
+    """
+    key_s = str(key).strip()
+    aliases = []
+
+    m = _LEGACY_SUMMARY_COLOC_MEAN_RE.match(key_s)
+    if m is not None:
+        aliases.append(
+            f"{m.group('marker')}_Coloc_{m.group('target')}_Mean{m.group('exp') or ''}"
+        )
+
+    m = _CANONICAL_SUMMARY_COLOC_MEAN_RE.match(key_s)
+    if m is not None:
+        aliases.append(
+            f"{m.group('marker')}_Coloc{m.group('target')}Mean{m.group('exp') or ''}"
+        )
+
+    m = _LEGACY_SUMMARY_COLOC_COUNT_RE.match(key_s)
+    if m is not None:
+        aliases.append(
+            f"{m.group('marker')}_Coloc_{m.group('target')}_Count{m.group('pct') or ''}{m.group('exp') or ''}"
+        )
+
+    m = _CANONICAL_SUMMARY_COLOC_COUNT_RE.match(key_s)
+    if m is not None:
+        aliases.append(
+            f"{m.group('marker')}_ColocCount{m.group('target')}{m.group('pct') or ''}{m.group('exp') or ''}"
+        )
+
+    return list(dict.fromkeys([a for a in aliases if a != key_s]))
+
+
+def raw_coloc_column_aliases(key):
+    """
+    Return equivalent raw per-object coloc spellings with/without the separator.
+
+    Canonical raw overlap columns are now `Marker_Coloc_Target`, but marker-level
+    workflows may still refer to the legacy `Marker_ColocTarget` form.
+    """
+    key_s = str(key).strip()
+    if (
+        key_s == ""
+        or "ColocCount" in key_s
+        or "NonColocCount" in key_s
+        or key_s.endswith("Mean")
+        or key_s.endswith("%")
+    ):
+        return []
+
+    aliases = []
+
+    m = re.match(r"^(?P<prefix>.+_Coloc)_(?P<target>.+?)(?P<exp>\.exp\d+)?$", key_s)
+    if m is not None:
+        aliases.append(f"{m.group('prefix')}{m.group('target')}{m.group('exp') or ''}")
+
+    m = re.match(r"^(?P<prefix>.+_Coloc)(?P<target>(?!Count)[^_].+?)(?P<exp>\.exp\d+)?$", key_s)
+    if m is not None and "_Coloc_" not in key_s:
+        aliases.append(f"{m.group('prefix')}_{m.group('target')}{m.group('exp') or ''}")
+
+    return list(dict.fromkeys([a for a in aliases if a != key_s]))
 
 
 def filter_df_by_specificity(df, specificity):
@@ -409,7 +495,7 @@ class ProgressTracker:
 def clean_column_name(name):
     """Standardise column names from ImageJ CSV output."""
     return (name
-            .replace("Colocalisation with ", "Coloc")
+            .replace("Colocalisation with ", "Coloc_")
             .replace(" ", "")
             .replace("(micron^3)", "")
             .replace("(micron^2)", ""))
@@ -472,8 +558,9 @@ def normalize_hemisphere(value):
 
 def adjust_for_volumemm(df, columns, volume_column):
     """Divide each column by the volume in units of 0.1 mm³."""
+    from IF_analysis.config import Config
     for col in columns:
-        volume_um_cubed = df[volume_column] * 13
+        volume_um_cubed = df[volume_column] * Config.SECTION_THICKNESS_UM
         volume_0_1_mm_cubed = volume_um_cubed / 100000000
 
         df[col] = df[col] / volume_0_1_mm_cubed

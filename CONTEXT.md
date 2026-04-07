@@ -127,7 +127,7 @@ Core data container. Initialized with `(name, filePath, threshold)`.
 **Summary building:** The summary DataFrame is per-animal with columns like:
 - `AnimalName`, `Condition`, factor columns
 - `<marker>_Count`, `<marker>_IntDenTotal`, `<marker>_VolumeMean`, `<marker>_SurfaceMean`
-- `<marker>_Coloc<other>Mean`, `<marker>_ColocCount<other>`, `<marker>_ColocCount<other>%`
+- `<marker>_Coloc_<other>_Mean`, `<marker>_ColocCount<other>`, `<marker>_ColocCount<other>%`
 - `<marker>_DistToClosest_<other>Mean`, `<marker>_Contains_<other>Mean`
 - `<marker>_burdenScore`, `<marker>_fragmentationScore`
 - ROI intensity columns: `<marker>_ROI_IntDenMean`, `<marker>_ROI_%AreaMean`

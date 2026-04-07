@@ -28,6 +28,7 @@ PLOT_REGISTRY = {
     'ecdf': 'plot_ecdf',
     'regressions': 'plot_regressions',
     'pie_charts': 'plot_pie_charts',
+    'combo_pies': 'plot_combo_pies',
     'locations': 'plot_locations',
     'images': 'plot_images',
     'representative_images': 'plot_representative_images',

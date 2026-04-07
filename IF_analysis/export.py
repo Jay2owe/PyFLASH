@@ -34,6 +34,30 @@ IF_NAME_MAP = {
         "label": "<ab> Count per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}The number of segmented <ab> objects was summed and {_PER_VOL}.",
     },
+    "<ab>_CountRaw": {
+        "label": "<ab> Raw Count",
+        "desc": f"{_OBJ_COUNTER}The number of segmented <ab> objects was summed and averaged across sections before tissue-volume normalization.",
+    },
+    "ROI_Thickness": {
+        "label": "ROI Thickness (µm)",
+        "desc": "Section thickness used for summary normalization, or the effective thickness inferred from explicit ROI volume and area.",
+    },
+    "ROI_Volume": {
+        "label": "ROI Volume (µm³)",
+        "desc": "Tissue volume used for normalization, taken from ROI Properties volume when available or derived from area and fallback section thickness otherwise.",
+    },
+    "ROI_Area": {
+        "label": "ROI Area (µm²)",
+        "desc": "ROI area used for summary normalization and thickness sanity checks.",
+    },
+    "Volume0p1mm3": {
+        "label": "Volume (0.1 mm³ units)",
+        "desc": "Estimated tissue volume expressed in units of 0.1 mm³.",
+    },
+    "CountNormFactor": {
+        "label": "Count Normalization Factor",
+        "desc": "Multiplier that converts CountRaw into normalized count per 0.1 mm³.",
+    },
     "<ab>_IntDenTotal": {
         "label": "<ab> IntDen (A.U.) per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}The integrated density across all segmented <ab> objects was summed and {_PER_VOL}.",
@@ -66,9 +90,25 @@ IF_NAME_MAP = {
         "label": "<ab> Mean Pixel IntDen",
         "desc": f"{_OBJ_COUNTER}The mean integrated density of each segmented <ab> object was then normalized by the number of <ab> objects.",
     },
+    "<ab>_Coloc_<ab2>_Mean": {
+        "label": "<ab2> Overlap per <ab>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The mean % voxel overlap of each segmented <ab> object by <ab2> {_QUANTIFIED}.",
+    },
     "<ab>_Coloc<ab2>Mean": {
         "label": "<ab2> Overlap per <ab>",
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The mean % voxel overlap of each segmented <ab> object by <ab2> {_QUANTIFIED}.",
+    },
+    "<ab>_Coloc_<ab2>_Count": {
+        "label": "<ab> colocalised with <ab2> per 0.1mmÂ³",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects with a greater than {threshold}% overlap by <ab2> objects was summed and {_PER_VOL}.",
+    },
+    "<ab>_Coloc_<ab2>_CountRaw": {
+        "label": "<ab> raw colocalised with <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects with a greater than {threshold}% overlap by <ab2> objects was summed and averaged across sections before tissue-volume normalization.",
+    },
+    "<ab>_Coloc_<ab2>_Count%": {
+        "label": "% <ab> colocalised with <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The percentage of segmented <ab> objects with a greater than {threshold}% overlap by <ab2> objects {_QUANTIFIED}.",
     },
     "<ab>_ColocCount<ab2>": {
         "label": "<ab2>+<ab> per 0.1mm³",
@@ -86,9 +126,33 @@ IF_NAME_MAP = {
         "label": "<ab> Mean Ventricle Distance",
         "desc": f"{_OBJ_COUNTER}Using euclidean distance calculations and the centre of mass of <ab> objects, the distance to the ventricular boundary was calculated.\nThe mean distance of each <ab> object to the ventricle {_QUANTIFIED}.",
     },
+    "<ab>_Contains_<ab2>_Count": {
+        "label": "<ab> contains <ab2> per 0.1mmÂ³",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects containing <ab2> was summed and {_PER_VOL}.",
+    },
+    "<ab>_Contains_<ab2>_CountRaw": {
+        "label": "<ab> raw contains <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects containing <ab2> was summed and averaged across sections before tissue-volume normalization.",
+    },
+    "<ab>_Contains_<ab2>_Count%": {
+        "label": "% <ab> contains <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The percentage of segmented <ab> objects containing <ab2> {_QUANTIFIED}.",
+    },
     "<ab>_Contains_<ab2>Mean": {
         "label": "% <ab> w <ab2>",
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The mean number of <ab> objects containing <ab2> {_QUANTIFIED}.",
+    },
+    "<ab>_Any_<ab2>_Count": {
+        "label": "<ab> coloc/contains <ab2> per 0.1mm³",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects that either directly colocalised with or contained <ab2> was summed and {_PER_VOL}.",
+    },
+    "<ab>_Any_<ab2>_CountRaw": {
+        "label": "<ab> raw coloc/contains <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects that either directly colocalised with or contained <ab2> was summed and averaged across sections before tissue-volume normalization.",
+    },
+    "<ab>_Any_<ab2>_Count%": {
+        "label": "% <ab> coloc/contains <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The percentage of segmented <ab> objects that either directly colocalised with or contained <ab2> {_QUANTIFIED}.",
     },
     "<ab>_NumColoc_<ab2>Mean": {
         "label": "<ab> Mean # Internal <ab2>",
@@ -150,12 +214,14 @@ RAW_NAME_MAP = {
     "<ab>_NumClosestTo_<ab2>": {"label": "# <ab2> nearest to",       "desc": "Number of <ab2> objects for which this <ab> object is the nearest <ab> "},
     
     # --- Voxel overlap / colocalisation metrics (per object) ---
+    "<ab>_Coloc_<ab2>":        {"label": "<ab2> overlap (%)",         "desc": "Voxel-overlap (co-occurrence) of <ab2> with each <ab> object (per-object overlap metric)."},
     "<ab>_Coloc<ab2>":         {"label": "<ab2> overlap (%)",         "desc": "Voxel-overlap (co-occurrence) of <ab2> with each <ab> object (per-object overlap metric)."},
     "<ab>_ColocCount<ab2>":    {"label": f"<ab2>+ (<{threshold}% overlap)",     "desc": "Binary/thresholded co-localisation classification per <ab> object for <ab2> (per-object)."},
 
     # --- Containment / internalisation (per object) ---
     "<ab>_NumColoc_<ab2>":     {"label": "# internal <ab2>",      "desc": "Number of <ab2> objects classified as internalised/contained per <ab> object (per-object value)."},
     "<ab>_Contains_<ab2>":     {"label": "contains <ab2>",          "desc": "Binary indicator per <ab> object: whether it contains ≥1 <ab2> object under your overlap criterion."},
+    "<ab>_Any_<ab2>":          {"label": "coloc or contains <ab2>", "desc": "Binary indicator per <ab> object: whether it either passes the direct colocalisation threshold for <ab2> or contains ≥1 <ab2> object."},
 
     "<ab>_ROI_IntDen":          {"label": "ROI IntDen (per Z-step)", "desc": "ROI IntDen per Z-Step."},
     "<ab>_ROI_%Area":          {"label": "%Area coverage (per Z-step)", "desc": "ROI IntDen per Z-Step."}
@@ -297,11 +363,13 @@ def _summary_marker_for_column(colname: str) -> str:
     Return the real marker represented by a summary column.
 
     Combo-derived summary columns are named like
-    ``DAPI_Combo_wCK1d_Count``. Those should still be documented under the
-    base marker ``DAPI`` in the Excel "Data Summary" sheet rather than being
-    treated as standalone markers.
+    ``DAPI_Combo_wCK1d_Count`` or ``DAPI_ComboAny_CK1d+_Count``. Those should
+    still be documented under the base marker ``DAPI`` in the Excel "Data
+    Summary" sheet rather than being treated as standalone markers.
     """
     base, _ = _strip_exp_suffix(colname)
+    if "_ComboAny_" in base:
+        return base.split("_ComboAny_", 1)[0]
     if "_Combo_" in base:
         return base.split("_Combo_", 1)[0]
 
@@ -504,6 +572,29 @@ def convert_behavior_name(colname: str, truncate: bool = True):
 
     rule = BEHAVIOR_NAME_MAP[colname]
     return (rule["label"][:EXCEL_MAX] if truncate else rule["label"]), rule["desc"]
+
+
+def _display_label_for_summary_column(colname: str) -> str:
+    try:
+        return convert_name(colname, truncate=False)[0]
+    except KeyError:
+        try:
+            return convert_behavior_name(colname, truncate=False)[0]
+        except KeyError:
+            return colname
+
+
+def format_summary_for_display(summary: pd.DataFrame) -> pd.DataFrame:
+    """Return a display-only copy of a summary with human-readable labels."""
+    if not isinstance(summary, pd.DataFrame):
+        raise TypeError("summary must be a pandas DataFrame")
+
+    out = summary.copy()
+    out.columns = [
+        _display_label_for_summary_column(str(col))
+        for col in out.columns
+    ]
+    return out
 
 # Additional optimization: Create a cached version of convert_raw_name if called frequently
 _raw_name_cache = {}

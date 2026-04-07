@@ -921,6 +921,187 @@ def _coerce_binary_indicator(series: pd.Series) -> pd.Series:
     return mapped.fillna(False).astype(bool)
 
 
+def _any_indicator_columns(df: pd.DataFrame, marker_name: str) -> list[str]:
+    """Derived per-object pooled coloc/contains indicator columns."""
+    prefix = f"{str(marker_name)}_Any_"
+    return [str(col) for col in df.columns if str(col).startswith(prefix)]
+
+
+def _build_any_indicator_columns(stain_df: pd.DataFrame, marker_name: str) -> pd.DataFrame:
+    """Build per-object pooled indicators where Any = ColocCount OR Contains."""
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    coloc_rx = re.compile(rf"^{esc}_ColocCount(?P<m2>.+)$")
+    contains_rx = re.compile(rf"^{esc}_Contains_(?P<m2>.+)$")
+
+    coloc_cols = {}
+    contains_cols = {}
+    for col in stain_df.columns:
+        col_s = str(col)
+        m = coloc_rx.match(col_s)
+        if m is not None:
+            coloc_cols[str(m.group("m2"))] = col_s
+            continue
+        m = contains_rx.match(col_s)
+        if m is not None:
+            contains_cols[str(m.group("m2"))] = col_s
+
+    targets = sorted(set(coloc_cols) | set(contains_cols))
+    if len(targets) == 0:
+        return pd.DataFrame(index=stain_df.index)
+
+    any_df = pd.DataFrame(index=stain_df.index)
+    for target in targets:
+        pooled = pd.Series(False, index=stain_df.index)
+        if target in coloc_cols:
+            pooled = pooled | _coerce_binary_indicator(stain_df[coloc_cols[target]])
+        if target in contains_cols:
+            pooled = pooled | _coerce_binary_indicator(stain_df[contains_cols[target]])
+        any_df[f"{marker_s}_Any_{target}"] = pooled.astype(np.int8)
+    return any_df
+
+
+def _build_binary_indicator_count_summaries(
+    stain_df: pd.DataFrame,
+    marker_name: str,
+    *,
+    family_name: str,
+    detected,
+) -> pd.DataFrame:
+    """Build per-animal standalone binary-indicator counts and percentages."""
+    if "AnimalName" not in stain_df.columns:
+        return pd.DataFrame()
+    if len(detected) == 0:
+        return pd.DataFrame()
+
+    marker_s = str(marker_name)
+    detected = sorted(detected, key=lambda t: (str(t[0]), str(t[1])))
+    indicator_cols = [c for _, c in detected]
+    rename_map = {
+        c: f"{marker_s}_{family_name}_{target}_Count"
+        for target, c in detected
+    }
+
+    base_count_col = f"{marker_s}_Count"
+    if base_count_col in stain_df.columns:
+        base_count = _to_numeric_series_excluding_sentinel(stain_df[base_count_col]).fillna(0.0)
+        base_count = base_count.where(base_count > 0, 0.0)
+        base_count = base_count.where(base_count <= 1, 1.0)
+    else:
+        base_count = pd.Series(1.0, index=stain_df.index, dtype=float)
+
+    valid_mask = base_count > 0
+    if not bool(valid_mask.any()):
+        return pd.DataFrame()
+
+    work = stain_df.loc[valid_mask, ["AnimalName"] + indicator_cols].copy()
+    work_animals = work["AnimalName"].astype(str)
+    indicator_numeric = pd.DataFrame(index=work.index)
+    for col in indicator_cols:
+        indicator_numeric[col] = _coerce_binary_indicator(work[col]).astype(float)
+
+    out_count_df = pd.concat([work[["AnimalName"]], indicator_numeric], axis=1)
+    out_count_df = out_count_df.groupby("AnimalName")[indicator_cols].sum().rename(columns=rename_map)
+
+    denom = base_count.loc[valid_mask].groupby(work_animals).sum().replace(0, np.nan)
+    out_pct_df = out_count_df.div(denom, axis=0) * 100.0
+    out_pct_df = out_pct_df.rename(columns={
+        col: f"{str(col)}%"
+        for col in out_count_df.columns
+    })
+
+    return pd.concat([out_count_df, out_pct_df], axis=1)
+
+
+def _build_any_count_summaries(stain_df: pd.DataFrame, marker_name: str) -> pd.DataFrame:
+    """Build per-animal standalone Any counts and percentages."""
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    any_rx = re.compile(rf"^{esc}_Any_(?P<m2>.+)$")
+
+    detected = []
+    for col in stain_df.columns:
+        col_s = str(col)
+        m = any_rx.match(col_s)
+        if m is not None:
+            detected.append((str(m.group("m2")), col_s))
+
+    return _build_binary_indicator_count_summaries(
+        stain_df,
+        marker_name,
+        family_name="Any",
+        detected=detected,
+    )
+
+
+def _build_coloc_count_summaries(stain_df: pd.DataFrame, marker_name: str) -> pd.DataFrame:
+    """Build per-animal standalone Coloc counts and percentages."""
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    coloc_rx = re.compile(rf"^{esc}_ColocCount(?P<m2>.+)$")
+
+    detected = []
+    for col in stain_df.columns:
+        col_s = str(col)
+        m = coloc_rx.match(col_s)
+        if m is not None:
+            detected.append((str(m.group("m2")), col_s))
+
+    return _build_binary_indicator_count_summaries(
+        stain_df,
+        marker_name,
+        family_name="Coloc",
+        detected=detected,
+    )
+
+
+def _build_contains_count_summaries(stain_df: pd.DataFrame, marker_name: str) -> pd.DataFrame:
+    """Build per-animal standalone Contains counts and percentages."""
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    contains_rx = re.compile(rf"^{esc}_Contains_(?P<m2>.+)$")
+
+    detected = []
+    for col in stain_df.columns:
+        col_s = str(col)
+        m = contains_rx.match(col_s)
+        if m is not None:
+            detected.append((str(m.group("m2")), col_s))
+
+    return _build_binary_indicator_count_summaries(
+        stain_df,
+        marker_name,
+        family_name="Contains",
+        detected=detected,
+    )
+
+
+def _rename_legacy_coloc_mean_summary_columns(mean_df: pd.DataFrame, marker_name: str) -> pd.DataFrame:
+    """Rename raw coloc mean summaries to canonical `<marker>_Coloc_<target>_Mean`."""
+    if not isinstance(mean_df, pd.DataFrame) or mean_df.empty:
+        return mean_df
+
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    canonical_raw_rx = re.compile(rf"^{esc}_Coloc_(?P<m2>.+)Mean$")
+    legacy_rx = re.compile(rf"^{esc}_Coloc(?P<m2>[^_].+)Mean$")
+    rename_map = {}
+    for col in mean_df.columns:
+        col_s = str(col)
+        m = canonical_raw_rx.match(col_s)
+        if m is not None:
+            rename_map[col_s] = f"{marker_s}_Coloc_{str(m.group('m2'))}_Mean"
+            continue
+
+        m = legacy_rx.match(col_s)
+        if m is not None:
+            rename_map[col_s] = f"{marker_s}_Coloc_{str(m.group('m2'))}_Mean"
+
+    if len(rename_map) == 0:
+        return mean_df
+    return mean_df.rename(columns=rename_map)
+
+
 def _resolve_combo_intden_column(stain_df: pd.DataFrame, marker_name: str) -> str | None:
     """Pick the best per-object IntDen source column for combo IntDen totals."""
     exact = f"{marker_name}_IntDen"
@@ -984,9 +1165,13 @@ def _resolve_combo_mean_intden_column(stain_df: pd.DataFrame, marker_name: str) 
     return candidates[0]
 
 
-def _combo_indicator_columns(df: pd.DataFrame, marker_name: str) -> list[str]:
+def _combo_indicator_columns(
+    df: pd.DataFrame,
+    marker_name: str,
+    family_name: str = "Combo",
+) -> list[str]:
     """Derived per-object combo membership columns stored on marker dataframes."""
-    prefix = f"{str(marker_name)}_Combo_"
+    prefix = f"{str(marker_name)}_{str(family_name)}_"
     metric_suffixes = ("_Count", "_Count%", "_IntDenTotal", "_MeanIntDen")
     out = []
     for col in df.columns:
@@ -999,50 +1184,22 @@ def _combo_indicator_columns(df: pd.DataFrame, marker_name: str) -> list[str]:
     return out
 
 
-def _build_coloc_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
-    """
-    Build per-object combo indicators and per-animal combo summaries.
-
-    Returns
-    -------
-    combo_indicator_df : DataFrame
-        Columns:
-        - <marker>_Combo_<signature>   (binary per-object membership)
-    combo_count_df : DataFrame
-        Columns:
-        - <marker>_Combo_<signature>_Count
-        - <marker>_Combo_<signature>_Count%
-    combo_intden_df : DataFrame
-        Columns:
-        - <marker>_Combo_<signature>_IntDenTotal
-    combo_mean_intden_df : DataFrame
-        Columns:
-        - <marker>_Combo_<signature>_MeanIntDen
-    """
+def _build_combo_summaries_from_detected(
+    stain_df: pd.DataFrame,
+    marker_name: str,
+    family_name: str,
+    detected,
+):
+    """Build per-object combo indicators and per-animal combo summaries."""
     if "AnimalName" not in stain_df.columns:
         return pd.DataFrame(index=stain_df.index), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    marker_s = str(marker_name)
-    esc = re.escape(marker_s)
-    patterns = [
-        ("ColocCount", re.compile(rf"^{esc}_ColocCount(?P<m2>.+)$")),
-        ("Contains", re.compile(rf"^{esc}_Contains_(?P<m2>.+)$")),
-    ]
-    kind_rank = {"ColocCount": 0, "Contains": 1}
-
-    detected = []
-    for c in stain_df.columns:
-        c_s = str(c)
-        for kind, rx in patterns:
-            m = rx.match(c_s)
-            if m is not None:
-                detected.append((kind, str(m.group("m2")), c_s))
-                break
     if len(detected) == 0:
         return pd.DataFrame(index=stain_df.index), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    detected = sorted(detected, key=lambda t: (str(t[1]), kind_rank[t[0]], str(t[2])))
-    indicator_cols = [c for _, _, c in detected]
+    marker_s = str(marker_name)
+    detected = sorted(detected, key=lambda t: (str(t[0]), int(t[1]), str(t[2]), str(t[3])))
+    indicator_cols = [c for _, _, c, _ in detected]
+    indicator_tokens = [token for _, _, _, token in detected]
 
     base_count_col = f"{marker_s}_Count"
     if base_count_col in stain_df.columns:
@@ -1065,18 +1222,14 @@ def _build_coloc_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
         bool_df[c] = _coerce_binary_indicator(work[c])
 
     signatures = []
-    meta = [(kind, m2) for kind, m2, _ in detected]
     for row in bool_df.itertuples(index=False, name=None):
         parts = []
-        for value, (kind, m2) in zip(row, meta):
+        for value, token in zip(row, indicator_tokens):
             if not bool(value):
-                # Negative states (e.g., marker-, woMarker) are intentionally
-                # omitted from combo names as requested.
                 continue
-            if kind == "ColocCount":
-                parts.append(f"{m2}+")
-            else:
-                parts.append(f"w{m2}")
+            # Negative states (e.g., marker-, woMarker) are intentionally
+            # omitted from combo names as requested.
+            parts.append(str(token))
         signatures.append("_".join(parts) if len(parts) > 0 else "None")
     combo_series = pd.Series(signatures, index=work.index, name="_combo")
     combo_indicator_df = pd.get_dummies(combo_series)
@@ -1085,7 +1238,7 @@ def _build_coloc_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
         fill_value=0,
     ).astype(np.int8)
     combo_indicator_df = combo_indicator_df.rename(
-        columns={sig: f"{marker_s}_Combo_{str(sig)}" for sig in combo_indicator_df.columns}
+        columns={sig: f"{marker_s}_{family_name}_{str(sig)}" for sig in combo_indicator_df.columns}
     )
     combo_indicator_df = combo_indicator_df.reindex(stain_df.index, fill_value=0)
 
@@ -1096,7 +1249,7 @@ def _build_coloc_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
     })
     combo_count = count_input.groupby(["AnimalName", "_combo"])["_w"].sum().unstack(fill_value=0.0)
     count_cols = {
-        c: f"{marker_s}_Combo_{str(c)}_Count"
+        c: f"{marker_s}_{family_name}_{str(c)}_Count"
         for c in combo_count.columns
     }
     combo_count = combo_count.rename(columns=count_cols)
@@ -1121,7 +1274,7 @@ def _build_coloc_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
         })
         combo_intden = intden_input.groupby(["AnimalName", "_combo"])["_intden"].sum().unstack(fill_value=0.0)
         combo_intden = combo_intden.rename(columns={
-            c: f"{marker_s}_Combo_{str(c)}_IntDenTotal"
+            c: f"{marker_s}_{family_name}_{str(c)}_IntDenTotal"
             for c in combo_intden.columns
         })
 
@@ -1137,11 +1290,70 @@ def _build_coloc_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
         })
         combo_mean_intden = mean_intden_input.groupby(["AnimalName", "_combo"])["_mean_intden"].mean().unstack()
         combo_mean_intden = combo_mean_intden.rename(columns={
-            c: f"{marker_s}_Combo_{str(c)}_MeanIntDen"
+            c: f"{marker_s}_{family_name}_{str(c)}_MeanIntDen"
             for c in combo_mean_intden.columns
         })
 
     return combo_indicator_df, combo_count_df, combo_intden, combo_mean_intden
+
+
+def _build_coloc_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
+    """
+    Build detailed per-object combo indicators and per-animal combo summaries.
+
+    This keeps `ColocCount` and `Contains` as separate positive states.
+    """
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    patterns = [
+        ("ColocCount", re.compile(rf"^{esc}_ColocCount(?P<m2>.+)$")),
+        ("Contains", re.compile(rf"^{esc}_Contains_(?P<m2>.+)$")),
+    ]
+    kind_rank = {"ColocCount": 0, "Contains": 1}
+
+    detected = []
+    for c in stain_df.columns:
+        c_s = str(c)
+        for kind, rx in patterns:
+            m = rx.match(c_s)
+            if m is not None:
+                marker2 = str(m.group("m2"))
+                token = f"{marker2}+" if kind == "ColocCount" else f"w{marker2}"
+                detected.append((marker2, kind_rank[kind], c_s, token))
+                break
+
+    return _build_combo_summaries_from_detected(
+        stain_df,
+        marker_name,
+        family_name="Combo",
+        detected=detected,
+    )
+
+
+def _build_any_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
+    """
+    Build pooled per-object combo indicators and per-animal combo summaries.
+
+    This uses derived `Any` columns where Any = ColocCount OR Contains.
+    """
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    any_rx = re.compile(rf"^{esc}_Any_(?P<m2>.+)$")
+
+    detected = []
+    for c in stain_df.columns:
+        c_s = str(c)
+        m = any_rx.match(c_s)
+        if m is not None:
+            marker2 = str(m.group("m2"))
+            detected.append((marker2, 0, c_s, f"{marker2}+"))
+
+    return _build_combo_summaries_from_detected(
+        stain_df,
+        marker_name,
+        family_name="ComboAny",
+        detected=detected,
+    )
 
 
 def _all_sources_are_sentinel(df: pd.DataFrame, cols, sentinel=NOT_INCLUDED_SENTINEL) -> pd.Series:
@@ -1548,15 +1760,31 @@ class Experiment:
         # Pre-compute combo indicators once (side effect on stain.df)
         for stain in stains:
             stain_df = stain.df.copy()
-            existing = _combo_indicator_columns(stain_df, stain.name)
+            existing_any = _any_indicator_columns(stain_df, stain.name)
+            existing_combo = _combo_indicator_columns(stain_df, stain.name, family_name="Combo")
+            existing_combo_any = _combo_indicator_columns(stain_df, stain.name, family_name="ComboAny")
+            existing = list(dict.fromkeys(existing_any + existing_combo + existing_combo_any))
             if len(existing) > 0:
                 stain_df = stain_df.drop(columns=existing, errors='ignore')
+
+            any_indicator_df = _build_any_indicator_columns(stain_df, stain.name)
+            if not any_indicator_df.empty:
+                for any_col in any_indicator_df.columns:
+                    stain_df[any_col] = any_indicator_df[any_col].astype(np.int8)
+
             combo_indicator_df, _, _, _ = _build_coloc_combo_summaries(stain_df, stain.name)
+            combo_any_indicator_df, _, _, _ = _build_any_combo_summaries(stain_df, stain.name)
             if len(existing) > 0:
                 stain.df = stain.df.drop(columns=existing, errors='ignore')
+            if not any_indicator_df.empty:
+                for any_col in any_indicator_df.columns:
+                    stain.df[any_col] = any_indicator_df[any_col].astype(np.int8)
             if not combo_indicator_df.empty:
                 for combo_col in combo_indicator_df.columns:
                     stain.df[combo_col] = combo_indicator_df[combo_col].astype(np.int8)
+            if not combo_any_indicator_df.empty:
+                for combo_col in combo_any_indicator_df.columns:
+                    stain.df[combo_col] = combo_any_indicator_df[combo_col].astype(np.int8)
 
         # Discover all ROI bases across all stain data
         all_roi_bases = set()
@@ -1595,7 +1823,10 @@ class Experiment:
                     tracker.finish_item(f"{roi_base}/{getattr(stain, 'name', type(stain).__name__)}")
                     continue
 
-                existing = _combo_indicator_columns(stain_df, stain.name)
+                existing = (
+                    _combo_indicator_columns(stain_df, stain.name, family_name="Combo")
+                    + _combo_indicator_columns(stain_df, stain.name, family_name="ComboAny")
+                )
                 if len(existing) > 0:
                     stain_df = stain_df.drop(columns=existing, errors='ignore')
                 metric_cols = [c for c in stain_df.columns if c not in to_drop]
@@ -1608,6 +1839,8 @@ class Experiment:
                 mean_candidate_cols = [
                     c for c in metric_cols
                     if 'Count' not in str(c)
+                    and '_Any_' not in str(c)
+                    and '_Contains_' not in str(c)
                 ]
                 if len(mean_candidate_cols) > 0:
                     mean_source = stain_df[mean_candidate_cols].copy()
@@ -1625,9 +1858,7 @@ class Experiment:
                         axis=1
                     ).groupby('AnimalName')[mean_cols].mean()
                     mean_df = grouped_numeric.add_suffix('Mean')
-                    contains_mean_cols = [c for c in mean_df.columns if '_Contains_' in str(c)]
-                    if len(contains_mean_cols) > 0:
-                        mean_df[contains_mean_cols] = mean_df[contains_mean_cols] * 100.0
+                    mean_df = _rename_legacy_coloc_mean_summary_columns(mean_df, stain.name)
                 else:
                     mean_df = pd.DataFrame(index=animal_index.copy())
 
@@ -1636,7 +1867,11 @@ class Experiment:
                 else:
                     other_df = pd.DataFrame(index=animal_index.copy())
 
-                count_cols = get_columns(stain_df, regex_string='Count')
+                count_cols = [
+                    c for c in get_columns(stain_df, regex_string='Count')
+                    if not re.match(rf"^{re.escape(str(stain.name))}_ColocCount.+$", str(c))
+                    and not re.match(rf"^{re.escape(str(stain.name))}_NonColocCount.+$", str(c))
+                ]
                 if len(count_cols) > 0:
                     count_numeric = stain_df[count_cols].apply(pd.to_numeric, errors='coerce')
                     count_numeric = count_numeric.where((count_numeric <= 1) | count_numeric.isna(), 1)
@@ -1645,8 +1880,14 @@ class Experiment:
                     count_df = add_coloc_percentages(count_df)
                 else:
                     count_df = pd.DataFrame(index=animal_index.copy())
+                coloc_count_df = _build_coloc_count_summaries(stain_df, stain.name)
+                contains_count_df = _build_contains_count_summaries(stain_df, stain.name)
+                any_count_df = _build_any_count_summaries(stain_df, stain.name)
 
                 _, combo_count_df, combo_intden_df, combo_mean_intden_df = _build_coloc_combo_summaries(
+                    stain_df, stain.name,
+                )
+                _, combo_any_count_df, combo_any_intden_df, combo_any_mean_intden_df = _build_any_combo_summaries(
                     stain_df, stain.name,
                 )
 
@@ -1659,8 +1900,10 @@ class Experiment:
                 else:
                     sum_df = pd.DataFrame(index=animal_index.copy())
 
-                for block in [mean_df, count_df, combo_count_df, combo_mean_intden_df,
-                              sum_df, combo_intden_df, other_df]:
+                for block in [mean_df, count_df, coloc_count_df, contains_count_df, any_count_df,
+                              combo_count_df, combo_any_count_df,
+                              combo_mean_intden_df, combo_any_mean_intden_df,
+                              sum_df, combo_intden_df, combo_any_intden_df, other_df]:
                     block = _ensure_animalname_column(block)
                     summary_dfs.append(block)
                     if is_behavior:

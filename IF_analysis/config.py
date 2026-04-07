@@ -28,6 +28,7 @@ class Config:
     # ── Processing defaults ────────────────────────────────────────────
     THRESHOLD = 30
     PIXEL_SIZE = 3.51998900003   # microns per pixel
+    SECTION_THICKNESS_UM = 13.0  # legacy fallback when ROI volume is unavailable
 
     # ── Directory resolution ───────────────────────────────────────────
     # Fallback usernames to try when resolving OneDrive/Dropbox paths

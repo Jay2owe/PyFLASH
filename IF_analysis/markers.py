@@ -4,11 +4,16 @@ Data marker classes — Attribute, Antibody, cellMarker, objectMarker.
 These represent individual staining channels or attributes within an experiment.
 """
 
+import re
 import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib import pyplot as plt
 from collections import defaultdict
+try:
+    from scipy.spatial import cKDTree
+except Exception:
+    cKDTree = None
 
 from IF_analysis.config import Config
 from IF_analysis._logging import logger as _log
@@ -17,6 +22,39 @@ from IF_analysis.utils import (
     convert_microns_to_pixels, trace_downward_nearest,
     moving_average, points_to_polyline_distance, save_fig,
 )
+
+
+def _canonical_raw_coloc_column(marker_name, target_name):
+    return f"{str(marker_name)}_Coloc_{str(target_name)}"
+
+
+def _legacy_raw_coloc_column(marker_name, target_name):
+    return f"{str(marker_name)}_Coloc{str(target_name)}"
+
+
+def _extract_raw_coloc_target(colname, marker_name):
+    marker_s = str(marker_name)
+    col_s = str(colname)
+
+    m = re.match(rf"^{re.escape(marker_s)}_Coloc_(?P<target>.+)$", col_s)
+    if m is not None:
+        return str(m.group("target"))
+
+    m = re.match(rf"^{re.escape(marker_s)}_Coloc(?P<target>(?!Count)[^_].+)$", col_s)
+    if m is not None:
+        return str(m.group("target"))
+
+    return None
+
+
+def _resolve_raw_coloc_column(df, marker_name, target_name):
+    for candidate in (
+        _canonical_raw_coloc_column(marker_name, target_name),
+        _legacy_raw_coloc_column(marker_name, target_name),
+    ):
+        if candidate in df.columns:
+            return candidate
+    return None
 
 
 class Attribute:
@@ -144,16 +182,67 @@ class Antibody(Attribute):
         self.df = new_df
         return self.df
 
+    @staticmethod
+    def _spatial_frame(df):
+        index_name = getattr(df.index, 'name', None)
+        if index_name is not None and index_name not in df.columns:
+            return df.reset_index()
+        return df
+
+    @staticmethod
+    def _shared_spatial_columns(*dfs):
+        preferred = ['AnimalName', 'ImageROI', 'Hemisphere', 'Region', 'ROI']
+        shared = set(preferred)
+        for df in dfs:
+            shared &= set(df.columns)
+        return [col for col in preferred if col in shared]
+
+    @staticmethod
+    def _group_row_positions(df, group_cols):
+        if len(group_cols) == 0:
+            return {('__all__',): np.arange(len(df), dtype=int)}
+        grouped = df.groupby(group_cols, sort=False, dropna=False).indices
+        return {
+            key if isinstance(key, tuple) else (key,): np.asarray(pos, dtype=int)
+            for key, pos in grouped.items()
+        }
+
+    @staticmethod
+    def _nearest_neighbor_query(query_coords, reference_coords):
+        if cKDTree is not None:
+            tree = cKDTree(reference_coords)
+            distances, idx = tree.query(query_coords, k=1)
+            return np.asarray(distances, dtype=float), np.asarray(idx, dtype=int)
+
+        # Keep the NumPy fallback bounded so large regions do not allocate an
+        # all-pairs distance matrix in one shot.
+        max_pairs = 2_000_000
+        chunk_size = max(1, max_pairs // max(reference_coords.shape[0], 1))
+        distances = np.empty(query_coords.shape[0], dtype=float)
+        idx = np.empty(query_coords.shape[0], dtype=int)
+        for start in range(0, query_coords.shape[0], chunk_size):
+            stop = min(start + chunk_size, query_coords.shape[0])
+            delta = query_coords[start:stop, np.newaxis, :] - reference_coords[np.newaxis, :, :]
+            dist_chunk = np.linalg.norm(delta, axis=2)
+            idx_chunk = np.argmin(dist_chunk, axis=1)
+            distances[start:stop] = dist_chunk[np.arange(stop - start), idx_chunk]
+            idx[start:stop] = idx_chunk
+        return distances, idx
+
     def addColocData(self, threshold):
-        coloc_cols = get_columns(self.df, regex_string="Coloc")
-        for column in coloc_cols:
-            coloc_name = column.split('Coloc')[1]
+        coloc_cols = []
+        for column in self.df.columns:
+            target_name = _extract_raw_coloc_target(column, self.name)
+            if target_name is not None:
+                coloc_cols.append((str(column), target_name))
+
+        for raw_col, coloc_name in coloc_cols:
             _log.status(f"Adding {coloc_name} colocalisation data...")
             self.df[f'{self.name}_ColocCount{coloc_name}'] = np.where(
-                self.df[f'{self.name}_Coloc{coloc_name}'] > threshold, 1, 0
+                pd.to_numeric(self.df[raw_col], errors='coerce') > threshold, 1, 0
             )
             self.df[f'{self.name}_NonColocCount{coloc_name}'] = np.where(
-                self.df[f'{self.name}_Coloc{coloc_name}'] < threshold, 1, 0
+                pd.to_numeric(self.df[raw_col], errors='coerce') < threshold, 1, 0
             )
         return self.df
 
@@ -217,53 +306,90 @@ class Antibody(Attribute):
     def find_closest_distances_between_markers(self, other_marker):
         threshold = Config.THRESHOLD
         other_df = other_marker.df
-        all_distances, all_colocalised = [], []
-        all_coloc_count, all_closest_count = [], []
+        self_frame = self._spatial_frame(self.df)
+        other_frame = self._spatial_frame(other_df)
+        group_cols = self._shared_spatial_columns(self_frame, other_frame)
+        self_groups = self._group_row_positions(self_frame, group_cols)
+        other_groups = self._group_row_positions(other_frame, group_cols)
+        all_keys = list(dict.fromkeys([*self_groups.keys(), *other_groups.keys()]))
 
-        for s in set(self.df.index.unique()) | set(other_df.index.unique()):
-            self_scn = self.df[self.df.index == s]
-            other_scn = other_df[other_df.index == s]
+        distance_out = np.full(self.df.shape[0], np.inf, dtype=float)
+        closest_flag_out = np.zeros(other_df.shape[0], dtype=float)
+        coloc_count_out = np.zeros(other_df.shape[0], dtype=float)
+        closest_count_out = np.zeros(other_df.shape[0], dtype=float)
 
-            if self_scn.empty or other_scn.empty or self_scn[f'{self.name}_ZM'].iloc[0] == 0:
-                closest_dist = np.full(self_scn.shape[0], np.inf)
-                coloc_arr = np.zeros(other_scn.shape[0])
-                coloc_count_arr = np.zeros(other_scn.shape[0])
-                closest_count_arr = np.zeros(other_scn.shape[0])
-            else:
-                self_coords = self_scn[[f'{self.name}_RawXM', f'{self.name}_RawYM', f'{self.name}_ZM']].to_numpy()
-                other_coords = other_scn[[f'{other_marker.name}_RawXM', f'{other_marker.name}_RawYM', f'{other_marker.name}_ZM']].to_numpy()
-                distances = np.linalg.norm(self_coords[:, np.newaxis] - other_coords, axis=2)
-                closest_dist = np.min(distances, axis=1)
-                closest_idx = np.argmin(distances, axis=1)
+        self_coord_cols = [f'{self.name}_RawXM', f'{self.name}_RawYM', f'{self.name}_ZM']
+        other_coord_cols = [
+            f'{other_marker.name}_RawXM',
+            f'{other_marker.name}_RawYM',
+            f'{other_marker.name}_ZM',
+        ]
 
-                coloc_arr = np.zeros(other_scn.shape[0])
-                coloc_count_arr = np.zeros(other_scn.shape[0])
-                closest_count_arr = np.zeros(other_scn.shape[0])
+        for key in all_keys:
+            self_pos = self_groups.get(key, np.empty(0, dtype=int))
+            other_pos = other_groups.get(key, np.empty(0, dtype=int))
+            if self_pos.size == 0 or other_pos.size == 0:
+                continue
+
+            self_group = self.df.iloc[self_pos]
+            other_group = other_df.iloc[other_pos]
+
+            closest_dist = np.full(self_pos.shape[0], np.inf, dtype=float)
+            closest_flags = np.zeros(other_pos.shape[0], dtype=float)
+            coloc_count_arr = np.zeros(other_pos.shape[0], dtype=float)
+            closest_count_arr = np.zeros(other_pos.shape[0], dtype=float)
+
+            self_coords = self_group[self_coord_cols].to_numpy(dtype=float, copy=False)
+            other_coords = other_group[other_coord_cols].to_numpy(dtype=float, copy=False)
+            self_valid = np.isfinite(self_coords).all(axis=1) & (
+                self_group[f'{self.name}_ZM'].to_numpy(dtype=float, copy=False) != 0
+            )
+            other_valid = np.isfinite(other_coords).all(axis=1) & (
+                other_group[f'{other_marker.name}_ZM'].to_numpy(dtype=float, copy=False) != 0
+            )
+
+            if self_valid.any() and other_valid.any():
+                valid_self_coords = self_coords[self_valid]
+                valid_other_coords = other_coords[other_valid]
+                valid_dist, valid_idx = self._nearest_neighbor_query(
+                    valid_self_coords,
+                    valid_other_coords,
+                )
+                closest_dist[self_valid] = valid_dist
+
+                other_valid_idx = np.flatnonzero(other_valid)
+                closest_idx = other_valid_idx[valid_idx]
+                np.maximum.at(closest_flags, closest_idx, 1)
+                np.add.at(closest_count_arr, closest_idx, 1)
 
                 try:
-                    if other_scn[f'{other_marker.name}_ZM'].iloc[0] != 0:
-                        coloc_bool = (self_scn[f'{self.name}_Coloc{other_marker.name}'].to_numpy() > threshold)
-                        np.maximum.at(coloc_arr, closest_idx, 1)
-                        np.add.at(coloc_count_arr, closest_idx, coloc_bool.astype(int))
-                        np.add.at(coloc_arr, closest_idx, 1)
+                    coloc_col = _resolve_raw_coloc_column(
+                        self_group,
+                        self.name,
+                        other_marker.name,
+                    )
+                    if coloc_col is None:
+                        raise KeyError(other_marker.name)
+                    coloc_bool = (
+                        pd.to_numeric(self_group[coloc_col], errors='coerce')
+                        .to_numpy(dtype=float, copy=False)[self_valid] > threshold
+                    )
+                    np.add.at(coloc_count_arr, closest_idx, coloc_bool.astype(int))
                 except KeyError:
-                    val = 1 if other_scn[f'{other_marker.name}_ZM'].iloc[0] != 0 else 0
-                    coloc_arr[closest_idx] = val
-                    coloc_count_arr[closest_idx] = val
-                    closest_count_arr[closest_idx] = val
+                    np.add.at(coloc_count_arr, closest_idx, 1)
 
-            all_distances.extend(closest_dist)
-            all_colocalised.extend(coloc_arr)
-            all_coloc_count.extend(coloc_count_arr)
-            all_closest_count.extend(closest_count_arr)
+            distance_out[self_pos] = closest_dist
+            closest_flag_out[other_pos] = closest_flags
+            coloc_count_out[other_pos] = coloc_count_arr
+            closest_count_out[other_pos] = closest_count_arr
 
-        self.df[f'{self.name}_DistToClosest_{other_marker.name}'] = all_distances
-        other_df[f'{other_marker.name}_ClosestTo_{self.name}'] = all_colocalised
-        other_df[f'{other_marker.name}_NumColoc_{self.name}'] = all_coloc_count
+        self.df[f'{self.name}_DistToClosest_{other_marker.name}'] = distance_out
+        other_df[f'{other_marker.name}_ClosestTo_{self.name}'] = closest_flag_out
+        other_df[f'{other_marker.name}_NumColoc_{self.name}'] = coloc_count_out
         other_df[f'{other_marker.name}_Contains_{self.name}'] = np.where(
-            other_df[f'{other_marker.name}_NumColoc_{self.name}'] >= 1, 1, 0
+            coloc_count_out >= 1, 1, 0
         )
-        other_df[f'{other_marker.name}_NumClosestTo_{self.name}'] = all_closest_count
+        other_df[f'{other_marker.name}_NumClosestTo_{self.name}'] = closest_count_out
         other_marker.set_df(other_df)
 
         _log.confirm(f"'Closest to {self.name}' column added to {other_marker.name} DataFrame!")
