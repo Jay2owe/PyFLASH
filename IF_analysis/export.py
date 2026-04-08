@@ -227,6 +227,131 @@ RAW_NAME_MAP = {
     "<ab>_ROI_%Area":          {"label": "%Area coverage (per Z-step)", "desc": "ROI IntDen per Z-Step."}
 }
 
+IF_NAME_MAP.update({
+    "<ab>_VolColoc_<ab2>_Mean": {
+        "label": "<ab2> Vol Overlap per <ab>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The mean volumetric % voxel overlap of each segmented <ab> object by <ab2> {_QUANTIFIED}.",
+    },
+    "<ab>_VolColoc_<ab2>_Count": {
+        "label": "<ab> volumetric coloc with <ab2> per 0.1mmÂ³",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects positive for volumetric colocalisation with <ab2> was summed and {_PER_VOL}.",
+    },
+    "<ab>_VolColoc_<ab2>_CountRaw": {
+        "label": "<ab> raw volumetric coloc with <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects positive for volumetric colocalisation with <ab2> was summed and averaged across sections before tissue-volume normalization.",
+    },
+    "<ab>_VolColoc_<ab2>_Count%": {
+        "label": "% <ab> volumetric coloc with <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The percentage of segmented <ab> objects positive for volumetric colocalisation with <ab2> {_QUANTIFIED}.",
+    },
+    "<ab>_VolContains_<ab2>_Count": {
+        "label": "<ab> volumetric contains <ab2> per 0.1mmÂ³",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects volumetrically containing <ab2> was summed and {_PER_VOL}.",
+    },
+    "<ab>_VolContains_<ab2>_CountRaw": {
+        "label": "<ab> raw volumetric contains <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects volumetrically containing <ab2> was summed and averaged across sections before tissue-volume normalization.",
+    },
+    "<ab>_VolContains_<ab2>_Count%": {
+        "label": "% <ab> volumetric contains <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The percentage of segmented <ab> objects volumetrically containing <ab2> {_QUANTIFIED}.",
+    },
+    "<ab>_VolAny_<ab2>_Count": {
+        "label": "<ab> volumetric assoc with <ab2> per 0.1mmÂ³",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects that either volumetrically colocalised with or volumetrically contained <ab2> was summed and {_PER_VOL}.",
+    },
+    "<ab>_VolAny_<ab2>_CountRaw": {
+        "label": "<ab> raw volumetric assoc with <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects that either volumetrically colocalised with or volumetrically contained <ab2> was summed and averaged across sections before tissue-volume normalization.",
+    },
+    "<ab>_VolAny_<ab2>_Count%": {
+        "label": "% <ab> volumetric assoc with <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The percentage of segmented <ab> objects that either volumetrically colocalised with or volumetrically contained <ab2> {_QUANTIFIED}.",
+    },
+    "<ab>_VolNumColoc_<ab2>Mean": {
+        "label": "<ab> Mean # Vol Internal <ab2>",
+        "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The mean number of volumetrically internalised <ab2> objects per <ab> object was then quantified.",
+    },
+    "<ab>_CPCColoc_<ab2>_Mean": {
+        "label": "<ab2> CPC per <ab>",
+        "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the mean CPC association of each segmented <ab> object by <ab2> {_QUANTIFIED}.",
+    },
+    "<ab>_CPCColoc_<ab2>_Count": {
+        "label": "<ab> CPC coloc with <ab2> per 0.1mmÂ³",
+        "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the number of segmented <ab> objects positive for <ab2> was summed and {_PER_VOL}.",
+    },
+    "<ab>_CPCColoc_<ab2>_CountRaw": {
+        "label": "<ab> raw CPC coloc with <ab2>",
+        "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the number of segmented <ab> objects positive for <ab2> was summed and averaged across sections before tissue-volume normalization.",
+    },
+    "<ab>_CPCColoc_<ab2>_Count%": {
+        "label": "% <ab> CPC coloc with <ab2>",
+        "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the percentage of segmented <ab> objects positive for <ab2> {_QUANTIFIED}.",
+    },
+    "<ab>_CPCContains_<ab2>_Count": {
+        "label": "<ab> CPC contains <ab2> per 0.1mmÂ³",
+        "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the number of segmented <ab> objects classified as containing <ab2> was summed and {_PER_VOL}.",
+    },
+    "<ab>_CPCContains_<ab2>_CountRaw": {
+        "label": "<ab> raw CPC contains <ab2>",
+        "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the number of segmented <ab> objects classified as containing <ab2> was summed and averaged across sections before tissue-volume normalization.",
+    },
+    "<ab>_CPCContains_<ab2>_Count%": {
+        "label": "% <ab> CPC contains <ab2>",
+        "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the percentage of segmented <ab> objects classified as containing <ab2> {_QUANTIFIED}.",
+    },
+    "<ab>_CPCAny_<ab2>_Count": {
+        "label": "<ab> CPC assoc with <ab2> per 0.1mmÂ³",
+        "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the number of segmented <ab> objects that either CPC-colocalised with or CPC-contained <ab2> was summed and {_PER_VOL}.",
+    },
+    "<ab>_CPCAny_<ab2>_CountRaw": {
+        "label": "<ab> raw CPC assoc with <ab2>",
+        "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the number of segmented <ab> objects that either CPC-colocalised with or CPC-contained <ab2> was summed and averaged across sections before tissue-volume normalization.",
+    },
+    "<ab>_CPCAny_<ab2>_Count%": {
+        "label": "% <ab> CPC assoc with <ab2>",
+        "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the percentage of segmented <ab> objects that either CPC-colocalised with or CPC-contained <ab2> {_QUANTIFIED}.",
+    },
+})
+
+RAW_NAME_MAP.update({
+    "<ab>_VolColoc_<ab2>": {"label": "<ab2> vol overlap (%)", "desc": "Volumetric voxel-overlap of <ab2> with each <ab> object."},
+    "<ab>_VolColocCount<ab2>": {"label": f"<ab2>+ vol (<{threshold}% overlap)", "desc": "Binary volumetric colocalisation classification per <ab> object for <ab2>."},
+    "<ab>_VolNumColoc_<ab2>": {"label": "# vol internal <ab2>", "desc": "Number of <ab2> objects volumetrically classified as internalised/contained per <ab> object."},
+    "<ab>_VolContains_<ab2>": {"label": "vol contains <ab2>", "desc": "Binary volumetric indicator per <ab> object: whether it contains ≥1 <ab2> object."},
+    "<ab>_VolAny_<ab2>": {"label": "vol coloc or contains <ab2>", "desc": "Binary volumetric indicator per <ab> object: whether it either volumetrically colocalises with or contains ≥1 <ab2> object."},
+    "<ab>_CPCColoc_<ab2>": {"label": "<ab2> CPC", "desc": "Centre-particle coincidence association of <ab2> with each <ab> object."},
+    "<ab>_CPCColocCount<ab2>": {"label": "<ab2>+ CPC", "desc": "Binary CPC association classification per <ab> object for <ab2>."},
+    "<ab>_CPCContains_<ab2>": {"label": "CPC contains <ab2>", "desc": "Binary CPC indicator per <ab> object: whether it contains ≥1 <ab2> object."},
+    "<ab>_CPCAny_<ab2>": {"label": "CPC coloc or contains <ab2>", "desc": "Binary CPC indicator per <ab> object: whether it either coincides with or contains ≥1 <ab2> object."},
+})
+
+# Legacy unprefixed coloc names are volumetric by definition. Keep them
+# resolvable, but surface the explicit volumetric wording in labels.
+IF_NAME_MAP.update({
+    "<ab>_Coloc_<ab2>_Mean": IF_NAME_MAP["<ab>_VolColoc_<ab2>_Mean"],
+    "<ab>_Coloc<ab2>Mean": IF_NAME_MAP["<ab>_VolColoc_<ab2>_Mean"],
+    "<ab>_Coloc_<ab2>_Count": IF_NAME_MAP["<ab>_VolColoc_<ab2>_Count"],
+    "<ab>_Coloc_<ab2>_CountRaw": IF_NAME_MAP["<ab>_VolColoc_<ab2>_CountRaw"],
+    "<ab>_Coloc_<ab2>_Count%": IF_NAME_MAP["<ab>_VolColoc_<ab2>_Count%"],
+    "<ab>_Contains_<ab2>_Count": IF_NAME_MAP["<ab>_VolContains_<ab2>_Count"],
+    "<ab>_Contains_<ab2>_CountRaw": IF_NAME_MAP["<ab>_VolContains_<ab2>_CountRaw"],
+    "<ab>_Contains_<ab2>_Count%": IF_NAME_MAP["<ab>_VolContains_<ab2>_Count%"],
+    "<ab>_Any_<ab2>_Count": IF_NAME_MAP["<ab>_VolAny_<ab2>_Count"],
+    "<ab>_Any_<ab2>_CountRaw": IF_NAME_MAP["<ab>_VolAny_<ab2>_CountRaw"],
+    "<ab>_Any_<ab2>_Count%": IF_NAME_MAP["<ab>_VolAny_<ab2>_Count%"],
+    "<ab>_NumColoc_<ab2>Mean": IF_NAME_MAP["<ab>_VolNumColoc_<ab2>Mean"],
+})
+
+RAW_NAME_MAP.update({
+    "<ab>_Coloc_<ab2>": RAW_NAME_MAP["<ab>_VolColoc_<ab2>"],
+    "<ab>_Coloc<ab2>": RAW_NAME_MAP["<ab>_VolColoc_<ab2>"],
+    "<ab>_ColocCount<ab2>": RAW_NAME_MAP["<ab>_VolColocCount<ab2>"],
+    "<ab>_NumColoc_<ab2>": RAW_NAME_MAP["<ab>_VolNumColoc_<ab2>"],
+    "<ab>_Contains_<ab2>": RAW_NAME_MAP["<ab>_VolContains_<ab2>"],
+    "<ab>_Any_<ab2>": RAW_NAME_MAP["<ab>_VolAny_<ab2>"],
+})
+
 # ── Pattern matching ───────────────────────────────────────────────────
 
 def _pattern_to_regex(pattern):
@@ -368,6 +493,14 @@ def _summary_marker_for_column(colname: str) -> str:
     Summary" sheet rather than being treated as standalone markers.
     """
     base, _ = _strip_exp_suffix(colname)
+    if "_VolComboAny_" in base:
+        return base.split("_VolComboAny_", 1)[0]
+    if "_VolCombo_" in base:
+        return base.split("_VolCombo_", 1)[0]
+    if "_CPCComboAny_" in base:
+        return base.split("_CPCComboAny_", 1)[0]
+    if "_CPCCombo_" in base:
+        return base.split("_CPCCombo_", 1)[0]
     if "_ComboAny_" in base:
         return base.split("_ComboAny_", 1)[0]
     if "_Combo_" in base:

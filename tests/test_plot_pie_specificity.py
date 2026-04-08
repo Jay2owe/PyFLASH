@@ -163,13 +163,13 @@ def _build_marker_specificity_experiment():
     comboany_signatures = ["None", "GFAP+", "mCherry+", "GFAP+_mCherry+"]
     combo_signatures = ["None", "GFAP+", "wmCherry", "GFAP+_wmCherry"]
     for signature in comboany_signatures:
-        marker_df[f"CK1d_ComboAny_{signature}"] = [
-            1 if label == signature else 0 for label in comboany_labels
-        ]
+        values = [1 if label == signature else 0 for label in comboany_labels]
+        marker_df[f"CK1d_VolComboAny_{signature}"] = values
+        marker_df[f"CK1d_CPCComboAny_{signature}"] = values
     for signature in combo_signatures:
-        marker_df[f"CK1d_Combo_{signature}"] = [
-            1 if label == signature else 0 for label in combo_labels
-        ]
+        values = [1 if label == signature else 0 for label in combo_labels]
+        marker_df[f"CK1d_VolCombo_{signature}"] = values
+        marker_df[f"CK1d_CPCCombo_{signature}"] = values
 
     conds = conditionList(
         [
@@ -190,6 +190,23 @@ def _build_marker_specificity_experiment():
 
 def _specificity_queue():
     return [("Time", "WeekFour"), ("Time", "WeekEight")]
+
+
+def test_plot_mean_bars_runs_without_nameerror_in_teardown(tmp_path, monkeypatch):
+    experiment = _build_marker_specificity_experiment()
+    experiment.summary["CK1d_Count"] = [1.0, 2.0, 3.0, 4.0]
+    experiment.summaries["SCN"] = experiment.summary.copy()
+    experiment.fig_path = str(tmp_path)
+    experiment.data_path = str(tmp_path)
+
+    monkeypatch.setattr(plotting, "save_fig", lambda *args, **kwargs: None)
+
+    plotting.plot_mean_bars(
+        experiment,
+        filtered_columns=["CK1d_Count"],
+        points=False,
+        save=False,
+    )
 
 
 def test_plot_pie_charts_specificity_queue_filters_each_pie_independently():
@@ -227,7 +244,7 @@ def test_plot_combo_pies_comboany_specificity_queue_counts_none_and_any_combinat
     result = plotting.plot_combo_pies(
         experiment,
         marker="CK1d",
-        family="comboany",
+        family="VolComboAny",
         show_counts=True,
         show_pct=False,
         plot_format="pie",
@@ -261,7 +278,7 @@ def test_plot_combo_pies_combo_specificity_queue_counts_none_and_detailed_combin
     result = plotting.plot_combo_pies(
         experiment,
         marker="CK1d",
-        family="combo",
+        family="VolCombo",
         show_counts=True,
         show_pct=False,
         plot_format="pie",
@@ -285,6 +302,37 @@ def test_plot_combo_pies_combo_specificity_queue_counts_none_and_detailed_combin
     assert week_eight["pie_labels"] == [
         ["None", "wmCherry", "GFAP+_wmCherry"],
         ["None", "wmCherry", "GFAP+_wmCherry"],
+    ]
+    assert week_eight["pie_counts"] == [[1, 1, 1], [2, 1, 1]]
+
+
+def test_plot_combo_pies_cpc_comboany_specificity_queue_counts_none_and_any_combinations():
+    experiment = _build_marker_specificity_experiment()
+
+    result = plotting.plot_combo_pies(
+        experiment,
+        marker="CK1d",
+        family="CPCComboAny",
+        show_counts=True,
+        show_pct=False,
+        plot_format="pie",
+        factor="Genotype",
+        specificity=_specificity_queue(),
+        save=False,
+    )
+
+    week_four = result[("Time", "WeekFour")]
+    week_eight = result[("Time", "WeekEight")]
+
+    assert week_four["pie_labels"] == [
+        ["None", "GFAP+"],
+        ["GFAP+", "mCherry+", "GFAP+_mCherry+"],
+    ]
+    assert week_four["pie_counts"] == [[1, 1], [1, 1, 1]]
+
+    assert week_eight["pie_labels"] == [
+        ["None", "mCherry+", "GFAP+_mCherry+"],
+        ["None", "mCherry+", "GFAP+_mCherry+"],
     ]
     assert week_eight["pie_counts"] == [[1, 1, 1], [2, 1, 1]]
 
@@ -331,7 +379,7 @@ def test_plot_combo_pies_include_n_adds_animal_counts_to_titles(monkeypatch):
     result = plotting.plot_combo_pies(
         experiment,
         marker="CK1d",
-        family="comboany",
+        family="VolComboAny",
         show_counts=True,
         show_pct=False,
         plot_format="pie",
@@ -393,7 +441,7 @@ def test_plot_combo_pies_show_counts_and_pct_builds_dual_pie_labels(monkeypatch)
     plotting.plot_combo_pies(
         experiment,
         marker="CK1d",
-        family="comboany",
+        family="VolComboAny",
         plot_format="pie",
         factor="Genotype",
         specificity=("Time", "WeekFour"),
@@ -431,7 +479,7 @@ def test_plot_combo_pies_can_collapse_comboany_marker_at_plot_time():
     result = plotting.plot_combo_pies(
         experiment,
         marker="CK1d",
-        family="comboany",
+        family="VolComboAny",
         show_counts=True,
         show_pct=False,
         plot_format="pie",
@@ -463,7 +511,7 @@ def test_plot_combo_pies_can_collapse_detailed_combo_marker_at_plot_time():
     result = plotting.plot_combo_pies(
         experiment,
         marker="CK1d",
-        family="combo",
+        family="VolCombo",
         show_counts=True,
         show_pct=False,
         plot_format="pie",
@@ -495,7 +543,7 @@ def test_plot_combo_pies_labels_remap_collapsed_signatures():
     result = plotting.plot_combo_pies(
         experiment,
         marker="CK1d",
-        family="comboany",
+        family="VolComboAny",
         show_counts=True,
         show_pct=False,
         plot_format="pie",

@@ -78,8 +78,8 @@ def test_closest_distances_are_grouped_by_image_identity():
     dapi = objectMarker("DAPI", dapi_df, exp, "blue")
     gfap = objectMarker("GFAP", gfap_df, exp, "red")
 
-    assert "DAPI_Coloc_GFAP" in dapi.df.columns
-    assert "GFAP_Coloc_DAPI" in gfap.df.columns
+    assert "DAPI_VolColoc_GFAP" in dapi.df.columns
+    assert "GFAP_VolColoc_DAPI" in gfap.df.columns
     assert "DAPI_ColocGFAP" not in dapi.df.columns
     assert "GFAP_ColocDAPI" not in gfap.df.columns
 
@@ -89,4 +89,5 @@ def test_closest_distances_are_grouped_by_image_identity():
     assert dapi.df["DAPI_DistToClosest_GFAP"].tolist() == pytest.approx(expected)
     assert gfap.df["GFAP_ClosestTo_DAPI"].tolist() == [1.0, 1.0]
     assert gfap.df["GFAP_NumClosestTo_DAPI"].tolist() == [1.0, 1.0]
+    assert gfap.df["GFAP_VolNumColoc_DAPI"].tolist() == [1.0, 1.0]
     assert gfap.df["GFAP_NumColoc_DAPI"].tolist() == [1.0, 1.0]

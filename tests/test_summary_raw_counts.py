@@ -192,10 +192,16 @@ def _build_any_combo_test_experiment():
     }
 
     dapi = exp.data["DAPI"]
-    dapi.df["DAPI_ColocCountGFAP"] = [1, 0, 1, 0]
-    dapi.df["DAPI_Contains_GFAP"] = [0, 1, 1, 0]
-    dapi.df["DAPI_ColocCountmCherry"] = [0, 1, 0, 0]
-    dapi.df["DAPI_Contains_mCherry"] = [0, 0, 1, 0]
+    dapi.df["DAPI_VolColocCountGFAP"] = [1, 0, 1, 0]
+    dapi.df["DAPI_VolContains_GFAP"] = [0, 1, 1, 0]
+    dapi.df["DAPI_VolColocCountmCherry"] = [0, 1, 0, 0]
+    dapi.df["DAPI_VolContains_mCherry"] = [0, 0, 1, 0]
+    dapi.df["DAPI_CPCColoc_GFAP"] = [1, 0, 1, 0]
+    dapi.df["DAPI_CPCColocCountGFAP"] = [1, 0, 1, 0]
+    dapi.df["DAPI_CPCContains_GFAP"] = [0, 1, 1, 0]
+    dapi.df["DAPI_CPCColoc_mCherry"] = [0, 1, 0, 0]
+    dapi.df["DAPI_CPCColocCountmCherry"] = [0, 1, 0, 0]
+    dapi.df["DAPI_CPCContains_mCherry"] = [0, 0, 1, 0]
 
     exp.createSummary(progress=False)
     return exp
@@ -268,11 +274,93 @@ def _build_coloc_mean_summary_test_experiment():
     }
 
     dapi = exp.data["DAPI"]
-    dapi.df["DAPI_Coloc_GFAP"] = [10.0, 20.0, 30.0, 40.0]
-    dapi.df["DAPI_Coloc_mCherry"] = [0.0, 50.0, 100.0, 25.0]
+    dapi.df["DAPI_VolColoc_GFAP"] = [10.0, 20.0, 30.0, 40.0]
+    dapi.df["DAPI_VolColoc_mCherry"] = [0.0, 50.0, 100.0, 25.0]
+    dapi.df["DAPI_CPCColoc_GFAP"] = [1.0, 0.0, 1.0, 0.0]
 
     exp.createSummary(progress=False)
     return exp
+
+
+@pytest.mark.parametrize(
+    ("incoming_cpc_col", "incoming_contains_col"),
+    [
+        ("CPCColoc_DAPI", "CPCContains_DAPI"),
+        ("CK1d_CPCColoc_DAPI", "CK1d_CPCContains_DAPI"),
+    ],
+)
+def test_summary_cpc_columns_do_not_duplicate_marker_name_for_prefixed_or_unprefixed_inputs(
+    incoming_cpc_col,
+    incoming_contains_col,
+):
+    exp = Experiment("toy_cpc_prefix", ".")
+
+    ck1d_df = pd.DataFrame([
+        {
+            "Region": "SCN1",
+            "Hemisphere": "LH",
+            "ROI": "SCN",
+            "Animal Name": "Mouse1",
+            "Volume (micron^3)": 10,
+            "Surface (micron^2)": 5,
+            "IntDen": 1,
+            "Mean": 1,
+            "XM": 0.0,
+            "YM": 0.0,
+            "ZM": 1.0,
+            incoming_cpc_col: 1,
+            incoming_contains_col: 1,
+        },
+        {
+            "Region": "SCN1",
+            "Hemisphere": "LH",
+            "ROI": "SCN",
+            "Animal Name": "Mouse1",
+            "Volume (micron^3)": 10,
+            "Surface (micron^2)": 5,
+            "IntDen": 1,
+            "Mean": 1,
+            "XM": 1.0,
+            "YM": 0.0,
+            "ZM": 1.0,
+            incoming_cpc_col: 0,
+            incoming_contains_col: 0,
+        },
+    ])
+    roi_props_df = pd.DataFrame([
+        {"Animal Name": "Mouse1", "Region": "SCN1", "ROI": "SCN", "Area (um^2)": 1000.0},
+    ])
+
+    exp.data = {
+        "ROI Properties": Attribute(
+            "ROI Properties",
+            _standardize_csv_columns(roi_props_df),
+            exp,
+        ),
+        "CK1d": objectMarker(
+            "CK1d",
+            _standardize_csv_columns(ck1d_df),
+            exp,
+            "cyan",
+        ),
+    }
+
+    raw_df = exp.data["CK1d"].df
+    assert "CK1d_CPCColoc_DAPI" in raw_df.columns
+    assert "CK1d_CPCContains_DAPI" in raw_df.columns
+    assert "CK1d_CPCColocCountDAPI" in raw_df.columns
+    assert not any(str(col).startswith("CK1d_CK1d_CPC") for col in raw_df.columns)
+
+    exp.createSummary(progress=False)
+    summary = exp.summary
+
+    assert "CK1d_CPCColoc_DAPI_Mean" in summary.columns
+    assert "CK1d_CPCColoc_DAPI_CountRaw" in summary.columns
+    assert "CK1d_CPCContains_DAPI_CountRaw" in summary.columns
+    assert summary.loc[0, "CK1d_CPCColoc_DAPI_Mean"] == pytest.approx(0.5)
+    assert summary.loc[0, "CK1d_CPCColoc_DAPI_CountRaw"] == pytest.approx(1.0)
+    assert summary.loc[0, "CK1d_CPCContains_DAPI_CountRaw"] == pytest.approx(1.0)
+    assert not any(str(col).startswith("CK1d_CK1d_CPC") for col in summary.columns)
 
 
 def test_experiment_summary_includes_count_raw_before_area_adjustment():
@@ -418,47 +506,76 @@ def test_experiment_summary_builds_any_and_comboany_columns():
     expected_volume_0p1mm3 = expected_volume_um3 / 100000000.0
     expected_factor = 1.0 / expected_volume_0p1mm3
 
-    assert raw_df["DAPI_Any_GFAP"].tolist() == [1, 1, 1, 0]
-    assert raw_df["DAPI_Any_mCherry"].tolist() == [0, 1, 1, 0]
-    assert raw_df["DAPI_ComboAny_GFAP+"].tolist() == [1, 0, 0, 0]
-    assert raw_df["DAPI_ComboAny_GFAP+_mCherry+"].tolist() == [0, 1, 1, 0]
-    assert raw_df["DAPI_ComboAny_None"].tolist() == [0, 0, 0, 1]
+    assert raw_df["DAPI_VolAny_GFAP"].tolist() == [1, 1, 1, 0]
+    assert raw_df["DAPI_VolAny_mCherry"].tolist() == [0, 1, 1, 0]
+    assert raw_df["DAPI_VolComboAny_GFAP+"].tolist() == [1, 0, 0, 0]
+    assert raw_df["DAPI_VolComboAny_GFAP+_mCherry+"].tolist() == [0, 1, 1, 0]
+    assert raw_df["DAPI_VolComboAny_None"].tolist() == [0, 0, 0, 1]
+    assert raw_df["DAPI_CPCAny_GFAP"].tolist() == [1, 1, 1, 0]
+    assert raw_df["DAPI_CPCAny_mCherry"].tolist() == [0, 1, 1, 0]
+    assert raw_df["DAPI_CPCComboAny_GFAP+"].tolist() == [1, 0, 0, 0]
+    assert raw_df["DAPI_CPCComboAny_GFAP+_mCherry+"].tolist() == [0, 1, 1, 0]
+    assert raw_df["DAPI_CPCComboAny_None"].tolist() == [0, 0, 0, 1]
 
-    assert "DAPI_Coloc_GFAP_Count" in summary.columns
-    assert "DAPI_Coloc_GFAP_CountRaw" in summary.columns
-    assert "DAPI_Coloc_GFAP_Count%" in summary.columns
-    assert "DAPI_Contains_GFAP_Count" in summary.columns
-    assert "DAPI_Contains_GFAP_CountRaw" in summary.columns
-    assert "DAPI_Contains_GFAP_Count%" in summary.columns
+    assert "DAPI_VolColoc_GFAP_Count" in summary.columns
+    assert "DAPI_VolColoc_GFAP_CountRaw" in summary.columns
+    assert "DAPI_VolColoc_GFAP_Count%" in summary.columns
+    assert "DAPI_VolContains_GFAP_Count" in summary.columns
+    assert "DAPI_VolContains_GFAP_CountRaw" in summary.columns
+    assert "DAPI_VolContains_GFAP_Count%" in summary.columns
+    assert "DAPI_CPCColoc_GFAP_Count" in summary.columns
+    assert "DAPI_CPCContains_GFAP_Count" in summary.columns
     assert "DAPI_ColocCountGFAP" not in summary.columns
     assert "DAPI_Contains_GFAPMean" not in summary.columns
 
-    assert summary.loc[0, "DAPI_Coloc_GFAP_CountRaw"] == pytest.approx(2.0)
-    assert summary.loc[0, "DAPI_Coloc_mCherry_CountRaw"] == pytest.approx(1.0)
-    assert summary.loc[0, "DAPI_Contains_GFAP_CountRaw"] == pytest.approx(2.0)
-    assert summary.loc[0, "DAPI_Contains_mCherry_CountRaw"] == pytest.approx(1.0)
-    assert summary.loc[0, "DAPI_Coloc_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
-    assert summary.loc[0, "DAPI_Coloc_mCherry_Count"] == pytest.approx(1.0 * expected_factor)
-    assert summary.loc[0, "DAPI_Contains_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
-    assert summary.loc[0, "DAPI_Contains_mCherry_Count"] == pytest.approx(1.0 * expected_factor)
-    assert summary.loc[0, "DAPI_Coloc_GFAP_Count%"] == pytest.approx(50.0)
-    assert summary.loc[0, "DAPI_Coloc_mCherry_Count%"] == pytest.approx(25.0)
-    assert summary.loc[0, "DAPI_Contains_GFAP_Count%"] == pytest.approx(50.0)
-    assert summary.loc[0, "DAPI_Contains_mCherry_Count%"] == pytest.approx(25.0)
+    assert summary.loc[0, "DAPI_VolColoc_GFAP_CountRaw"] == pytest.approx(2.0)
+    assert summary.loc[0, "DAPI_VolColoc_mCherry_CountRaw"] == pytest.approx(1.0)
+    assert summary.loc[0, "DAPI_VolContains_GFAP_CountRaw"] == pytest.approx(2.0)
+    assert summary.loc[0, "DAPI_VolContains_mCherry_CountRaw"] == pytest.approx(1.0)
+    assert summary.loc[0, "DAPI_VolColoc_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
+    assert summary.loc[0, "DAPI_VolColoc_mCherry_Count"] == pytest.approx(1.0 * expected_factor)
+    assert summary.loc[0, "DAPI_VolContains_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
+    assert summary.loc[0, "DAPI_VolContains_mCherry_Count"] == pytest.approx(1.0 * expected_factor)
+    assert summary.loc[0, "DAPI_VolColoc_GFAP_Count%"] == pytest.approx(50.0)
+    assert summary.loc[0, "DAPI_VolColoc_mCherry_Count%"] == pytest.approx(25.0)
+    assert summary.loc[0, "DAPI_VolContains_GFAP_Count%"] == pytest.approx(50.0)
+    assert summary.loc[0, "DAPI_VolContains_mCherry_Count%"] == pytest.approx(25.0)
 
-    assert summary.loc[0, "DAPI_Any_GFAP_CountRaw"] == pytest.approx(3.0)
-    assert summary.loc[0, "DAPI_Any_mCherry_CountRaw"] == pytest.approx(2.0)
-    assert summary.loc[0, "DAPI_Any_GFAP_Count"] == pytest.approx(3.0 * expected_factor)
-    assert summary.loc[0, "DAPI_Any_mCherry_Count"] == pytest.approx(2.0 * expected_factor)
-    assert summary.loc[0, "DAPI_Any_GFAP_Count%"] == pytest.approx(75.0)
-    assert summary.loc[0, "DAPI_Any_mCherry_Count%"] == pytest.approx(50.0)
-    assert summary.loc[0, "DAPI_ComboAny_GFAP+_Count%"] == pytest.approx(25.0)
-    assert summary.loc[0, "DAPI_ComboAny_GFAP+_mCherry+_Count%"] == pytest.approx(50.0)
-    assert summary.loc[0, "DAPI_ComboAny_None_Count%"] == pytest.approx(25.0)
+    assert summary.loc[0, "DAPI_CPCColoc_GFAP_CountRaw"] == pytest.approx(2.0)
+    assert summary.loc[0, "DAPI_CPCColoc_mCherry_CountRaw"] == pytest.approx(1.0)
+    assert summary.loc[0, "DAPI_CPCContains_GFAP_CountRaw"] == pytest.approx(2.0)
+    assert summary.loc[0, "DAPI_CPCContains_mCherry_CountRaw"] == pytest.approx(1.0)
+    assert summary.loc[0, "DAPI_CPCColoc_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
+    assert summary.loc[0, "DAPI_CPCColoc_mCherry_Count"] == pytest.approx(1.0 * expected_factor)
+    assert summary.loc[0, "DAPI_CPCContains_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
+    assert summary.loc[0, "DAPI_CPCContains_mCherry_Count"] == pytest.approx(1.0 * expected_factor)
+    assert summary.loc[0, "DAPI_CPCColoc_GFAP_Count%"] == pytest.approx(50.0)
+    assert summary.loc[0, "DAPI_CPCColoc_mCherry_Count%"] == pytest.approx(25.0)
+    assert summary.loc[0, "DAPI_CPCContains_GFAP_Count%"] == pytest.approx(50.0)
+    assert summary.loc[0, "DAPI_CPCContains_mCherry_Count%"] == pytest.approx(25.0)
+
+    assert summary.loc[0, "DAPI_VolAny_GFAP_CountRaw"] == pytest.approx(3.0)
+    assert summary.loc[0, "DAPI_VolAny_mCherry_CountRaw"] == pytest.approx(2.0)
+    assert summary.loc[0, "DAPI_VolAny_GFAP_Count"] == pytest.approx(3.0 * expected_factor)
+    assert summary.loc[0, "DAPI_VolAny_mCherry_Count"] == pytest.approx(2.0 * expected_factor)
+    assert summary.loc[0, "DAPI_VolAny_GFAP_Count%"] == pytest.approx(75.0)
+    assert summary.loc[0, "DAPI_VolAny_mCherry_Count%"] == pytest.approx(50.0)
+    assert summary.loc[0, "DAPI_VolComboAny_GFAP+_Count%"] == pytest.approx(25.0)
+    assert summary.loc[0, "DAPI_VolComboAny_GFAP+_mCherry+_Count%"] == pytest.approx(50.0)
+    assert summary.loc[0, "DAPI_VolComboAny_None_Count%"] == pytest.approx(25.0)
+    assert summary.loc[0, "DAPI_CPCAny_GFAP_CountRaw"] == pytest.approx(3.0)
+    assert summary.loc[0, "DAPI_CPCAny_mCherry_CountRaw"] == pytest.approx(2.0)
+    assert summary.loc[0, "DAPI_CPCAny_GFAP_Count"] == pytest.approx(3.0 * expected_factor)
+    assert summary.loc[0, "DAPI_CPCAny_mCherry_Count"] == pytest.approx(2.0 * expected_factor)
+    assert summary.loc[0, "DAPI_CPCAny_GFAP_Count%"] == pytest.approx(75.0)
+    assert summary.loc[0, "DAPI_CPCAny_mCherry_Count%"] == pytest.approx(50.0)
+    assert summary.loc[0, "DAPI_CPCComboAny_GFAP+_Count%"] == pytest.approx(25.0)
+    assert summary.loc[0, "DAPI_CPCComboAny_GFAP+_mCherry+_Count%"] == pytest.approx(50.0)
+    assert summary.loc[0, "DAPI_CPCComboAny_None_Count%"] == pytest.approx(25.0)
     assert summary.loc[0, [
-        "DAPI_ComboAny_GFAP+_Count%",
-        "DAPI_ComboAny_GFAP+_mCherry+_Count%",
-        "DAPI_ComboAny_None_Count%",
+        "DAPI_VolComboAny_GFAP+_Count%",
+        "DAPI_VolComboAny_GFAP+_mCherry+_Count%",
+        "DAPI_VolComboAny_None_Count%",
     ]].sum() == pytest.approx(100.0)
 
 
@@ -471,38 +588,49 @@ def test_batch_summary_preserves_any_and_comboany_columns():
     expected_volume_0p1mm3 = expected_volume_um3 / 100000000.0
     expected_factor = 1.0 / expected_volume_0p1mm3
 
-    assert "DAPI_Coloc_GFAP_Count" in batch.summary.columns
-    assert "DAPI_Coloc_GFAP_CountRaw" in batch.summary.columns
-    assert "DAPI_Coloc_GFAP_Count%" in batch.summary.columns
-    assert "DAPI_Contains_GFAP_Count" in batch.summary.columns
-    assert "DAPI_Contains_GFAP_CountRaw" in batch.summary.columns
-    assert "DAPI_Contains_GFAP_Count%" in batch.summary.columns
-    assert "DAPI_Any_GFAP_Count" in batch.summary.columns
-    assert "DAPI_Any_GFAP_Count%" in batch.summary.columns
-    assert "DAPI_Any_GFAP_CountRaw" in batch.summary.columns
-    assert "DAPI_ComboAny_None_Count%" in batch.summary.columns
-    assert batch.summary.loc[0, "DAPI_Coloc_GFAP_CountRaw"] == pytest.approx(2.0)
-    assert batch.summary.loc[0, "DAPI_Coloc_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
-    assert batch.summary.loc[0, "DAPI_Coloc_GFAP_Count%"] == pytest.approx(50.0)
-    assert batch.summary.loc[0, "DAPI_Contains_GFAP_CountRaw"] == pytest.approx(2.0)
-    assert batch.summary.loc[0, "DAPI_Contains_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
-    assert batch.summary.loc[0, "DAPI_Contains_GFAP_Count%"] == pytest.approx(50.0)
-    assert batch.summary.loc[0, "DAPI_Any_GFAP_CountRaw"] == pytest.approx(3.0)
-    assert batch.summary.loc[0, "DAPI_Any_GFAP_Count"] == pytest.approx(3.0 * expected_factor)
-    assert batch.summary.loc[0, "DAPI_Any_GFAP_Count%"] == pytest.approx(75.0)
-    assert batch.summary.loc[0, "DAPI_ComboAny_None_Count%"] == pytest.approx(25.0)
+    assert "DAPI_VolColoc_GFAP_Count" in batch.summary.columns
+    assert "DAPI_VolColoc_GFAP_CountRaw" in batch.summary.columns
+    assert "DAPI_VolColoc_GFAP_Count%" in batch.summary.columns
+    assert "DAPI_VolContains_GFAP_Count" in batch.summary.columns
+    assert "DAPI_VolContains_GFAP_CountRaw" in batch.summary.columns
+    assert "DAPI_VolContains_GFAP_Count%" in batch.summary.columns
+    assert "DAPI_VolAny_GFAP_Count" in batch.summary.columns
+    assert "DAPI_VolAny_GFAP_Count%" in batch.summary.columns
+    assert "DAPI_VolAny_GFAP_CountRaw" in batch.summary.columns
+    assert "DAPI_VolComboAny_None_Count%" in batch.summary.columns
+    assert "DAPI_CPCColoc_GFAP_Count" in batch.summary.columns
+    assert "DAPI_CPCContains_GFAP_Count" in batch.summary.columns
+    assert "DAPI_CPCAny_GFAP_Count" in batch.summary.columns
+    assert "DAPI_CPCComboAny_None_Count%" in batch.summary.columns
+    assert batch.summary.loc[0, "DAPI_VolColoc_GFAP_CountRaw"] == pytest.approx(2.0)
+    assert batch.summary.loc[0, "DAPI_VolColoc_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
+    assert batch.summary.loc[0, "DAPI_VolColoc_GFAP_Count%"] == pytest.approx(50.0)
+    assert batch.summary.loc[0, "DAPI_VolContains_GFAP_CountRaw"] == pytest.approx(2.0)
+    assert batch.summary.loc[0, "DAPI_VolContains_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
+    assert batch.summary.loc[0, "DAPI_VolContains_GFAP_Count%"] == pytest.approx(50.0)
+    assert batch.summary.loc[0, "DAPI_VolAny_GFAP_CountRaw"] == pytest.approx(3.0)
+    assert batch.summary.loc[0, "DAPI_VolAny_GFAP_Count"] == pytest.approx(3.0 * expected_factor)
+    assert batch.summary.loc[0, "DAPI_VolAny_GFAP_Count%"] == pytest.approx(75.0)
+    assert batch.summary.loc[0, "DAPI_VolComboAny_None_Count%"] == pytest.approx(25.0)
+    assert batch.summary.loc[0, "DAPI_CPCColoc_GFAP_CountRaw"] == pytest.approx(2.0)
+    assert batch.summary.loc[0, "DAPI_CPCColoc_GFAP_Count"] == pytest.approx(2.0 * expected_factor)
+    assert batch.summary.loc[0, "DAPI_CPCColoc_GFAP_Count%"] == pytest.approx(50.0)
+    assert batch.summary.loc[0, "DAPI_CPCAny_GFAP_Count%"] == pytest.approx(75.0)
+    assert batch.summary.loc[0, "DAPI_CPCComboAny_None_Count%"] == pytest.approx(25.0)
 
 
 def test_experiment_summary_refactors_coloc_overlap_mean_name():
     exp = _build_coloc_mean_summary_test_experiment()
     summary = exp.summary
 
-    assert "DAPI_Coloc_GFAP_Mean" in summary.columns
-    assert "DAPI_Coloc_mCherry_Mean" in summary.columns
+    assert "DAPI_VolColoc_GFAP_Mean" in summary.columns
+    assert "DAPI_VolColoc_mCherry_Mean" in summary.columns
+    assert "DAPI_CPCColoc_GFAP_Mean" in summary.columns
     assert "DAPI_ColocGFAPMean" not in summary.columns
     assert "DAPI_ColocmCherryMean" not in summary.columns
-    assert summary.loc[0, "DAPI_Coloc_GFAP_Mean"] == pytest.approx(25.0)
-    assert summary.loc[0, "DAPI_Coloc_mCherry_Mean"] == pytest.approx(43.75)
+    assert summary.loc[0, "DAPI_VolColoc_GFAP_Mean"] == pytest.approx(25.0)
+    assert summary.loc[0, "DAPI_VolColoc_mCherry_Mean"] == pytest.approx(43.75)
+    assert summary.loc[0, "DAPI_CPCColoc_GFAP_Mean"] == pytest.approx(0.5)
 
 
 def test_batch_summary_preserves_refactored_coloc_overlap_mean_name():
@@ -511,33 +639,33 @@ def test_batch_summary_preserves_refactored_coloc_overlap_mean_name():
     batch = Batch("toy_batch_coloc_mean", [exp], conds, ".")
     batch._create_batch_summary()
 
-    assert "DAPI_Coloc_GFAP_Mean" in batch.summary.columns
+    assert "DAPI_VolColoc_GFAP_Mean" in batch.summary.columns
     assert "DAPI_ColocGFAPMean" not in batch.summary.columns
-    assert batch.summary.loc[0, "DAPI_Coloc_GFAP_Mean"] == pytest.approx(25.0)
+    assert batch.summary.loc[0, "DAPI_VolColoc_GFAP_Mean"] == pytest.approx(25.0)
 
 
 def test_export_and_plotting_accept_refactored_and_legacy_coloc_overlap_mean_names():
-    new_label, new_desc = convert_name("DAPI_Coloc_GFAP_Mean", truncate=False)
+    new_label, new_desc = convert_name("DAPI_VolColoc_GFAP_Mean", truncate=False)
     old_label, old_desc = convert_name("DAPI_ColocGFAPMean", truncate=False)
     assert new_label == old_label
     assert new_desc == old_desc
 
     display_summary = format_summary_for_display(
-        pd.DataFrame({"DAPI_Coloc_GFAP_Mean": [25.0]})
+        pd.DataFrame({"DAPI_VolColoc_GFAP_Mean": [25.0]})
     )
-    assert "GFAP Overlap per DAPI" in display_summary.columns
+    assert "GFAP Vol Overlap per DAPI" in display_summary.columns
 
     resolved = plotting._resolve_filtered_columns(
         type("ExperimentStub", (), {
-            "summary": pd.DataFrame({"DAPI_Coloc_GFAP_Mean": [25.0]}),
+            "summary": pd.DataFrame({"DAPI_VolColoc_GFAP_Mean": [25.0]}),
         })(),
         filtered_columns=["DAPI_ColocGFAPMean"],
     )
-    assert resolved == ["DAPI_Coloc_GFAP_Mean"]
+    assert resolved == ["DAPI_VolColoc_GFAP_Mean"]
 
 
 def test_raw_coloc_exports_and_marker_x_resolution_use_canonical_name():
-    new_label, new_desc = convert_raw_name("DAPI_Coloc_GFAP")
+    new_label, new_desc = convert_raw_name("DAPI_VolColoc_GFAP")
     old_label, old_desc = convert_raw_name("DAPI_ColocGFAP")
     assert new_label == old_label
     assert new_desc == old_desc
@@ -546,15 +674,15 @@ def test_raw_coloc_exports_and_marker_x_resolution_use_canonical_name():
         "data": {
             "DAPI": type("MarkerStub", (), {
                 "df": pd.DataFrame({
-                    "DAPI_Coloc_GFAP": [10.0, 20.0],
+                    "DAPI_VolColoc_GFAP": [10.0, 20.0],
                     "DAPI_Volume": [1.0, 2.0],
                 })
             })()
         }
     })()
 
-    assert plotting._resolve_histogram_x_column(experiment, "DAPI", "Coloc_GFAP") == "DAPI_Coloc_GFAP"
-    assert plotting._resolve_histogram_x_column(experiment, "DAPI", "ColocGFAP") == "DAPI_Coloc_GFAP"
+    assert plotting._resolve_histogram_x_column(experiment, "DAPI", "Coloc_GFAP") == "DAPI_VolColoc_GFAP"
+    assert plotting._resolve_histogram_x_column(experiment, "DAPI", "ColocGFAP") == "DAPI_VolColoc_GFAP"
 
 
 def test_display_summary_helper_adds_unit_labels_without_mutating_schema():

@@ -94,9 +94,27 @@ def summary_column_aliases(key):
         aliases.append(
             f"{m.group('marker')}_Coloc_{m.group('target')}_Mean{m.group('exp') or ''}"
         )
+        aliases.append(
+            f"{m.group('marker')}_VolColoc_{m.group('target')}_Mean{m.group('exp') or ''}"
+        )
 
     m = _CANONICAL_SUMMARY_COLOC_MEAN_RE.match(key_s)
     if m is not None:
+        aliases.append(
+            f"{m.group('marker')}_Coloc{m.group('target')}Mean{m.group('exp') or ''}"
+        )
+        aliases.append(
+            f"{m.group('marker')}_VolColoc_{m.group('target')}_Mean{m.group('exp') or ''}"
+        )
+
+    m = re.match(
+        r"^(?P<marker>.+)_VolColoc_(?P<target>.+)_Mean(?P<exp>\.exp\d+)?$",
+        key_s,
+    )
+    if m is not None:
+        aliases.append(
+            f"{m.group('marker')}_Coloc_{m.group('target')}_Mean{m.group('exp') or ''}"
+        )
         aliases.append(
             f"{m.group('marker')}_Coloc{m.group('target')}Mean{m.group('exp') or ''}"
         )
@@ -106,12 +124,45 @@ def summary_column_aliases(key):
         aliases.append(
             f"{m.group('marker')}_Coloc_{m.group('target')}_Count{m.group('pct') or ''}{m.group('exp') or ''}"
         )
+        aliases.append(
+            f"{m.group('marker')}_VolColoc_{m.group('target')}_Count{m.group('pct') or ''}{m.group('exp') or ''}"
+        )
 
     m = _CANONICAL_SUMMARY_COLOC_COUNT_RE.match(key_s)
     if m is not None:
         aliases.append(
             f"{m.group('marker')}_ColocCount{m.group('target')}{m.group('pct') or ''}{m.group('exp') or ''}"
         )
+        aliases.append(
+            f"{m.group('marker')}_VolColoc_{m.group('target')}_Count{m.group('pct') or ''}{m.group('exp') or ''}"
+        )
+
+    m = re.match(
+        r"^(?P<marker>.+)_VolColoc_(?P<target>.+)_Count(?P<pct>(?:%|Raw)?)"
+        r"(?P<exp>\.exp\d+)?$",
+        key_s,
+    )
+    if m is not None:
+        aliases.append(
+            f"{m.group('marker')}_Coloc_{m.group('target')}_Count{m.group('pct') or ''}{m.group('exp') or ''}"
+        )
+        if (m.group('pct') or "") != "Raw":
+            aliases.append(
+                f"{m.group('marker')}_ColocCount{m.group('target')}{m.group('pct') or ''}{m.group('exp') or ''}"
+            )
+
+    replacement_pairs = [
+        ("_Contains_", "_VolContains_"),
+        ("_Any_", "_VolAny_"),
+        ("_NumColoc_", "_VolNumColoc_"),
+        ("_ComboAny_", "_VolComboAny_"),
+        ("_Combo_", "_VolCombo_"),
+    ]
+    for old, new in replacement_pairs:
+        if old in key_s and new not in key_s and "_CPC" not in key_s and "_Vol" not in key_s:
+            aliases.append(key_s.replace(old, new, 1))
+        if new in key_s:
+            aliases.append(key_s.replace(new, old, 1))
 
     return list(dict.fromkeys([a for a in aliases if a != key_s]))
 
@@ -124,13 +175,7 @@ def raw_coloc_column_aliases(key):
     workflows may still refer to the legacy `Marker_ColocTarget` form.
     """
     key_s = str(key).strip()
-    if (
-        key_s == ""
-        or "ColocCount" in key_s
-        or "NonColocCount" in key_s
-        or key_s.endswith("Mean")
-        or key_s.endswith("%")
-    ):
+    if key_s == "" or key_s.endswith("Mean") or key_s.endswith("%"):
         return []
 
     aliases = []
@@ -138,10 +183,31 @@ def raw_coloc_column_aliases(key):
     m = re.match(r"^(?P<prefix>.+_Coloc)_(?P<target>.+?)(?P<exp>\.exp\d+)?$", key_s)
     if m is not None:
         aliases.append(f"{m.group('prefix')}{m.group('target')}{m.group('exp') or ''}")
+        aliases.append(f"{m.group('prefix').replace('_Coloc', '_VolColoc')}_{m.group('target')}{m.group('exp') or ''}")
 
     m = re.match(r"^(?P<prefix>.+_Coloc)(?P<target>(?!Count)[^_].+?)(?P<exp>\.exp\d+)?$", key_s)
     if m is not None and "_Coloc_" not in key_s:
         aliases.append(f"{m.group('prefix')}_{m.group('target')}{m.group('exp') or ''}")
+        aliases.append(f"{m.group('prefix').replace('_Coloc', '_VolColoc')}_{m.group('target')}{m.group('exp') or ''}")
+
+    m = re.match(r"^(?P<prefix>.+_VolColoc)_(?P<target>.+?)(?P<exp>\.exp\d+)?$", key_s)
+    if m is not None:
+        aliases.append(f"{m.group('prefix').replace('_VolColoc', '_Coloc')}_{m.group('target')}{m.group('exp') or ''}")
+        aliases.append(f"{m.group('prefix').replace('_VolColoc', '_Coloc')}{m.group('target')}{m.group('exp') or ''}")
+
+    replacement_pairs = [
+        ("_Contains_", "_VolContains_"),
+        ("_Any_", "_VolAny_"),
+        ("_NumColoc_", "_VolNumColoc_"),
+        ("_ComboAny_", "_VolComboAny_"),
+        ("_Combo_", "_VolCombo_"),
+        ("ColocCount", "VolColocCount"),
+    ]
+    for old, new in replacement_pairs:
+        if old in key_s and new not in key_s and "_CPC" not in key_s and "_Vol" not in key_s:
+            aliases.append(key_s.replace(old, new, 1))
+        if new in key_s:
+            aliases.append(key_s.replace(new, old, 1))
 
     return list(dict.fromkeys([a for a in aliases if a != key_s]))
 

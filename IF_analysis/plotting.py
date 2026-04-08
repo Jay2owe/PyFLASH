@@ -5698,11 +5698,22 @@ _COMBO_PIE_SUMMARY_SUFFIXES = (
 
 def _normalize_combo_pie_family(family):
     family_key = str(family).strip().casefold().replace("_", "")
-    if family_key in {"combo", "detailed"}:
-        return "combo", "Combo"
-    if family_key in {"comboany", "any", "pooled"}:
-        return "comboany", "ComboAny"
-    raise ValueError("family must be 'combo' or 'comboany'.")
+    family_map = {
+        "combo": ("volcombo", "VolCombo"),
+        "detailed": ("volcombo", "VolCombo"),
+        "volcombo": ("volcombo", "VolCombo"),
+        "comboany": ("volcomboany", "VolComboAny"),
+        "any": ("volcomboany", "VolComboAny"),
+        "pooled": ("volcomboany", "VolComboAny"),
+        "volcomboany": ("volcomboany", "VolComboAny"),
+        "cpccombo": ("cpccombo", "CPCCombo"),
+        "cpccomboany": ("cpccomboany", "CPCComboAny"),
+    }
+    if family_key in family_map:
+        return family_map[family_key]
+    raise ValueError(
+        "family must be one of 'VolCombo', 'VolComboAny', 'CPCCombo', or 'CPCComboAny'."
+    )
 
 
 def _coerce_combo_indicator_flag(value):
@@ -5725,20 +5736,29 @@ def _coerce_combo_indicator_flag(value):
 
 
 def _resolve_combo_family_columns(df, marker, family, include_none=True):
-    _, family_prefix = _normalize_combo_pie_family(family)
+    family_key, family_prefix = _normalize_combo_pie_family(family)
     marker_s = str(marker).strip()
-    prefix = f"{marker_s}_{family_prefix}_"
+    prefixes = [family_prefix]
+    if family_key == "volcombo":
+        prefixes.append("Combo")
+    elif family_key == "volcomboany":
+        prefixes.append("ComboAny")
+
     combo_columns = []
-    for col in df.columns:
-        col_s = str(col)
-        if not col_s.startswith(prefix):
-            continue
-        if any(col_s.endswith(suffix) for suffix in _COMBO_PIE_SUMMARY_SUFFIXES):
-            continue
-        signature = col_s[len(prefix):]
-        if not include_none and signature == "None":
-            continue
-        combo_columns.append((col_s, signature))
+    seen_cols = set()
+    for family_prefix_candidate in prefixes:
+        prefix = f"{marker_s}_{family_prefix_candidate}_"
+        for col in df.columns:
+            col_s = str(col)
+            if col_s in seen_cols or not col_s.startswith(prefix):
+                continue
+            if any(col_s.endswith(suffix) for suffix in _COMBO_PIE_SUMMARY_SUFFIXES):
+                continue
+            signature = col_s[len(prefix):]
+            if not include_none and signature == "None":
+                continue
+            combo_columns.append((col_s, signature))
+            seen_cols.add(col_s)
     return combo_columns
 
 
@@ -5817,7 +5837,7 @@ def _collapse_combo_signature(signature, family, collapse_markers):
     work = f"_{signature_s}_"
     for marker_name in collapse_markers:
         tokens = [f"{marker_name}+"]
-        if family_key == "combo":
+        if family_key in {"volcombo", "cpccombo"}:
             tokens.append(f"w{marker_name}")
         for token in tokens:
             work = work.replace(f"_{token}_", "_")
@@ -8100,7 +8120,11 @@ def _location_overlay_panel_label(entries):
 
 def _location_legend_label(text):
     """Clean extra-panel legend labels for readability."""
-    out = re.sub(r"\bComboAny\b", "", str(text))
+    out = re.sub(r"\bVolComboAny\b", "", str(text))
+    out = re.sub(r"\bVolCombo\b", "", out)
+    out = re.sub(r"\bCPCComboAny\b", "", out)
+    out = re.sub(r"\bCPCCombo\b", "", out)
+    out = re.sub(r"\bComboAny\b", "", out)
     out = re.sub(r"\bCombo\b", "", out)
     out = re.sub(r"\s+", " ", out).strip()
     return out
@@ -8852,7 +8876,7 @@ def combo_pie_action(ctx: Context, state: dict,
                      include_none=True,
                      start_angle=90, line_width=1.0,
                      plot_format='pie', as_counts=None, **kwargs):
-    """Plot a pie chart for mutually exclusive combo or ComboAny membership."""
+    """Plot a pie chart for mutually exclusive Vol/CPC combo-family membership."""
     idx = ctx.factor_index if ctx.factor_value is not None else ctx.condition_index
     ax = _resolve_action_axis(state, idx)
     if ax is None:
@@ -9758,13 +9782,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
         state['group_color_map'] = group_color_map
         # Start full per-column timing (setup + actions + stats + save)
 
-    def teardown(
-        ctx, state, results,
-        _use_count_scale=use_count_scale,
-        _include_N_flag=include_N_flag,
-        _show_counts_flag=show_counts_flag,
-        _show_pct_flag=show_pct_flag,
-    ):
+    def teardown(ctx, state, results):
 
         ax = state['ax']
         fig = state['fig']
@@ -12191,8 +12209,10 @@ def plot_combo_pies(experiment, marker,
     Pie or stacked-bar distributions for mutually exclusive combo families.
 
     `family` controls which per-object combo columns are used:
-    - 'combo': detailed coloc/contains combo family
-    - 'comboany': pooled Any-based combo family
+    - 'VolCombo': detailed volumetric coloc/contains combo family
+    - 'VolComboAny': pooled volumetric Any-based combo family
+    - 'CPCCombo': detailed CPC coloc/contains combo family
+    - 'CPCComboAny': pooled CPC Any-based combo family
 
     Each object contributes to exactly one category, so the family partitions
     the marker population. `include_none=True` retains the explicit `None`

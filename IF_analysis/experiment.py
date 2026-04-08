@@ -22,7 +22,7 @@ except Exception:
 
 from IF_analysis.config import Config, check_directory
 from IF_analysis.markers import (
-    Attribute, Antibody, cellMarker, objectMarker, stainColors,
+    Attribute, Antibody, COLOC_FAMILY_CONFIGS, cellMarker, objectMarker, stainColors,
 )
 from IF_analysis.utils import (
     get_columns, get_nonobject_columns, adjust_for_volumemm,
@@ -921,6 +921,326 @@ def _coerce_binary_indicator(series: pd.Series) -> pd.Series:
     return mapped.fillna(False).astype(bool)
 
 
+def _family_spec(family_name: str) -> dict:
+    try:
+        return COLOC_FAMILY_CONFIGS[str(family_name)]
+    except KeyError as exc:
+        raise ValueError(f"Unknown coloc family '{family_name}'.") from exc
+
+
+def _all_family_names() -> list[str]:
+    return list(COLOC_FAMILY_CONFIGS.keys())
+
+
+def _family_any_indicator_columns(df: pd.DataFrame, marker_name: str, family_name: str) -> list[str]:
+    family_cfg = _family_spec(family_name)
+    prefix = f"{str(marker_name)}_{family_cfg['any']}_"
+    return [str(col) for col in df.columns if str(col).startswith(prefix)]
+
+
+def _family_combo_indicator_columns(df: pd.DataFrame, marker_name: str, family_name: str) -> list[str]:
+    family_cfg = _family_spec(family_name)
+    prefixes = [
+        f"{str(marker_name)}_{family_cfg['combo']}_",
+        f"{str(marker_name)}_{family_cfg['combo_any']}_",
+    ]
+    metric_suffixes = ("_Count", "_Count%", "_CountRaw", "_IntDenTotal", "_MeanIntDen")
+    out = []
+    for col in df.columns:
+        col_s = str(col)
+        if not any(col_s.startswith(prefix) for prefix in prefixes):
+            continue
+        if any(col_s.endswith(suffix) for suffix in metric_suffixes):
+            continue
+        out.append(col_s)
+    return out
+
+
+def _legacy_combo_indicator_columns(df: pd.DataFrame, marker_name: str) -> list[str]:
+    marker_s = str(marker_name)
+    prefixes = [f"{marker_s}_Combo_", f"{marker_s}_ComboAny_"]
+    metric_suffixes = ("_Count", "_Count%", "_CountRaw", "_IntDenTotal", "_MeanIntDen")
+    out = []
+    for col in df.columns:
+        col_s = str(col)
+        if not any(col_s.startswith(prefix) for prefix in prefixes):
+            continue
+        if any(col_s.endswith(suffix) for suffix in metric_suffixes):
+            continue
+        out.append(col_s)
+    return out
+
+
+def _all_family_precomputed_columns(df: pd.DataFrame, marker_name: str) -> list[str]:
+    out = []
+    for family_name in _all_family_names():
+        out.extend(_family_any_indicator_columns(df, marker_name, family_name))
+        out.extend(_family_combo_indicator_columns(df, marker_name, family_name))
+    out.extend(_legacy_combo_indicator_columns(df, marker_name))
+    return list(dict.fromkeys(out))
+
+
+def _all_family_combo_columns(df: pd.DataFrame, marker_name: str) -> list[str]:
+    out = []
+    for family_name in _all_family_names():
+        out.extend(_family_combo_indicator_columns(df, marker_name, family_name))
+    out.extend(_legacy_combo_indicator_columns(df, marker_name))
+    return list(dict.fromkeys(out))
+
+
+def _build_family_any_indicator_columns(stain_df: pd.DataFrame, marker_name: str, family_name: str) -> pd.DataFrame:
+    family_cfg = _family_spec(family_name)
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    coloc_rx = re.compile(rf"^{esc}_{re.escape(str(family_cfg['count']))}(?P<m2>.+)$")
+    contains_rx = re.compile(rf"^{esc}_{re.escape(str(family_cfg['contains']))}_(?P<m2>.+)$")
+
+    coloc_cols = {}
+    contains_cols = {}
+    for col in stain_df.columns:
+        col_s = str(col)
+        m = coloc_rx.match(col_s)
+        if m is not None:
+            coloc_cols[str(m.group("m2"))] = col_s
+            continue
+        m = contains_rx.match(col_s)
+        if m is not None:
+            contains_cols[str(m.group("m2"))] = col_s
+
+    targets = sorted(set(coloc_cols) | set(contains_cols))
+    if len(targets) == 0:
+        return pd.DataFrame(index=stain_df.index)
+
+    any_df = pd.DataFrame(index=stain_df.index)
+    for target in targets:
+        pooled = pd.Series(False, index=stain_df.index)
+        if target in coloc_cols:
+            pooled = pooled | _coerce_binary_indicator(stain_df[coloc_cols[target]])
+        if target in contains_cols:
+            pooled = pooled | _coerce_binary_indicator(stain_df[contains_cols[target]])
+        any_df[f"{marker_s}_{family_cfg['any']}_{target}"] = pooled.astype(np.int8)
+    return any_df
+
+
+def _build_family_detected_binary_indicator_summaries(
+    stain_df: pd.DataFrame,
+    marker_name: str,
+    *,
+    family_name: str,
+    detected,
+) -> pd.DataFrame:
+    return _build_binary_indicator_count_summaries(
+        stain_df,
+        marker_name,
+        family_name=family_name,
+        detected=detected,
+    )
+
+
+def _build_family_coloc_count_summaries(stain_df: pd.DataFrame, marker_name: str, family_name: str) -> pd.DataFrame:
+    family_cfg = _family_spec(family_name)
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    coloc_rx = re.compile(rf"^{esc}_{re.escape(str(family_cfg['count']))}(?P<m2>.+)$")
+
+    detected = []
+    for col in stain_df.columns:
+        col_s = str(col)
+        m = coloc_rx.match(col_s)
+        if m is not None:
+            detected.append((str(m.group("m2")), col_s))
+
+    return _build_family_detected_binary_indicator_summaries(
+        stain_df,
+        marker_name,
+        family_name=family_cfg["raw"],
+        detected=detected,
+    )
+
+
+def _build_family_contains_count_summaries(stain_df: pd.DataFrame, marker_name: str, family_name: str) -> pd.DataFrame:
+    family_cfg = _family_spec(family_name)
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    contains_rx = re.compile(rf"^{esc}_{re.escape(str(family_cfg['contains']))}_(?P<m2>.+)$")
+
+    detected = []
+    for col in stain_df.columns:
+        col_s = str(col)
+        m = contains_rx.match(col_s)
+        if m is not None:
+            detected.append((str(m.group("m2")), col_s))
+
+    return _build_family_detected_binary_indicator_summaries(
+        stain_df,
+        marker_name,
+        family_name=family_cfg["contains"],
+        detected=detected,
+    )
+
+
+def _build_family_any_count_summaries(stain_df: pd.DataFrame, marker_name: str, family_name: str) -> pd.DataFrame:
+    family_cfg = _family_spec(family_name)
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    any_rx = re.compile(rf"^{esc}_{re.escape(str(family_cfg['any']))}_(?P<m2>.+)$")
+
+    detected = []
+    for col in stain_df.columns:
+        col_s = str(col)
+        m = any_rx.match(col_s)
+        if m is not None:
+            detected.append((str(m.group("m2")), col_s))
+
+    return _build_family_detected_binary_indicator_summaries(
+        stain_df,
+        marker_name,
+        family_name=family_cfg["any"],
+        detected=detected,
+    )
+
+
+def _rename_family_coloc_mean_summary_columns(mean_df: pd.DataFrame, marker_name: str) -> pd.DataFrame:
+    if not isinstance(mean_df, pd.DataFrame) or mean_df.empty:
+        return mean_df
+
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    rename_map = {}
+
+    patterns = []
+    for family_name in _all_family_names():
+        family_cfg = _family_spec(family_name)
+        patterns.append((
+            re.compile(rf"^{esc}_{re.escape(str(family_cfg['raw']))}_(?P<m2>.+)Mean$"),
+            family_cfg["raw"],
+        ))
+    patterns.extend([
+        (re.compile(rf"^{esc}_Coloc_(?P<m2>.+)Mean$"), "VolColoc"),
+        (re.compile(rf"^{esc}_Coloc(?P<m2>[^_].+)Mean$"), "VolColoc"),
+    ])
+
+    for col in mean_df.columns:
+        col_s = str(col)
+        for rx, family_prefix in patterns:
+            m = rx.match(col_s)
+            if m is None:
+                continue
+            rename_map[col_s] = f"{marker_s}_{family_prefix}_{str(m.group('m2'))}_Mean"
+            break
+
+    if len(rename_map) == 0:
+        return mean_df
+    return mean_df.rename(columns=rename_map)
+
+
+def _build_family_coloc_combo_summaries(stain_df: pd.DataFrame, marker_name: str, family_name: str):
+    family_cfg = _family_spec(family_name)
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    patterns = [
+        (family_cfg["count"], re.compile(rf"^{esc}_{re.escape(str(family_cfg['count']))}(?P<m2>.+)$")),
+        (family_cfg["contains"], re.compile(rf"^{esc}_{re.escape(str(family_cfg['contains']))}_(?P<m2>.+)$")),
+    ]
+    kind_rank = {family_cfg["count"]: 0, family_cfg["contains"]: 1}
+
+    detected = []
+    for c in stain_df.columns:
+        c_s = str(c)
+        for kind, rx in patterns:
+            m = rx.match(c_s)
+            if m is None:
+                continue
+            marker2 = str(m.group("m2"))
+            token = f"{marker2}+" if kind == family_cfg["count"] else f"w{marker2}"
+            detected.append((marker2, kind_rank[kind], c_s, token))
+            break
+
+    return _build_combo_summaries_from_detected(
+        stain_df,
+        marker_name,
+        family_name=family_cfg["combo"],
+        detected=detected,
+    )
+
+
+def _build_family_any_combo_summaries(stain_df: pd.DataFrame, marker_name: str, family_name: str):
+    family_cfg = _family_spec(family_name)
+    marker_s = str(marker_name)
+    esc = re.escape(marker_s)
+    any_rx = re.compile(rf"^{esc}_{re.escape(str(family_cfg['any']))}_(?P<m2>.+)$")
+
+    detected = []
+    for c in stain_df.columns:
+        c_s = str(c)
+        m = any_rx.match(c_s)
+        if m is not None:
+            marker2 = str(m.group("m2"))
+            detected.append((marker2, 0, c_s, f"{marker2}+"))
+
+    return _build_combo_summaries_from_detected(
+        stain_df,
+        marker_name,
+        family_name=family_cfg["combo_any"],
+        detected=detected,
+    )
+
+
+def _is_family_or_legacy_mean_excluded_column(colname: str, marker_name: str) -> bool:
+    marker_s = str(marker_name)
+    col_s = str(colname)
+    if "Count" in col_s:
+        return False
+
+    family_prefixes = []
+    for family_name in _all_family_names():
+        family_cfg = _family_spec(family_name)
+        family_prefixes.extend([
+            family_cfg["contains"],
+            family_cfg["any"],
+            family_cfg["combo"],
+            family_cfg["combo_any"],
+            family_cfg["numcoloc"],
+        ])
+
+    legacy_prefixes = ["Contains", "Any", "Combo", "ComboAny", "NumColoc"]
+    for prefix in family_prefixes + legacy_prefixes:
+        if col_s.startswith(f"{marker_s}_{prefix}_"):
+            return True
+    return False
+
+
+def _is_family_or_legacy_coloc_count_column(colname: str, marker_name: str) -> bool:
+    marker_s = str(marker_name)
+    col_s = str(colname)
+    patterns = [rf"^{re.escape(marker_s)}_ColocCount.+$"]
+    for family_name in _all_family_names():
+        family_cfg = _family_spec(family_name)
+        patterns.append(rf"^{re.escape(marker_s)}_{re.escape(str(family_cfg['count']))}.+$")
+    return any(re.match(pattern, col_s) for pattern in patterns)
+
+
+def _legacy_alias_columns_to_ignore_in_summary(df: pd.DataFrame, marker_name: str) -> list[str]:
+    marker_s = str(marker_name)
+    patterns = [
+        re.compile(rf"^{re.escape(marker_s)}_ColocCount.+$"),
+        re.compile(rf"^{re.escape(marker_s)}_NonColocCount.+$"),
+        re.compile(rf"^{re.escape(marker_s)}_Contains_.+$"),
+        re.compile(rf"^{re.escape(marker_s)}_Any_.+$"),
+        re.compile(rf"^{re.escape(marker_s)}_NumColoc_.+$"),
+        re.compile(rf"^{re.escape(marker_s)}_Combo_.+$"),
+        re.compile(rf"^{re.escape(marker_s)}_ComboAny_.+$"),
+    ]
+    out = []
+    for col in df.columns:
+        col_s = str(col)
+        for rx in patterns:
+            if rx.match(col_s):
+                out.append(col_s)
+                break
+    return out
+
+
 def _any_indicator_columns(df: pd.DataFrame, marker_name: str) -> list[str]:
     """Derived per-object pooled coloc/contains indicator columns."""
     prefix = f"{str(marker_name)}_Any_"
@@ -1542,15 +1862,39 @@ def _standardize_csv_columns(df):
             df['Hemisphere'] = ''
         if 'ROI' not in cols:
             df['ROI'] = 'SCN'
-        # Drop pre-computed columns that the pipeline will recompute
-        drop_cols = [c for c in df.columns if (
-            c.endswith('_um')
-            or '_DistToClosest_' in c
-            or '_ClosestTo_' in c
-            or '_NumColoc_' in c
-            or '_Contains_' in c
-            or '_NumClosestTo_' in c
-        )]
+        # Drop pre-computed volumetric/helper columns that the pipeline will
+        # recompute, while preserving incoming CPC columns from the CSV schema.
+        def _should_drop_precomputed(colname):
+            col_s = str(colname)
+            if col_s.endswith('_um'):
+                return True
+            if '_DistToClosest_' in col_s or '_ClosestTo_' in col_s or '_NumClosestTo_' in col_s:
+                return True
+            if '_VolNumColoc_' in col_s or '_VolContains_' in col_s:
+                return True
+            if '_NumColoc_' in col_s and '_CPCNumColoc_' not in col_s:
+                return True
+            if '_Contains_' in col_s and '_CPCContains_' not in col_s:
+                return True
+            if '_VolAny_' in col_s or '_CPCAny_' in col_s or '_Any_' in col_s:
+                return True
+            if '_VolCombo_' in col_s or '_VolComboAny_' in col_s:
+                return True
+            if '_CPCCombo_' in col_s or '_CPCComboAny_' in col_s:
+                return True
+            if '_Combo_' in col_s or '_ComboAny_' in col_s:
+                return True
+            if re.match(r'^.+_VolColocCount.+$', col_s):
+                return True
+            if re.match(r'^.+_CPCColocCount.+$', col_s):
+                return True
+            if re.match(r'^.+_ColocCount.+$', col_s):
+                return True
+            if re.match(r'^.+_NonColocCount.+$', col_s):
+                return True
+            return False
+
+        drop_cols = [c for c in df.columns if _should_drop_precomputed(c)]
         if drop_cols:
             df = df.drop(columns=drop_cols)
         # Drop legacy SCN column if both exist
@@ -1760,31 +2104,37 @@ class Experiment:
         # Pre-compute combo indicators once (side effect on stain.df)
         for stain in stains:
             stain_df = stain.df.copy()
-            existing_any = _any_indicator_columns(stain_df, stain.name)
-            existing_combo = _combo_indicator_columns(stain_df, stain.name, family_name="Combo")
-            existing_combo_any = _combo_indicator_columns(stain_df, stain.name, family_name="ComboAny")
-            existing = list(dict.fromkeys(existing_any + existing_combo + existing_combo_any))
+            existing = _all_family_precomputed_columns(stain_df, stain.name)
             if len(existing) > 0:
                 stain_df = stain_df.drop(columns=existing, errors='ignore')
-
-            any_indicator_df = _build_any_indicator_columns(stain_df, stain.name)
-            if not any_indicator_df.empty:
-                for any_col in any_indicator_df.columns:
-                    stain_df[any_col] = any_indicator_df[any_col].astype(np.int8)
-
-            combo_indicator_df, _, _, _ = _build_coloc_combo_summaries(stain_df, stain.name)
-            combo_any_indicator_df, _, _, _ = _build_any_combo_summaries(stain_df, stain.name)
             if len(existing) > 0:
                 stain.df = stain.df.drop(columns=existing, errors='ignore')
-            if not any_indicator_df.empty:
-                for any_col in any_indicator_df.columns:
-                    stain.df[any_col] = any_indicator_df[any_col].astype(np.int8)
-            if not combo_indicator_df.empty:
-                for combo_col in combo_indicator_df.columns:
-                    stain.df[combo_col] = combo_indicator_df[combo_col].astype(np.int8)
-            if not combo_any_indicator_df.empty:
-                for combo_col in combo_any_indicator_df.columns:
-                    stain.df[combo_col] = combo_any_indicator_df[combo_col].astype(np.int8)
+            for family_name in _all_family_names():
+                any_indicator_df = _build_family_any_indicator_columns(stain_df, stain.name, family_name)
+                if not any_indicator_df.empty:
+                    for any_col in any_indicator_df.columns:
+                        stain_df[any_col] = any_indicator_df[any_col].astype(np.int8)
+                        stain.df[any_col] = any_indicator_df[any_col].astype(np.int8)
+
+                combo_indicator_df, _, _, _ = _build_family_coloc_combo_summaries(
+                    stain_df,
+                    stain.name,
+                    family_name,
+                )
+                if not combo_indicator_df.empty:
+                    for combo_col in combo_indicator_df.columns:
+                        stain_df[combo_col] = combo_indicator_df[combo_col].astype(np.int8)
+                        stain.df[combo_col] = combo_indicator_df[combo_col].astype(np.int8)
+
+                combo_any_indicator_df, _, _, _ = _build_family_any_combo_summaries(
+                    stain_df,
+                    stain.name,
+                    family_name,
+                )
+                if not combo_any_indicator_df.empty:
+                    for combo_col in combo_any_indicator_df.columns:
+                        stain_df[combo_col] = combo_any_indicator_df[combo_col].astype(np.int8)
+                        stain.df[combo_col] = combo_any_indicator_df[combo_col].astype(np.int8)
 
         # Discover all ROI bases across all stain data
         all_roi_bases = set()
@@ -1823,12 +2173,12 @@ class Experiment:
                     tracker.finish_item(f"{roi_base}/{getattr(stain, 'name', type(stain).__name__)}")
                     continue
 
-                existing = (
-                    _combo_indicator_columns(stain_df, stain.name, family_name="Combo")
-                    + _combo_indicator_columns(stain_df, stain.name, family_name="ComboAny")
-                )
+                existing = _all_family_combo_columns(stain_df, stain.name)
                 if len(existing) > 0:
                     stain_df = stain_df.drop(columns=existing, errors='ignore')
+                legacy_alias_cols = _legacy_alias_columns_to_ignore_in_summary(stain_df, stain.name)
+                if len(legacy_alias_cols) > 0:
+                    stain_df = stain_df.drop(columns=legacy_alias_cols, errors='ignore')
                 metric_cols = [c for c in stain_df.columns if c not in to_drop]
                 stain_df = _replace_not_included_with_nan(stain_df, columns=metric_cols)
                 animal_index = stain_df.groupby('AnimalName').size().index
@@ -1839,8 +2189,7 @@ class Experiment:
                 mean_candidate_cols = [
                     c for c in metric_cols
                     if 'Count' not in str(c)
-                    and '_Any_' not in str(c)
-                    and '_Contains_' not in str(c)
+                    and not _is_family_or_legacy_mean_excluded_column(c, stain.name)
                 ]
                 if len(mean_candidate_cols) > 0:
                     mean_source = stain_df[mean_candidate_cols].copy()
@@ -1858,7 +2207,7 @@ class Experiment:
                         axis=1
                     ).groupby('AnimalName')[mean_cols].mean()
                     mean_df = grouped_numeric.add_suffix('Mean')
-                    mean_df = _rename_legacy_coloc_mean_summary_columns(mean_df, stain.name)
+                    mean_df = _rename_family_coloc_mean_summary_columns(mean_df, stain.name)
                 else:
                     mean_df = pd.DataFrame(index=animal_index.copy())
 
@@ -1869,7 +2218,7 @@ class Experiment:
 
                 count_cols = [
                     c for c in get_columns(stain_df, regex_string='Count')
-                    if not re.match(rf"^{re.escape(str(stain.name))}_ColocCount.+$", str(c))
+                    if not _is_family_or_legacy_coloc_count_column(c, stain.name)
                     and not re.match(rf"^{re.escape(str(stain.name))}_NonColocCount.+$", str(c))
                 ]
                 if len(count_cols) > 0:
@@ -1880,16 +2229,32 @@ class Experiment:
                     count_df = add_coloc_percentages(count_df)
                 else:
                     count_df = pd.DataFrame(index=animal_index.copy())
-                coloc_count_df = _build_coloc_count_summaries(stain_df, stain.name)
-                contains_count_df = _build_contains_count_summaries(stain_df, stain.name)
-                any_count_df = _build_any_count_summaries(stain_df, stain.name)
+                family_summary_blocks = []
+                for family_name in _all_family_names():
+                    family_summary_blocks.extend([
+                        _build_family_coloc_count_summaries(stain_df, stain.name, family_name),
+                        _build_family_contains_count_summaries(stain_df, stain.name, family_name),
+                        _build_family_any_count_summaries(stain_df, stain.name, family_name),
+                    ])
 
-                _, combo_count_df, combo_intden_df, combo_mean_intden_df = _build_coloc_combo_summaries(
-                    stain_df, stain.name,
-                )
-                _, combo_any_count_df, combo_any_intden_df, combo_any_mean_intden_df = _build_any_combo_summaries(
-                    stain_df, stain.name,
-                )
+                    _, combo_count_df, combo_intden_df, combo_mean_intden_df = _build_family_coloc_combo_summaries(
+                        stain_df,
+                        stain.name,
+                        family_name,
+                    )
+                    _, combo_any_count_df, combo_any_intden_df, combo_any_mean_intden_df = _build_family_any_combo_summaries(
+                        stain_df,
+                        stain.name,
+                        family_name,
+                    )
+                    family_summary_blocks.extend([
+                        combo_count_df,
+                        combo_any_count_df,
+                        combo_mean_intden_df,
+                        combo_any_mean_intden_df,
+                        combo_intden_df,
+                        combo_any_intden_df,
+                    ])
 
                 sum_cols = get_columns(stain_df, regex_string='Volume|IntDen|Surface',
                                        exclude=['Mean', 'ROI', 'Ratio'])
@@ -1900,10 +2265,7 @@ class Experiment:
                 else:
                     sum_df = pd.DataFrame(index=animal_index.copy())
 
-                for block in [mean_df, count_df, coloc_count_df, contains_count_df, any_count_df,
-                              combo_count_df, combo_any_count_df,
-                              combo_mean_intden_df, combo_any_mean_intden_df,
-                              sum_df, combo_intden_df, combo_any_intden_df, other_df]:
+                for block in [mean_df, count_df, *family_summary_blocks, sum_df, other_df]:
                     block = _ensure_animalname_column(block)
                     summary_dfs.append(block)
                     if is_behavior:

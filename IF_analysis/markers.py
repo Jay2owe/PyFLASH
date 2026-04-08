@@ -24,37 +24,127 @@ from IF_analysis.utils import (
 )
 
 
-def _canonical_raw_coloc_column(marker_name, target_name):
-    return f"{str(marker_name)}_Coloc_{str(target_name)}"
+COLOC_FAMILY_CONFIGS = {
+    "Vol": {
+        "raw": "VolColoc",
+        "count": "VolColocCount",
+        "contains": "VolContains",
+        "any": "VolAny",
+        "combo": "VolCombo",
+        "combo_any": "VolComboAny",
+        "numcoloc": "VolNumColoc",
+    },
+    "CPC": {
+        "raw": "CPCColoc",
+        "count": "CPCColocCount",
+        "contains": "CPCContains",
+        "any": "CPCAny",
+        "combo": "CPCCombo",
+        "combo_any": "CPCComboAny",
+        "numcoloc": "CPCNumColoc",
+    },
+}
+
+
+def _canonical_raw_coloc_column(marker_name, target_name, family="Vol"):
+    family_cfg = COLOC_FAMILY_CONFIGS[str(family)]
+    return f"{str(marker_name)}_{family_cfg['raw']}_{str(target_name)}"
 
 
 def _legacy_raw_coloc_column(marker_name, target_name):
     return f"{str(marker_name)}_Coloc{str(target_name)}"
 
 
-def _extract_raw_coloc_target(colname, marker_name):
+def _extract_raw_coloc_descriptor(colname, marker_name):
     marker_s = str(marker_name)
     col_s = str(colname)
 
+    for family_name, family_cfg in COLOC_FAMILY_CONFIGS.items():
+        m = re.match(
+            rf"^{re.escape(marker_s)}_{re.escape(str(family_cfg['raw']))}_(?P<target>.+)$",
+            col_s,
+        )
+        if m is not None:
+            return family_name, str(m.group("target"))
+
     m = re.match(rf"^{re.escape(marker_s)}_Coloc_(?P<target>.+)$", col_s)
     if m is not None:
-        return str(m.group("target"))
+        return "Vol", str(m.group("target"))
 
     m = re.match(rf"^{re.escape(marker_s)}_Coloc(?P<target>(?!Count)[^_].+)$", col_s)
     if m is not None:
-        return str(m.group("target"))
+        return "Vol", str(m.group("target"))
 
     return None
 
 
-def _resolve_raw_coloc_column(df, marker_name, target_name):
-    for candidate in (
-        _canonical_raw_coloc_column(marker_name, target_name),
-        _legacy_raw_coloc_column(marker_name, target_name),
-    ):
+def _extract_raw_coloc_target(colname, marker_name):
+    descriptor = _extract_raw_coloc_descriptor(colname, marker_name)
+    if descriptor is None:
+        return None
+    _, target_name = descriptor
+    return target_name
+
+
+def _canonicalize_raw_coloc_family_columns(df, marker_name):
+    rename_map = {}
+    for col in df.columns:
+        descriptor = _extract_raw_coloc_descriptor(col, marker_name)
+        if descriptor is None:
+            continue
+        family_name, target_name = descriptor
+        canonical = _canonical_raw_coloc_column(marker_name, target_name, family=family_name)
+        if str(col) != canonical and canonical not in df.columns:
+            rename_map[str(col)] = canonical
+    if len(rename_map) == 0:
+        return df
+    return df.rename(columns=rename_map)
+
+
+def _prefix_cleaned_marker_column(marker_name, colname, protected_cols=None):
+    cleaned = clean_column_name(colname)
+    if protected_cols is not None and colname in protected_cols:
+        return cleaned
+
+    marker_prefix = f"{str(marker_name)}_"
+    if cleaned.startswith(marker_prefix):
+        return cleaned
+    return f"{marker_prefix}{cleaned}"
+
+
+def _resolve_raw_coloc_column(df, marker_name, target_name, family="Vol"):
+    candidates = [_canonical_raw_coloc_column(marker_name, target_name, family=family)]
+    if str(family) == "Vol":
+        candidates.extend([
+            f"{str(marker_name)}_Coloc_{str(target_name)}",
+            _legacy_raw_coloc_column(marker_name, target_name),
+        ])
+    for candidate in candidates:
         if candidate in df.columns:
             return candidate
     return None
+
+
+def _coerce_coloc_positive(series, threshold):
+    numeric = pd.to_numeric(series, errors="coerce")
+    valid = numeric.dropna()
+    if len(valid) > 0:
+        unique_vals = {float(v) for v in valid.unique().tolist()}
+        if unique_vals.issubset({0.0, 1.0}):
+            return numeric.fillna(0.0).ne(0.0)
+        return numeric > float(threshold)
+
+    text = series.astype(str).str.strip().str.casefold()
+    mapped = text.map({
+        "1": True, "0": False,
+        "true": True, "false": False,
+        "yes": True, "no": False,
+        "y": True, "n": False,
+        "t": True, "f": False,
+    })
+    fallback = pd.to_numeric(text, errors="coerce").fillna(0).ne(0)
+    mapped = mapped.where(mapped.notna(), fallback)
+    return mapped.fillna(False).astype(bool)
 
 
 class Attribute:
@@ -125,8 +215,8 @@ class Antibody(Attribute):
         if type(self) is Antibody:
             # ROI intensity data
             self.df.columns = [
-                f'{self.name}_{clean_column_name(c)}' if c not in no_rename
-                else clean_column_name(c) for c in self.df.columns
+                _prefix_cleaned_marker_column(self.name, c, protected_cols=no_rename)
+                for c in self.df.columns
             ]
             if label_map:
                 self.df['AnimalName'] = self.df['AnimalName'].map(lambda x: label_map.get(x, x))
@@ -141,9 +231,10 @@ class Antibody(Attribute):
             cols_to_nan = self.df.columns.difference(protected_cols)
             self.df.loc[no_data_mask, cols_to_nan] = np.nan
             self.df.columns = [
-                f'{self.name}_{clean_column_name(c)}' if c not in no_rename
-                else clean_column_name(c) for c in self.df.columns
+                _prefix_cleaned_marker_column(self.name, c, protected_cols=no_rename)
+                for c in self.df.columns
             ]
+            self.df = _canonicalize_raw_coloc_family_columns(self.df, self.name)
             int_den_cols = get_columns(self.df, column_strings=['Mean', 'StdDev', 'Median', 'Min', 'Max'])
             self.df = add_suffix(self.df, int_den_cols, 'IntDen')
             if label_map:
@@ -232,18 +323,19 @@ class Antibody(Attribute):
     def addColocData(self, threshold):
         coloc_cols = []
         for column in self.df.columns:
-            target_name = _extract_raw_coloc_target(column, self.name)
-            if target_name is not None:
-                coloc_cols.append((str(column), target_name))
+            descriptor = _extract_raw_coloc_descriptor(column, self.name)
+            if descriptor is not None:
+                family_name, target_name = descriptor
+                coloc_cols.append((str(column), family_name, target_name))
 
-        for raw_col, coloc_name in coloc_cols:
-            _log.status(f"Adding {coloc_name} colocalisation data...")
-            self.df[f'{self.name}_ColocCount{coloc_name}'] = np.where(
-                pd.to_numeric(self.df[raw_col], errors='coerce') > threshold, 1, 0
-            )
-            self.df[f'{self.name}_NonColocCount{coloc_name}'] = np.where(
-                pd.to_numeric(self.df[raw_col], errors='coerce') < threshold, 1, 0
-            )
+        for raw_col, family_name, coloc_name in coloc_cols:
+            family_cfg = COLOC_FAMILY_CONFIGS[family_name]
+            _log.status(f"Adding {family_name} {coloc_name} colocalisation data...")
+            coloc_positive = _coerce_coloc_positive(self.df[raw_col], threshold)
+            self.df[f'{self.name}_{family_cfg["count"]}{coloc_name}'] = coloc_positive.astype(np.int8)
+            if family_name == "Vol":
+                self.df[f'{self.name}_ColocCount{coloc_name}'] = coloc_positive.astype(np.int8)
+                self.df[f'{self.name}_NonColocCount{coloc_name}'] = (~coloc_positive).astype(np.int8)
         return self.df
 
     def analyse_roi(self, roi, points, visualise=False):
@@ -367,12 +459,13 @@ class Antibody(Attribute):
                         self_group,
                         self.name,
                         other_marker.name,
+                        family="Vol",
                     )
                     if coloc_col is None:
                         raise KeyError(other_marker.name)
                     coloc_bool = (
-                        pd.to_numeric(self_group[coloc_col], errors='coerce')
-                        .to_numpy(dtype=float, copy=False)[self_valid] > threshold
+                        _coerce_coloc_positive(self_group[coloc_col], threshold)
+                        .to_numpy(dtype=bool, copy=False)[self_valid]
                     )
                     np.add.at(coloc_count_arr, closest_idx, coloc_bool.astype(int))
                 except KeyError:
@@ -385,10 +478,13 @@ class Antibody(Attribute):
 
         self.df[f'{self.name}_DistToClosest_{other_marker.name}'] = distance_out
         other_df[f'{other_marker.name}_ClosestTo_{self.name}'] = closest_flag_out
-        other_df[f'{other_marker.name}_NumColoc_{self.name}'] = coloc_count_out
-        other_df[f'{other_marker.name}_Contains_{self.name}'] = np.where(
+        other_df[f'{other_marker.name}_VolNumColoc_{self.name}'] = coloc_count_out
+        other_df[f'{other_marker.name}_VolContains_{self.name}'] = np.where(
             coloc_count_out >= 1, 1, 0
-        )
+        ).astype(np.int8)
+        # Legacy volumetric aliases retained for marker-level plotting helpers.
+        other_df[f'{other_marker.name}_NumColoc_{self.name}'] = other_df[f'{other_marker.name}_VolNumColoc_{self.name}']
+        other_df[f'{other_marker.name}_Contains_{self.name}'] = other_df[f'{other_marker.name}_VolContains_{self.name}']
         other_df[f'{other_marker.name}_NumClosestTo_{self.name}'] = closest_count_out
         other_marker.set_df(other_df)
 
