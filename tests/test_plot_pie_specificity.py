@@ -453,6 +453,44 @@ def test_plot_combo_pies_show_counts_and_pct_builds_dual_pie_labels(monkeypatch)
     assert any("\n" in label and "%" in label for label in autopct_seen)
 
 
+def test_plot_pie_charts_order_reorders_bins_clockwise_from_top(monkeypatch):
+    experiment = _build_marker_specificity_experiment()
+    pies_seen = []
+
+    def _recording_pie(self, x, *args, labels=None, startangle=None, counterclock=None, **kwargs):
+        pies_seen.append(
+            {
+                "counts": [int(v) for v in x],
+                "labels": [str(label) for label in labels],
+                "startangle": float(startangle),
+                "counterclock": bool(counterclock),
+            }
+        )
+        return [], [], []
+
+    monkeypatch.setattr(Axes, "pie", _recording_pie)
+
+    result = plotting.plot_pie_charts(
+        experiment,
+        marker="CK1d",
+        x_attr="Coloc_mCherry",
+        threshold=[30],
+        factor="Genotype",
+        specificity=("Time", "WeekFour"),
+        show_counts=True,
+        show_pct=False,
+        order=["> 30", "<= 30"],
+        save=False,
+    )
+
+    assert result["pie_raw_labels"] == [["> 30", "<= 30"], ["> 30"]]
+    assert result["pie_labels"] == [["> 30", "<= 30"], ["> 30"]]
+    assert pies_seen[0]["labels"] == ["> 30", "<= 30"]
+    assert pies_seen[0]["counts"] == [1, 1]
+    assert all(call["startangle"] == 90.0 for call in pies_seen)
+    assert all(call["counterclock"] is False for call in pies_seen)
+
+
 def test_plot_pie_charts_labels_remap_displayed_bins():
     experiment = _build_marker_specificity_experiment()
 
@@ -471,6 +509,34 @@ def test_plot_pie_charts_labels_remap_displayed_bins():
 
     assert result["pie_raw_labels"] == [["<= 30", "> 30"], ["> 30"]]
     assert result["pie_labels"] == [["Negative", "Positive"], ["Positive"]]
+
+
+def test_plot_pie_charts_bar_order_uses_raw_category_order_after_label_remap(monkeypatch):
+    experiment = _build_marker_specificity_experiment()
+    legend_labels_seen = []
+    original = Axes.legend
+
+    def _recording_legend(self, handles, labels, *args, **kwargs):
+        legend_labels_seen.append([str(label) for label in labels])
+        return original(self, handles, labels, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "legend", _recording_legend)
+
+    plotting.plot_pie_charts(
+        experiment,
+        marker="CK1d",
+        x_attr="Coloc_mCherry",
+        threshold=[30],
+        factor="Genotype",
+        plot_format="bar",
+        show_counts=True,
+        show_pct=False,
+        labels={"<= 30": "Negative", "> 30": "Positive"},
+        order=["> 30", "<= 30"],
+        save=False,
+    )
+
+    assert ["Positive", "Negative"] in legend_labels_seen
 
 
 def test_plot_combo_pies_can_collapse_comboany_marker_at_plot_time():
@@ -503,6 +569,29 @@ def test_plot_combo_pies_can_collapse_comboany_marker_at_plot_time():
         ["None", "mCherry+"],
     ]
     assert week_eight["pie_counts"] == [[1, 2], [2, 2]]
+
+
+def test_plot_combo_pies_order_reorders_combo_signatures():
+    experiment = _build_marker_specificity_experiment()
+
+    result = plotting.plot_combo_pies(
+        experiment,
+        marker="CK1d",
+        family="VolComboAny",
+        show_counts=True,
+        show_pct=False,
+        plot_format="pie",
+        factor="Genotype",
+        specificity=("Time", "WeekFour"),
+        order=["GFAP+_mCherry+", "mCherry+", "GFAP+", "None"],
+        save=False,
+    )
+
+    assert result["pie_labels"] == [
+        ["GFAP+", "None"],
+        ["GFAP+_mCherry+", "mCherry+", "GFAP+"],
+    ]
+    assert result["pie_counts"] == [[1, 1], [1, 1, 1]]
 
 
 def test_plot_combo_pies_can_collapse_detailed_combo_marker_at_plot_time():

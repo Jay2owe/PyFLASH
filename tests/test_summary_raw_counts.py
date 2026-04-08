@@ -685,6 +685,29 @@ def test_raw_coloc_exports_and_marker_x_resolution_use_canonical_name():
     assert plotting._resolve_histogram_x_column(experiment, "DAPI", "ColocGFAP") == "DAPI_VolColoc_GFAP"
 
 
+def test_marker_x_resolution_prefers_exact_contains_variant_when_both_exist():
+    experiment = type("ExperimentStub", (), {
+        "data": {
+            "mCherry": type("MarkerStub", (), {
+                "df": pd.DataFrame({
+                    "mCherry_VolContains_CK1d": [1.0, 0.0],
+                    "mCherry_Contains_CK1d": [0.0, 1.0],
+                    "mCherry_Volume": [1.0, 2.0],
+                })
+            })()
+        }
+    })()
+
+    assert (
+        plotting._resolve_histogram_x_column(experiment, "mCherry", "VolContains_CK1d")
+        == "mCherry_VolContains_CK1d"
+    )
+    assert (
+        plotting._resolve_histogram_x_column(experiment, "mCherry", "Contains_CK1d")
+        == "mCherry_Contains_CK1d"
+    )
+
+
 def test_display_summary_helper_adds_unit_labels_without_mutating_schema():
     exp = _build_summary_test_experiment()
     conds = conditionList([condition("Mouse", "Mouse", "#000000", "Group")])

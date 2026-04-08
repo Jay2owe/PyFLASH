@@ -5877,6 +5877,68 @@ def _combo_collapse_save_suffix(collapse_markers):
     return f"--collapse-{safe}"
 
 
+def _normalize_pie_order(order):
+    if order is None:
+        return None
+    queue_types = (list, tuple, set, np.ndarray, pd.Series, pd.Index)
+    if isinstance(order, str):
+        values = [order]
+    elif isinstance(order, queue_types):
+        values = list(order)
+    else:
+        raise TypeError("order must be a string or list-like of category labels.")
+
+    out = []
+    seen = set()
+    for value in values:
+        value_s = str(value).strip()
+        if value_s == "":
+            continue
+        key = value_s.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value_s)
+    return out
+
+
+def _apply_pie_order(raw_labels, labels, counts, order):
+    raw_labels_s = [str(label).strip() for label in raw_labels]
+    labels_s = [str(label).strip() for label in labels]
+    counts_list = list(counts)
+    if order is None or len(order) == 0:
+        return raw_labels_s, labels_s, counts_list
+
+    entries = list(zip(raw_labels_s, labels_s, counts_list))
+    raw_lookup = {}
+    display_lookup = {}
+    for idx, (raw_label, display_label, _) in enumerate(entries):
+        raw_lookup.setdefault(raw_label.casefold(), []).append(idx)
+        display_lookup.setdefault(display_label.casefold(), []).append(idx)
+
+    ordered_idxs = []
+    used = set()
+    for requested in order:
+        key = str(requested).strip().casefold()
+        matched = raw_lookup.get(key)
+        if matched is None:
+            matched = display_lookup.get(key, [])
+        for idx in matched:
+            if idx in used:
+                continue
+            ordered_idxs.append(idx)
+            used.add(idx)
+    for idx in range(len(entries)):
+        if idx not in used:
+            ordered_idxs.append(idx)
+
+    ordered_entries = [entries[idx] for idx in ordered_idxs]
+    raw_out = [entry[0] for entry in ordered_entries]
+    labels_out = [entry[1] for entry in ordered_entries]
+    counts_out = [entry[2] for entry in ordered_entries]
+    return raw_out, labels_out, counts_out
+
+
 def _normalize_pie_labels_map(labels):
     if labels is None:
         return {}
@@ -6337,6 +6399,36 @@ def _resolve_histogram_x_column(experiment, marker_key, x_attr):
     else:
         candidates.append(f"{marker_prefix}{x_raw}")
 
+    def _resolve_exact_match(candidate, values, *, kind):
+        hits = [value for value in values if str(value).casefold() == str(candidate).casefold()]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            preview = ", ".join(hits[:8]) + ("..." if len(hits) > 8 else "")
+            raise ValueError(
+                f"Ambiguous x_attr '{x_attr}' for marker '{marker_s}' ({kind} match). "
+                f"Matches: {preview}"
+            )
+        return None
+
+    # Prefer exact raw column names and exact marker-suffix matches before
+    # expanding legacy/canonical alias equivalences such as Contains vs VolContains.
+    for cand in candidates:
+        resolved = _resolve_exact_match(cand, cols, kind="full-column")
+        if resolved is not None:
+            return resolved
+
+    marker_cols = [c for c in cols if c.casefold().startswith(marker_prefix.casefold())]
+    marker_suffixes = {
+        c[len(marker_s) + 1:]: c
+        for c in marker_cols
+        if len(c) > len(marker_s) + 1
+    }
+    for cand in candidates:
+        resolved = _resolve_exact_match(cand, marker_suffixes.keys(), kind="suffix")
+        if resolved is not None:
+            return marker_suffixes[resolved]
+
     # Resolve candidate aliases.
     for cand in candidates:
         hits = alias_map.get(_norm(cand), [])
@@ -6345,7 +6437,6 @@ def _resolve_histogram_x_column(experiment, marker_key, x_attr):
         if len(hits) > 1:
             preview = ", ".join(hits[:8]) + ("..." if len(hits) > 8 else "")
             raise ValueError(f"Ambiguous x_attr '{x_attr}' for marker '{marker_s}'. Matches: {preview}")
-
     marker_cols = [c for c in cols if c.startswith(marker_prefix)]
     preview = ", ".join(marker_cols[:12]) + ("..." if len(marker_cols) > 12 else "")
     raise ValueError(
@@ -8766,7 +8857,8 @@ def ridgeline_action(ctx: Context, state: dict,
 def pie_chart_action(ctx: Context, state: dict,
                      marker=None, x=None, threshold=None,
                      start_angle=90, line_width=1.0,
-                     plot_format='pie', as_counts=None, **kwargs):
+                     plot_format='pie', as_counts=None,
+                     order=None, **kwargs):
     """Plot a pie chart for one condition/factor group."""
     idx = ctx.factor_index if ctx.factor_value is not None else ctx.condition_index
     ax = _resolve_action_axis(state, idx)
@@ -8787,6 +8879,7 @@ def pie_chart_action(ctx: Context, state: dict,
     )
     labels_map = _normalize_pie_labels_map(kwargs.get("labels"))
     labels = _apply_pie_labels_map(raw_labels, labels_map)
+    raw_labels, labels, counts = _apply_pie_order(raw_labels, labels, counts, order)
     percentages = _counts_to_percentages(counts)
     n_animals = _count_unique_animals(df, mask=_pie_valid_row_mask(df[x], threshold=threshold))
     show_counts, show_pct = _resolve_pie_value_flags(
@@ -8826,9 +8919,17 @@ def pie_chart_action(ctx: Context, state: dict,
             state.setdefault("pie_bar_group_colors", {})[group_name] = group_color
             state.setdefault("pie_bar_group_n_animals", {})[group_name] = n_animals
             state.setdefault("pie_bar_category_order", [])
-            for lab in labels:
+            state.setdefault("pie_bar_category_pairs", [])
+            known_display_labels = {
+                str(display_label)
+                for _, display_label in state["pie_bar_category_pairs"]
+            }
+            for raw_label, lab in zip(raw_labels, labels):
                 if lab not in state["pie_bar_category_order"]:
                     state["pie_bar_category_order"].append(lab)
+                if lab not in known_display_labels:
+                    state["pie_bar_category_pairs"].append((str(raw_label), str(lab)))
+                    known_display_labels.add(str(lab))
             # Actual rendering happens in wrapper teardown (once, after all groups).
             ax.axis("off")
         else:
@@ -8844,6 +8945,7 @@ def pie_chart_action(ctx: Context, state: dict,
                 counts,
                 labels=labels,
                 startangle=float(start_angle),
+                counterclock=False,
                 autopct=autopct,
                 wedgeprops={"linewidth": lw, "edgecolor": edgecolor},
                 colors=pie_colors,
@@ -8875,7 +8977,8 @@ def combo_pie_action(ctx: Context, state: dict,
                      marker=None, family="comboany",
                      include_none=True,
                      start_angle=90, line_width=1.0,
-                     plot_format='pie', as_counts=None, **kwargs):
+                     plot_format='pie', as_counts=None,
+                     order=None, **kwargs):
     """Plot a pie chart for mutually exclusive Vol/CPC combo-family membership."""
     idx = ctx.factor_index if ctx.factor_value is not None else ctx.condition_index
     ax = _resolve_action_axis(state, idx)
@@ -8919,6 +9022,7 @@ def combo_pie_action(ctx: Context, state: dict,
     )
     labels_map = _normalize_pie_labels_map(kwargs.get("labels"))
     labels = _apply_pie_labels_map(raw_labels, labels_map)
+    raw_labels, labels, counts = _apply_pie_order(raw_labels, labels, counts, order)
     percentages = _counts_to_percentages(counts)
     valid_mask = signature_series.notna() & signature_series.astype(str).str.strip().ne("")
     n_animals = _count_unique_animals(df, mask=valid_mask)
@@ -8954,9 +9058,17 @@ def combo_pie_action(ctx: Context, state: dict,
             state.setdefault("pie_bar_group_colors", {})[group_name] = group_color
             state.setdefault("pie_bar_group_n_animals", {})[group_name] = n_animals
             state.setdefault("pie_bar_category_order", [])
-            for lab in labels:
+            state.setdefault("pie_bar_category_pairs", [])
+            known_display_labels = {
+                str(display_label)
+                for _, display_label in state["pie_bar_category_pairs"]
+            }
+            for raw_label, lab in zip(raw_labels, labels):
                 if lab not in state["pie_bar_category_order"]:
                     state["pie_bar_category_order"].append(lab)
+                if lab not in known_display_labels:
+                    state["pie_bar_category_pairs"].append((str(raw_label), str(lab)))
+                    known_display_labels.add(str(lab))
             ax.axis("off")
         else:
             edgecolor = group_color if lw > 0 else "none"
@@ -8971,6 +9083,7 @@ def combo_pie_action(ctx: Context, state: dict,
                 counts,
                 labels=labels,
                 startangle=float(start_angle),
+                counterclock=False,
                 autopct=autopct,
                 wedgeprops={"linewidth": lw, "edgecolor": edgecolor},
                 colors=pie_colors,
@@ -11876,7 +11989,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                     start_angle=90, line_width=1.0,
                     save=True, specificity=None, roi=None,
                     plot_format='pie', show_counts=None, show_pct=None,
-                    labels=None,
+                    labels=None, order=None,
                     include_N=False, as_counts=None, include_n=None,
                     bottom_ticks=False, bottom_tick_labels=False):
     """
@@ -11898,6 +12011,8 @@ def plot_pie_charts(experiment, marker, x_attr,
     - show_counts: display counts.
     - show_pct: display percentages.
     - labels: optional dict mapping plotted labels/bins to display text.
+    - order: optional category order. The first ordered category starts at the
+      top and proceeds clockwise, so it occupies the top-right side of the pie.
     - include_N: append the number of contributing animals (unique AnimalName).
     - as_counts/include_n: backward-compatible aliases.
     - bottom_ticks / bottom_tick_labels: x-axis tick visibility for bar mode.
@@ -11908,6 +12023,7 @@ def plot_pie_charts(experiment, marker, x_attr,
         as_counts=as_counts,
     )
     include_N_flag = _resolve_include_N_flag(include_N=include_N, include_n=include_n)
+    order_norm = _normalize_pie_order(order)
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -11921,7 +12037,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                 plot_format=plot_format,
                 show_counts=show_counts_flag,
                 show_pct=show_pct_flag,
-                labels=labels,
+                labels=labels, order=order_norm,
                 include_N=include_N_flag,
                 bottom_ticks=bottom_ticks, bottom_tick_labels=bottom_tick_labels,
             )
@@ -11957,6 +12073,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                     show_counts=show_counts_flag,
                     show_pct=show_pct_flag,
                     labels=labels,
+                    order=order_norm,
                     include_N=include_N_flag,
                     bottom_ticks=bottom_ticks,
                     bottom_tick_labels=bottom_tick_labels,
@@ -11982,6 +12099,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                 show_counts=show_counts_flag,
                 show_pct=show_pct_flag,
                 labels=labels,
+                order=order_norm,
                 include_N=include_N_flag,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
@@ -12064,6 +12182,18 @@ def plot_pie_charts(experiment, marker, x_attr,
             group_colors = state.get("pie_bar_group_colors", {})
             group_n_animals = state.get("pie_bar_group_n_animals", {})
             category_order = state.get("pie_bar_category_order", [])
+            category_pairs = state.get("pie_bar_category_pairs", [])
+            if len(category_pairs) > 0:
+                cat_raw = [pair[0] for pair in category_pairs]
+                cat_display = [pair[1] for pair in category_pairs]
+                _, category_order, _ = _apply_pie_order(
+                    cat_raw,
+                    cat_display,
+                    [None] * len(cat_display),
+                    order_norm,
+                )
+            else:
+                category_order = _apply_requested_order(category_order, order_norm)
 
             if len(group_order) == 0 or len(category_order) == 0:
                 ax.axis("off")
@@ -12188,6 +12318,7 @@ def plot_pie_charts(experiment, marker, x_attr,
         show_counts=bool(show_counts_flag),
         show_pct=bool(show_pct_flag),
         labels=labels,
+        order=order_norm,
         include_N=bool(include_N_flag),
         specificity_filter=specificity,
         roi_base=_roi_base,
@@ -12200,7 +12331,7 @@ def plot_combo_pies(experiment, marker,
                     start_angle=90, line_width=1.0,
                     save=True, specificity=None, roi=None,
                     plot_format='pie', show_counts=None, show_pct=None,
-                    labels=None,
+                    labels=None, order=None,
                     include_none=True,
                     collapse_markers=None,
                     include_N=False, as_counts=None, include_n=None,
@@ -12218,8 +12349,10 @@ def plot_combo_pies(experiment, marker,
     the marker population. `include_none=True` retains the explicit `None`
     category when present. `include_N=True` appends the number of
     contributing animals (unique AnimalName). `labels` remaps the final
-    displayed combo signatures after any collapse. `as_counts/include_n` are
-    backward-compatible aliases.
+    displayed combo signatures after any collapse. `order` controls category
+    sequence clockwise from the top so the first ordered category sits on the
+    top-right side of the pie. `as_counts/include_n` are backward-compatible
+    aliases.
     """
     show_counts_flag, show_pct_flag = _resolve_pie_value_flags(
         show_counts=show_counts,
@@ -12227,6 +12360,7 @@ def plot_combo_pies(experiment, marker,
         as_counts=as_counts,
     )
     include_N_flag = _resolve_include_N_flag(include_N=include_N, include_n=include_n)
+    order_norm = _normalize_pie_order(order)
     collapse_markers_norm = _normalize_combo_collapse_markers(collapse_markers)
     collapse_display_suffix = _combo_collapse_display_suffix(collapse_markers_norm)
     collapse_save_suffix = _combo_collapse_save_suffix(collapse_markers_norm)
@@ -12249,6 +12383,7 @@ def plot_combo_pies(experiment, marker,
                 show_counts=show_counts_flag,
                 show_pct=show_pct_flag,
                 labels=labels,
+                order=order_norm,
                 include_none=include_none,
                 collapse_markers=collapse_markers_norm,
                 include_N=include_N_flag,
@@ -12286,6 +12421,7 @@ def plot_combo_pies(experiment, marker,
                     show_counts=show_counts_flag,
                     show_pct=show_pct_flag,
                     labels=labels,
+                    order=order_norm,
                     include_none=include_none,
                     collapse_markers=collapse_markers_norm,
                     include_N=include_N_flag,
@@ -12312,6 +12448,7 @@ def plot_combo_pies(experiment, marker,
                 show_counts=show_counts_flag,
                 show_pct=show_pct_flag,
                 labels=labels,
+                order=order_norm,
                 include_none=include_none,
                 collapse_markers=collapse_markers_norm,
                 include_N=include_N_flag,
@@ -12398,6 +12535,18 @@ def plot_combo_pies(experiment, marker,
             group_colors = state.get("pie_bar_group_colors", {})
             group_n_animals = state.get("pie_bar_group_n_animals", {})
             category_order = state.get("pie_bar_category_order", [])
+            category_pairs = state.get("pie_bar_category_pairs", [])
+            if len(category_pairs) > 0:
+                cat_raw = [pair[0] for pair in category_pairs]
+                cat_display = [pair[1] for pair in category_pairs]
+                _, category_order, _ = _apply_pie_order(
+                    cat_raw,
+                    cat_display,
+                    [None] * len(cat_display),
+                    order_norm,
+                )
+            else:
+                category_order = _apply_requested_order(category_order, order_norm)
 
             if len(group_order) == 0 or len(category_order) == 0:
                 ax.axis("off")
@@ -12519,6 +12668,7 @@ def plot_combo_pies(experiment, marker,
         show_counts=bool(show_counts_flag),
         show_pct=bool(show_pct_flag),
         labels=labels,
+        order=order_norm,
         include_N=bool(include_N_flag),
         specificity_filter=specificity,
         roi_base=_roi_base,
@@ -14505,7 +14655,7 @@ _PARAM_DESCRIPTIONS = {
     'sort_by':              'Upset sorting: "cardinality" or "degree".',
     'df':                   'Optional pre-filtered DataFrame override.',
     'false_bottom':         'Sankey: True nodes at top, False at bottom.',
-    'order':                'Sankey layer ordering: "auto" or list of markers.',
+    'order':                'Custom ordering. For pie charts, sets slice/stack order clockwise from the top; for Sankey, use "auto" or a list of markers.',
     # ── Shared ───────────────────────────────────────────────────────
     'points':               'Overlay individual data points on bar charts.',
     'enforce_shared_columns': 'Force all panels to use the same column set.',
