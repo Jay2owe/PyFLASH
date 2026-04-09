@@ -22,7 +22,7 @@ _OBJ_COUNTER = (
     "Using 3D Object Counter, confocal image stacks were segmented "
     "into individual 3D objects based on a threshold.\n"
 )
-_PER_VOL = "normalized per volume of tissue"
+_PER_VOL = "normalized per 0.1 mm^3 of tissue/ROI volume"
 _QUANTIFIED = "was then quantified"
 _MULTICOLOC = (
     "Using 3D MultiColoc, the co-occurence colocalization between "
@@ -363,6 +363,126 @@ def _pattern_to_regex(pattern):
 
 EXCEL_MAX = 31
 _EXP_SUFFIX_RE = re.compile(r"\.exp(\d+)$")
+_COMBO_METRIC_RE = re.compile(
+    r"^(?P<ab>.+?)_"
+    r"(?P<family>VolComboAny|VolCombo|CPCComboAny|CPCCombo)_"
+    r"(?P<state>.+?)_"
+    r"(?P<metric>CountRaw|Count|IntDenTotal|MeanIntDen|burdenScore|fragmentationScore)$"
+)
+_COMPACT_SHEET_RULES = [
+    (
+        re.compile(r"^(?P<ab>.+?)_CPCColoc_(?P<ab2>.+?)_CountRaw$"),
+        lambda g: f"{g['ab']} RawCPCColoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_CPCColoc_(?P<ab2>.+?)_Count%$"),
+        lambda g: f"%{g['ab']} CPCColoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_CPCColoc_(?P<ab2>.+?)_Count$"),
+        lambda g: f"{g['ab']} CPCColoc {g['ab2']} Dens",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_CPCContains_(?P<ab2>.+?)_CountRaw$"),
+        lambda g: f"{g['ab']} RawCPCCont {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_CPCContains_(?P<ab2>.+?)_Count%$"),
+        lambda g: f"%{g['ab']} CPCCont {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_CPCContains_(?P<ab2>.+?)_Count$"),
+        lambda g: f"{g['ab']} CPCCont {g['ab2']} Dens",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_CPCAny_(?P<ab2>.+?)_CountRaw$"),
+        lambda g: f"{g['ab']} RawCPCAssoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_CPCAny_(?P<ab2>.+?)_Count%$"),
+        lambda g: f"%{g['ab']} CPCAssoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_CPCAny_(?P<ab2>.+?)_Count$"),
+        lambda g: f"{g['ab']} CPCAssoc {g['ab2']} Dens",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_VolColoc_(?P<ab2>.+?)_CountRaw$"),
+        lambda g: f"{g['ab']} RawVolColoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_VolColoc_(?P<ab2>.+?)_Count%$"),
+        lambda g: f"%{g['ab']} VolColoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_VolColoc_(?P<ab2>.+?)_Count$"),
+        lambda g: f"{g['ab']} VolColoc {g['ab2']} Dens",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_VolContains_(?P<ab2>.+?)_CountRaw$"),
+        lambda g: f"{g['ab']} RawVolCont {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_VolContains_(?P<ab2>.+?)_Count%$"),
+        lambda g: f"%{g['ab']} VolCont {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_VolContains_(?P<ab2>.+?)_Count$"),
+        lambda g: f"{g['ab']} VolCont {g['ab2']} Dens",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_VolAny_(?P<ab2>.+?)_CountRaw$"),
+        lambda g: f"{g['ab']} RawVolAssoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_VolAny_(?P<ab2>.+?)_Count%$"),
+        lambda g: f"%{g['ab']} VolAssoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_VolAny_(?P<ab2>.+?)_Count$"),
+        lambda g: f"{g['ab']} VolAssoc {g['ab2']} Dens",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_Coloc_(?P<ab2>.+?)_CountRaw$"),
+        lambda g: f"{g['ab']} RawVolColoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_Coloc_(?P<ab2>.+?)_Count%$"),
+        lambda g: f"%{g['ab']} VolColoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_Coloc_(?P<ab2>.+?)_Count$"),
+        lambda g: f"{g['ab']} VolColoc {g['ab2']} Dens",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_Contains_(?P<ab2>.+?)_CountRaw$"),
+        lambda g: f"{g['ab']} RawVolCont {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_Contains_(?P<ab2>.+?)_Count%$"),
+        lambda g: f"%{g['ab']} VolCont {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_Contains_(?P<ab2>.+?)_Count$"),
+        lambda g: f"{g['ab']} VolCont {g['ab2']} Dens",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_Any_(?P<ab2>.+?)_CountRaw$"),
+        lambda g: f"{g['ab']} RawVolAssoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_Any_(?P<ab2>.+?)_Count%$"),
+        lambda g: f"%{g['ab']} VolAssoc {g['ab2']}",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_Any_(?P<ab2>.+?)_Count$"),
+        lambda g: f"{g['ab']} VolAssoc {g['ab2']} Dens",
+    ),
+    (
+        re.compile(r"^(?P<ab>.+?)_IntDenTotal$"),
+        lambda g: f"{g['ab']} IntDenDens",
+    ),
+]
 
 def _strip_exp_suffix(colname: str):
     """Strip '.expN' disambiguation suffix, returning (base_name, exp_tag_or_empty)."""
@@ -392,6 +512,173 @@ def convert_name(colname: str, truncate: bool = True):
                 label = f"{label} ({exp_tag.lstrip('.')})"
             return (label[:EXCEL_MAX] if truncate else label), desc
     raise KeyError(f"No NAME_MAP rule for column: {colname}")
+
+
+def _abbrev_combo_token(token: str, body_len: int) -> str:
+    token_s = str(token)
+    prefix = "w" if token_s.startswith("w") else ""
+    suffix = "+" if token_s.endswith("+") else ""
+    body = token_s[1:] if prefix else token_s
+    body = body[:-1] if suffix else body
+    body = body[:body_len] if len(body) > body_len else body
+    return f"{prefix}{body}{suffix}"
+
+
+def _compact_combo_state(state: str, budget: int | None = None) -> str:
+    state_s = str(state)
+    if state_s == "None":
+        return "None"
+
+    tokens = [str(t) for t in state_s.split("_") if str(t)]
+    trials = [
+        ",".join(tokens),
+        ",".join(_abbrev_combo_token(t, 4) for t in tokens),
+        ",".join(_abbrev_combo_token(t, 3) for t in tokens),
+        "".join(_abbrev_combo_token(t, 3) for t in tokens),
+        "".join(_abbrev_combo_token(t, 2) for t in tokens),
+    ]
+
+    if budget is None:
+        return trials[0]
+    for trial in trials:
+        if len(trial) <= budget:
+            return trial
+    return trials[-1][:budget]
+
+
+def _combo_metric_label(metric: str) -> str:
+    return {
+        "Count": "Dens",
+        "CountRaw": "RawCount",
+        "IntDenTotal": "IntDen",
+        "MeanIntDen": "MeanPxIntDen",
+        "burdenScore": "Burden",
+        "fragmentationScore": "Frag",
+    }.get(str(metric), str(metric))
+
+
+def _combo_family_label(family: str) -> str:
+    return {
+        "VolCombo": "VCmb",
+        "CPCCombo": "CCmb",
+        "VolComboAny": "VAny",
+        "CPCComboAny": "CAny",
+    }.get(str(family), str(family))
+
+
+def _combo_family_desc(family: str) -> str:
+    return {
+        "VolCombo": "detailed volumetric combo subset",
+        "CPCCombo": "detailed CPC combo subset",
+        "VolComboAny": "pooled volumetric Any combo subset",
+        "CPCComboAny": "pooled CPC Any combo subset",
+    }.get(str(family), "combo subset")
+
+
+def _combo_state_desc(state: str) -> str:
+    state_s = str(state)
+    if state_s == "None":
+        return "no coloc-positive or contains/with partner-marker state"
+
+    parts = []
+    for token in state_s.split("_"):
+        token_s = str(token)
+        if token_s.endswith("+"):
+            parts.append(f"{token_s[:-1]} coloc-positive")
+        elif token_s.startswith("w"):
+            parts.append(f"contains/with {token_s[1:]}")
+        else:
+            parts.append(token_s)
+    return ", ".join(parts)
+
+
+def _combo_description(ab: str, family: str, state: str, metric: str) -> str:
+    marker = str(ab)
+    family_desc = _combo_family_desc(family)
+    state_desc = _combo_state_desc(state)
+    notation = 'Combo notation: "marker+" = coloc-positive, "wMarker" = contains/with marker.'
+
+    if metric == "Count":
+        return (
+            f"{_OBJ_COUNTER}"
+            f"The number of segmented {marker} objects in the {family_desc} "
+            f"state ({state_desc}) was summed and {_PER_VOL}.\n"
+            f"{notation}"
+        )
+    if metric == "CountRaw":
+        return (
+            f"{_OBJ_COUNTER}"
+            f"The number of segmented {marker} objects in the {family_desc} "
+            f"state ({state_desc}) was summed and averaged across sections "
+            f"before tissue-volume normalization.\n"
+            f"{notation}"
+        )
+    if metric == "IntDenTotal":
+        return (
+            f"{_OBJ_COUNTER}"
+            f"The total integrated density of segmented {marker} objects in "
+            f"the {family_desc} state ({state_desc}) was summed and {_PER_VOL}.\n"
+            f"{notation}"
+        )
+    if metric == "MeanIntDen":
+        return (
+            f"{_OBJ_COUNTER}"
+            f"The mean per-object pixel integrated density of segmented {marker} "
+            f"objects in the {family_desc} state ({state_desc}) {_QUANTIFIED}.\n"
+            f"{notation}"
+        )
+    if metric == "burdenScore":
+        return (
+            f"Composite burden score computed only across segmented {marker} "
+            f"objects in the {family_desc} state ({state_desc}).\n"
+            f"{notation}"
+        )
+    if metric == "fragmentationScore":
+        return (
+            f"Composite fragmentation score computed only across segmented {marker} "
+            f"objects in the {family_desc} state ({state_desc}).\n"
+            f"{notation}"
+        )
+    return f"{family_desc} state ({state_desc}) for {marker}."
+
+
+def convert_summary_sheet_name(colname: str):
+    label, desc = convert_name(colname, truncate=False)
+    base, exp_tag = _strip_exp_suffix(str(colname))
+
+    combo_match = _COMBO_METRIC_RE.match(base)
+    if combo_match is not None:
+        groups = combo_match.groupdict()
+        family_label = _combo_family_label(groups["family"])
+        metric_label = _combo_metric_label(groups["metric"])
+        state_label = _compact_combo_state(groups["state"])
+        compact = f"{groups['ab']} {family_label} {state_label} {metric_label}".strip()
+        if len(compact) > EXCEL_MAX:
+            budget = max(4, EXCEL_MAX - len(f"{groups['ab']} {family_label}  {metric_label}"))
+            state_label = _compact_combo_state(groups["state"], budget=budget)
+            compact = f"{groups['ab']} {family_label} {state_label} {metric_label}".strip()
+        if len(compact) > EXCEL_MAX:
+            marker_short = _abbrev_combo_token(groups["ab"], 4)
+            budget = max(4, EXCEL_MAX - len(f"{marker_short} {family_label}  {metric_label}"))
+            state_label = _compact_combo_state(groups["state"], budget=budget)
+            compact = f"{marker_short} {family_label} {state_label} {metric_label}".strip()
+        label = compact
+        desc = _combo_description(
+            groups["ab"],
+            groups["family"],
+            groups["state"],
+            groups["metric"],
+        )
+    else:
+        for rx, formatter in _COMPACT_SHEET_RULES:
+            m = rx.match(base)
+            if m is not None:
+                label = formatter(m.groupdict())
+                break
+
+    if exp_tag:
+        label = f"{label} ({exp_tag.lstrip('.')})"
+    return label, desc
 
 RAW_RULES = sorted(
     ((_pattern_to_regex(p), rule) for p, rule in RAW_NAME_MAP.items()),
@@ -512,6 +799,150 @@ def _summary_marker_for_column(colname: str) -> str:
         return normalize_marker_name(marker)
     raise KeyError(colname)
 
+
+def _exp_rank_for_column(colname: str) -> int:
+    _base, exp_tag = _strip_exp_suffix(str(colname))
+    if not exp_tag:
+        return 0
+    try:
+        return int(exp_tag.lstrip(".exp"))
+    except ValueError:
+        return 0
+
+
+def _summary_metric_sort_key(base: str):
+    combo_match = _COMBO_METRIC_RE.match(base)
+    if combo_match is not None:
+        family_rank = {
+            "VolCombo": 0,
+            "CPCCombo": 1,
+            "VolComboAny": 2,
+            "CPCComboAny": 3,
+        }.get(combo_match.group("family"), 9)
+        metric_rank = {
+            "Count": 0,
+            "CountRaw": 1,
+            "IntDenTotal": 2,
+            "MeanIntDen": 3,
+            "burdenScore": 4,
+            "fragmentationScore": 5,
+        }.get(combo_match.group("metric"), 9)
+        return (5, family_rank, metric_rank, combo_match.group("state"))
+
+    if base.endswith("_burdenScore"):
+        return (4, 0, 0, "")
+    if base.endswith("_fragmentationScore"):
+        return (4, 1, 0, "")
+
+    quant_order = [
+        ("_Count", 0),
+        ("_CountRaw", 1),
+        ("_IntDenTotal", 2),
+        ("_VolumeTotal", 3),
+        ("_SurfaceTotal", 4),
+        ("_IntDenMean", 5),
+        ("_MeanIntDenMean", 6),
+        ("_VolumeMean", 7),
+        ("_SurfaceMean", 8),
+        ("_SAtoVolumeRatioMean", 9),
+        ("_ROI_IntDenMean", 10),
+        ("_ROI_%AreaMean", 11),
+    ]
+    if not any(
+        token in base
+        for token in (
+            "_VolColoc_",
+            "_VolContains_",
+            "_VolAny_",
+            "_CPCColoc_",
+            "_CPCContains_",
+            "_CPCAny_",
+            "_Coloc_",
+            "_Contains_",
+            "_Any_",
+        )
+    ):
+        for suffix, rank in quant_order:
+            if base.endswith(suffix):
+                return (0, rank, 0, "")
+
+    if base.endswith("_RawXMMean"):
+        return (1, 0, 0, "")
+    if base.endswith("_RawYMMean"):
+        return (1, 1, 0, "")
+    if "_DistToClosest_" in base:
+        return (1, 2, 0, base.split("_DistToClosest_", 1)[1].removesuffix("Mean"))
+    if base.endswith("_DistToVentricle"):
+        return (1, 3, 0, "")
+
+    family_rules = [
+        ("_VolColoc_", "_Mean", 0),
+        ("_CPCColoc_", "_Mean", 1),
+        ("_VolColoc_", "_Count", 2),
+        ("_VolColoc_", "_CountRaw", 3),
+        ("_VolColoc_", "_Count%", 4),
+        ("_VolContains_", "_Count", 5),
+        ("_VolContains_", "_CountRaw", 6),
+        ("_VolContains_", "_Count%", 7),
+        ("_VolAny_", "_Count", 8),
+        ("_VolAny_", "_CountRaw", 9),
+        ("_VolAny_", "_Count%", 10),
+        ("_CPCColoc_", "_Count", 11),
+        ("_CPCColoc_", "_CountRaw", 12),
+        ("_CPCColoc_", "_Count%", 13),
+        ("_CPCContains_", "_Count", 14),
+        ("_CPCContains_", "_CountRaw", 15),
+        ("_CPCContains_", "_Count%", 16),
+        ("_CPCAny_", "_Count", 17),
+        ("_CPCAny_", "_CountRaw", 18),
+        ("_CPCAny_", "_Count%", 19),
+        ("_Coloc_", "_Mean", 20),
+        ("_Coloc_", "_Count", 21),
+        ("_Coloc_", "_CountRaw", 22),
+        ("_Coloc_", "_Count%", 23),
+        ("_Contains_", "_Count", 24),
+        ("_Contains_", "_CountRaw", 25),
+        ("_Contains_", "_Count%", 26),
+        ("_Any_", "_Count", 27),
+        ("_Any_", "_CountRaw", 28),
+        ("_Any_", "_Count%", 29),
+        ("_NumColoc_", "Mean", 30),
+        ("_VolNumColoc_", "Mean", 31),
+    ]
+    for token, suffix, rank in family_rules:
+        if token in base and base.endswith(suffix):
+            target = base.split(token, 1)[1].removesuffix(suffix).strip("_")
+            return (2, rank, 0, target)
+
+    return (3, 99, 0, base)
+
+
+def sort_if_summary_columns(columns):
+    cols = [str(col) for col in columns]
+    marker_order = {}
+    for col in cols:
+        try:
+            marker = _summary_marker_for_column(col)
+        except KeyError:
+            marker = str(col)
+        if marker not in marker_order:
+            marker_order[marker] = len(marker_order)
+
+    def _key(col: str):
+        base, _exp_tag = _strip_exp_suffix(col)
+        try:
+            marker = _summary_marker_for_column(col)
+        except KeyError:
+            marker = col
+        return (
+            marker_order.get(marker, len(marker_order)),
+            _exp_rank_for_column(col),
+            *_summary_metric_sort_key(base),
+            col,
+        )
+
+    return sorted(cols, key=_key)
+
 def autosize_columns(worksheet, df, padding=2, max_width=120):
     for col_idx, col_name in enumerate(df.columns):
         series = df[col_name].astype(str).fillna("")
@@ -609,14 +1040,23 @@ def find_details_file(details_dir: str | Path, marker: str) -> Path | None:
 
 def write_experiment_data_list_sheet(writer, experiment_list, sheet_name="Data overview", visible_columns=None):
     rows = []
-    visible_set = None if visible_columns is None else {str(col) for col in visible_columns}
+    visible_order = None if visible_columns is None else {str(col): idx for idx, col in enumerate(visible_columns)}
+    visible_set = None if visible_columns is None else set(visible_order)
 
     for exp_idx, exp in enumerate(experiment_list, start=1):
         exp_name = f"Experiment {exp_idx}"
         base_path = Path(exp.filePath)
         bucket = {}
 
-        summary_cols = exp.summary.columns
+        summary_cols = [str(col) for col in exp.summary.columns]
+        if visible_order is not None:
+            def _visible_rank(col_s: str):
+                return min(
+                    visible_order.get(col_s, float("inf")),
+                    visible_order.get(f"{col_s}.exp{exp_idx}", float("inf")),
+                )
+            summary_cols = sorted(summary_cols, key=_visible_rank)
+
         for col in summary_cols:
             col_s = str(col)
             if visible_set is not None:
@@ -638,7 +1078,7 @@ def write_experiment_data_list_sheet(writer, experiment_list, sheet_name="Data o
             key = (marker, analysis)
 
             if key not in bucket:
-                bucket[key] = {"labels": set(), "filter": "", "analysis": ""}
+                bucket[key] = {"labels": [], "seen_labels": set(), "filter": "", "analysis": ""}
 
                 # choose the correct Details folder for this analysis type
                 details_dir = (
@@ -653,7 +1093,9 @@ def write_experiment_data_list_sheet(writer, experiment_list, sheet_name="Data o
                     bucket[key]["filter"] = blocks.get("Filter Macro", "")
                     bucket[key]["analysis"] = blocks.get("Analysis Macro", "")
 
-            bucket[key]["labels"].add(label)
+            if label not in bucket[key]["seen_labels"]:
+                bucket[key]["seen_labels"].add(label)
+                bucket[key]["labels"].append(label)
 
 
         for (marker, analysis), info in bucket.items():
@@ -661,7 +1103,7 @@ def write_experiment_data_list_sheet(writer, experiment_list, sheet_name="Data o
                 "Experiment": exp_name,
                 "Marker": marker,
                 "Analysis": analysis,
-                "Data": ", ".join(sorted(info['labels'])),
+                "Data": ", ".join(info['labels']),
                 "Filter Macro": info['filter'],
                 "Analysis Macro": info['analysis']
             })

@@ -16,7 +16,7 @@ from IF_analysis.experiment import (
     _attach_image_metadata, _build_images_dict, _empty_image_table, _sort_image_table,
 )
 from IF_analysis.markers import objectMarker, cellMarker, Antibody
-from IF_analysis.export import _raw_name_cache, write_conditions_table_sheet, convert_raw_name_cached, safe_sheet_name, write_experiment_data_list_sheet, convert_name, BEHAVIOR_NAME_MAP, convert_behavior_name
+from IF_analysis.export import _raw_name_cache, write_conditions_table_sheet, convert_raw_name_cached, safe_sheet_name, write_experiment_data_list_sheet, convert_name, convert_summary_sheet_name, sort_if_summary_columns, BEHAVIOR_NAME_MAP, convert_behavior_name
 from IF_analysis.utils import ProgressTracker
 
 
@@ -858,6 +858,7 @@ class Batch(Experiment):
             and any(data in col for data in self.data.keys())
         ]
         columns_to_save, skipped_columns = _apply_export_regex_filters(candidate_columns, regex_filters)
+        columns_to_save = sort_if_summary_columns(columns_to_save)
 
         cols_not_included = []
         exported_sheet_details = []
@@ -881,7 +882,7 @@ class Batch(Experiment):
             })
             for col in columns_to_save:
                 try:
-                    label, desc = convert_name(col, truncate=False)
+                    label, desc = convert_summary_sheet_name(col)
                     # Avoid reusing the same worksheet when Excel truncates or duplicates labels.
                     sheet_name = safe_sheet_name(label, used_sheet_names)
                     exported_sheet_details.append(f"{sheet_name}: {col}")

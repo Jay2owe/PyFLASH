@@ -5,6 +5,7 @@ from openpyxl import load_workbook
 
 from IF_analysis.batch import Batch
 from IF_analysis.conditions import condition, conditionList
+from IF_analysis.export import convert_summary_sheet_name
 from IF_analysis.markers import Antibody
 
 
@@ -212,3 +213,92 @@ def test_export_all_excel_wrapper_forwards_new_kwargs(tmp_path):
     assert (export_dir / "scn" / "CountsOnly.xlsx").exists()
     assert not (export_dir / "scn" / "IF_Extended.xlsx").exists()
     assert not (export_dir / "Behavior_Summary.xlsx").exists()
+
+
+def test_convert_summary_sheet_name_compacts_density_labels_and_descs():
+    label, desc = convert_summary_sheet_name("GFAP_VolColoc_DAPI_Count")
+    assert label == "GFAP VolColoc DAPI Dens"
+    assert "0.1 mm^3" in desc
+
+    label, desc = convert_summary_sheet_name("GFAP_IntDenTotal")
+    assert label == "GFAP IntDenDens"
+    assert "0.1 mm^3" in desc
+
+    label, desc = convert_summary_sheet_name("GFAP_VolCombo_wDAPI_Count")
+    assert label == "GFAP VCmb wDAPI Dens"
+    assert "0.1 mm^3" in desc
+    assert "marker+" in desc
+
+
+def test_export_if_summary_compacts_sheet_names_and_reorders_tabs(tmp_path):
+    cond_a = condition("A", "A", "#000000", "Genotype", explanation="<>")
+    cond_b = condition("B", "B", "#111111", "Genotype", explanation="<>")
+    conditions = conditionList([cond_a, cond_b])
+
+    summary = pd.DataFrame(
+        {
+            "AnimalName": ["A1", "B1"],
+            "Condition": ["A", "B"],
+            "GFAP_DistToClosest_DAPIMean": [5.0, 6.0],
+            "GFAP_burdenScore": [1.2, 1.3],
+            "GFAP_VolCombo_wDAPI_Count": [2.0, 2.5],
+            "GFAP_VolCombo_wDAPI_CountRaw": [2.0, 2.5],
+            "GFAP_VolCombo_wDAPI_IntDenTotal": [7.5, 7.0],
+            "GFAP_VolColoc_DAPI_CountRaw": [1.0, 1.1],
+            "GFAP_VolColoc_DAPI_Count": [1.5, 1.6],
+            "GFAP_IntDenTotal": [9.0, 9.5],
+            "GFAP_Count": [3.0, 3.2],
+            "GFAP_CountRaw": [3.0, 3.2],
+            "GFAP_VolumeTotal": [11.0, 11.5],
+        }
+    )
+
+    marker = object.__new__(Antibody)
+    marker.name = "GFAP"
+    marker.experiment = None
+    marker.color = None
+    marker.df = pd.DataFrame(
+        {
+            "AnimalName": ["A1", "B1"],
+            "Condition": ["A", "B"],
+            "GFAP_Volume": [10.0, 11.0],
+        }
+    )
+
+    behavior = SimpleNamespace(
+        df=pd.DataFrame(
+            {
+                "AnimalName": ["A1", "B1"],
+                "Condition": ["A", "B"],
+            }
+        )
+    )
+
+    experiment = SimpleNamespace(
+        summary=summary.copy(),
+        summaries={"SCN": summary.copy()},
+        data={"GFAP": marker},
+        name="Exp1",
+        filePath=str(tmp_path),
+    )
+
+    batch = Batch("Batch1", [experiment], conditions, str(tmp_path))
+    batch.data = {"GFAP": marker, "Behaviour": behavior}
+    batch.conditions = conditions.conditions
+    batch.factor = list(conditions.factor)
+    batch.markers = {"GFAP"}
+
+    export_dir = tmp_path / "ordered_summary"
+    export_dir.mkdir()
+    batch.export_IF_summary_excel(str(export_dir))
+
+    wb = load_workbook(export_dir / "IF_Summary.xlsx", read_only=True, data_only=True)
+    metric_sheets = [name for name in wb.sheetnames if name not in {"Experimental Conditions", "Data Summary"}]
+
+    assert "GFAP IntDenDens" in metric_sheets
+    assert "GFAP RawVolColoc DAPI" in metric_sheets
+    assert "GFAP VCmb wDAPI Dens" in metric_sheets
+    assert "GFAP VCmb wDAPI RawCount" in metric_sheets
+
+    assert metric_sheets.index("GFAP IntDenDens") < metric_sheets.index("GFAP Mean Nearest DAPI")
+    assert metric_sheets.index("GFAP Mean Nearest DAPI") < metric_sheets.index("GFAP VCmb wDAPI Dens")
