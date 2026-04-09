@@ -229,6 +229,10 @@ def test_convert_summary_sheet_name_compacts_density_labels_and_descs():
     assert "0.1 mm^3" in desc
     assert "marker+" in desc
 
+    label, desc = convert_summary_sheet_name("GFAP_VolCombo_wDAPI_Count%")
+    assert label == "%GFAP VCmb wDAPI"
+    assert "percentage" in desc.lower()
+
 
 def test_export_if_summary_compacts_sheet_names_and_reorders_tabs(tmp_path):
     cond_a = condition("A", "A", "#000000", "Genotype", explanation="<>")
@@ -243,6 +247,7 @@ def test_export_if_summary_compacts_sheet_names_and_reorders_tabs(tmp_path):
             "GFAP_burdenScore": [1.2, 1.3],
             "GFAP_VolCombo_wDAPI_Count": [2.0, 2.5],
             "GFAP_VolCombo_wDAPI_CountRaw": [2.0, 2.5],
+            "GFAP_VolCombo_wDAPI_Count%": [66.7, 78.1],
             "GFAP_VolCombo_wDAPI_IntDenTotal": [7.5, 7.0],
             "GFAP_VolColoc_DAPI_CountRaw": [1.0, 1.1],
             "GFAP_VolColoc_DAPI_Count": [1.5, 1.6],
@@ -299,6 +304,9 @@ def test_export_if_summary_compacts_sheet_names_and_reorders_tabs(tmp_path):
     assert "GFAP RawVolColoc DAPI" in metric_sheets
     assert "GFAP VCmb wDAPI Dens" in metric_sheets
     assert "GFAP VCmb wDAPI RawCount" in metric_sheets
+    assert "%GFAP VCmb wDAPI" in metric_sheets
 
     assert metric_sheets.index("GFAP IntDenDens") < metric_sheets.index("GFAP Mean Nearest DAPI")
     assert metric_sheets.index("GFAP Mean Nearest DAPI") < metric_sheets.index("GFAP VCmb wDAPI Dens")
+    assert metric_sheets.index("GFAP VCmb wDAPI RawCount") < metric_sheets.index("%GFAP VCmb wDAPI")
+    assert metric_sheets.index("%GFAP VCmb wDAPI") < metric_sheets.index("GFAP VCmb wDAPI IntDen")

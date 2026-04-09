@@ -367,7 +367,7 @@ _COMBO_METRIC_RE = re.compile(
     r"^(?P<ab>.+?)_"
     r"(?P<family>VolComboAny|VolCombo|CPCComboAny|CPCCombo)_"
     r"(?P<state>.+?)_"
-    r"(?P<metric>CountRaw|Count|IntDenTotal|MeanIntDen|burdenScore|fragmentationScore)$"
+    r"(?P<metric>Count%|CountRaw|Count|IntDenTotal|MeanIntDen|burdenScore|fragmentationScore)$"
 )
 _COMPACT_SHEET_RULES = [
     (
@@ -548,6 +548,7 @@ def _compact_combo_state(state: str, budget: int | None = None) -> str:
 
 def _combo_metric_label(metric: str) -> str:
     return {
+        "Count%": "%",
         "Count": "Dens",
         "CountRaw": "RawCount",
         "IntDenTotal": "IntDen",
@@ -605,6 +606,13 @@ def _combo_description(ab: str, family: str, state: str, metric: str) -> str:
             f"state ({state_desc}) was summed and {_PER_VOL}.\n"
             f"{notation}"
         )
+    if metric == "Count%":
+        return (
+            f"{_OBJ_COUNTER}"
+            f"The percentage of segmented {marker} objects in the {family_desc} "
+            f"state ({state_desc}) {_QUANTIFIED}.\n"
+            f"{notation}"
+        )
     if metric == "CountRaw":
         return (
             f"{_OBJ_COUNTER}"
@@ -643,7 +651,6 @@ def _combo_description(ab: str, family: str, state: str, metric: str) -> str:
 
 
 def convert_summary_sheet_name(colname: str):
-    label, desc = convert_name(colname, truncate=False)
     base, exp_tag = _strip_exp_suffix(str(colname))
 
     combo_match = _COMBO_METRIC_RE.match(base)
@@ -652,16 +659,31 @@ def convert_summary_sheet_name(colname: str):
         family_label = _combo_family_label(groups["family"])
         metric_label = _combo_metric_label(groups["metric"])
         state_label = _compact_combo_state(groups["state"])
-        compact = f"{groups['ab']} {family_label} {state_label} {metric_label}".strip()
-        if len(compact) > EXCEL_MAX:
-            budget = max(4, EXCEL_MAX - len(f"{groups['ab']} {family_label}  {metric_label}"))
-            state_label = _compact_combo_state(groups["state"], budget=budget)
+        if metric_label == "%":
+            compact = f"%{groups['ab']} {family_label} {state_label}".strip()
+        else:
             compact = f"{groups['ab']} {family_label} {state_label} {metric_label}".strip()
         if len(compact) > EXCEL_MAX:
-            marker_short = _abbrev_combo_token(groups["ab"], 4)
-            budget = max(4, EXCEL_MAX - len(f"{marker_short} {family_label}  {metric_label}"))
+            if metric_label == "%":
+                budget = max(4, EXCEL_MAX - len(f"%{groups['ab']} {family_label} "))
+            else:
+                budget = max(4, EXCEL_MAX - len(f"{groups['ab']} {family_label}  {metric_label}"))
             state_label = _compact_combo_state(groups["state"], budget=budget)
-            compact = f"{marker_short} {family_label} {state_label} {metric_label}".strip()
+            if metric_label == "%":
+                compact = f"%{groups['ab']} {family_label} {state_label}".strip()
+            else:
+                compact = f"{groups['ab']} {family_label} {state_label} {metric_label}".strip()
+        if len(compact) > EXCEL_MAX:
+            marker_short = _abbrev_combo_token(groups["ab"], 4)
+            if metric_label == "%":
+                budget = max(4, EXCEL_MAX - len(f"%{marker_short} {family_label} "))
+            else:
+                budget = max(4, EXCEL_MAX - len(f"{marker_short} {family_label}  {metric_label}"))
+            state_label = _compact_combo_state(groups["state"], budget=budget)
+            if metric_label == "%":
+                compact = f"%{marker_short} {family_label} {state_label}".strip()
+            else:
+                compact = f"{marker_short} {family_label} {state_label} {metric_label}".strip()
         label = compact
         desc = _combo_description(
             groups["ab"],
@@ -670,6 +692,7 @@ def convert_summary_sheet_name(colname: str):
             groups["metric"],
         )
     else:
+        label, desc = convert_name(colname, truncate=False)
         for rx, formatter in _COMPACT_SHEET_RULES:
             m = rx.match(base)
             if m is not None:
@@ -822,10 +845,11 @@ def _summary_metric_sort_key(base: str):
         metric_rank = {
             "Count": 0,
             "CountRaw": 1,
-            "IntDenTotal": 2,
-            "MeanIntDen": 3,
-            "burdenScore": 4,
-            "fragmentationScore": 5,
+            "Count%": 2,
+            "IntDenTotal": 3,
+            "MeanIntDen": 4,
+            "burdenScore": 5,
+            "fragmentationScore": 6,
         }.get(combo_match.group("metric"), 9)
         return (5, family_rank, metric_rank, combo_match.group("state"))
 
