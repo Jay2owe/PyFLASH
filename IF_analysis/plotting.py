@@ -6019,6 +6019,52 @@ def _append_animal_n_multiline(label, n_animals=None, include_N=False):
     return f"{label}\nN={int(n_animals)}"
 
 
+def _format_specificity_title_fragment(specificity):
+    if specificity is None:
+        return ""
+    if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
+        return ""
+
+    spec_key, *raw_vals = specificity
+    values = [
+        str(value).strip()
+        for value in _flatten_specificity_values(raw_vals)
+        if str(value).strip() != ""
+    ]
+    if len(values) == 0:
+        return ""
+
+    key_label = get_display_name(spec_key, minimal=True)
+    if len(values) == 1:
+        value_label = values[0]
+    else:
+        value_label = " + ".join(values)
+    return f"{key_label}={value_label}"
+
+
+def _build_pie_context_title(label, *, group_name=None, specificity=None,
+                             n_animals=None, include_N=False):
+    header_parts = []
+    group_text = str(group_name).strip() if group_name is not None else ""
+    if group_text != "":
+        header_parts.append(group_text)
+    specificity_text = _format_specificity_title_fragment(specificity)
+    if specificity_text != "":
+        header_parts.append(specificity_text)
+
+    title_lines = []
+    if len(header_parts) > 0:
+        title_lines.append(" | ".join(header_parts))
+    title_lines.append(
+        _append_animal_n_inline(
+            label,
+            n_animals=n_animals,
+            include_N=include_N,
+        )
+    )
+    return "\n".join(title_lines)
+
+
 def _resolve_include_N_flag(include_N=False, include_n=None):
     if include_n is not None:
         return bool(include_n)
@@ -8954,8 +9000,10 @@ def pie_chart_action(ctx: Context, state: dict,
             ax.axis("equal")
     if str(plot_format).strip().casefold() != "bar":
         ax.set_title(
-            _append_animal_n_inline(
+            _build_pie_context_title(
                 x_label,
+                group_name=group_name,
+                specificity=specificity,
                 n_animals=n_animals,
                 include_N=include_N,
             ),
@@ -9092,8 +9140,10 @@ def combo_pie_action(ctx: Context, state: dict,
             ax.axis("equal")
     if str(plot_format).strip().casefold() != "bar":
         ax.set_title(
-            _append_animal_n_inline(
+            _build_pie_context_title(
                 x_label,
+                group_name=group_name,
+                specificity=specificity,
                 n_animals=n_animals,
                 include_N=include_N,
             ),

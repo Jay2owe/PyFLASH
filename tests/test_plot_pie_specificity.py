@@ -511,6 +511,34 @@ def test_plot_pie_charts_labels_remap_displayed_bins():
     assert result["pie_labels"] == [["Negative", "Positive"], ["Positive"]]
 
 
+def test_plot_pie_charts_titles_include_group_and_specificity_context(monkeypatch):
+    experiment = _build_marker_specificity_experiment()
+    titles_seen = []
+    original = Axes.set_title
+
+    def _recording_set_title(self, label, *args, **kwargs):
+        titles_seen.append(str(label))
+        return original(self, label, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "set_title", _recording_set_title)
+
+    plotting.plot_pie_charts(
+        experiment,
+        marker="CK1d",
+        x_attr="Coloc_mCherry",
+        threshold=[30],
+        factor="Genotype",
+        specificity=("Time", "WeekFour"),
+        show_counts=True,
+        show_pct=False,
+        save=False,
+    )
+
+    assert len(titles_seen) == 2
+    assert any("Syn" in title and "WeekFour" in title for title in titles_seen)
+    assert any("APP" in title and "WeekFour" in title for title in titles_seen)
+
+
 def test_plot_pie_charts_bar_order_uses_raw_category_order_after_label_remap(monkeypatch):
     experiment = _build_marker_specificity_experiment()
     legend_labels_seen = []
