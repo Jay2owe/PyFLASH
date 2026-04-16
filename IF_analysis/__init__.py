@@ -26,7 +26,12 @@ from IF_analysis.serialization import save_state, load_state, normalize_paths
 from IF_analysis.config import Config
 from IF_analysis.modelling import iterative_best_fit
 from IF_analysis.spec import run_spec
-from IF_analysis.plotting import cheat_sheet
+from IF_analysis.plotting import (
+    cheat_sheet,
+    set_axis_limits,
+    clear_axis_limits,
+    lock_axis_limits,
+)
 from IF_analysis.export import format_summary_for_display
 from IF_analysis._logging import set_verbosity, silent, verbose, Verbosity
 import IF_analysis.stats as stats
@@ -49,6 +54,7 @@ __all__ = [
     "run_spec",
     # Reference
     "cheat_sheet",
+    "set_axis_limits", "clear_axis_limits", "lock_axis_limits",
     "format_summary_for_display",
     # Stats module
     "stats",

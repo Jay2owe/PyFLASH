@@ -3626,6 +3626,239 @@ def _apply_axis_range(ax, axis_name, axis_range):
     setter(low, high)
 
 
+def _coerce_axis_limit_pair(value, *, name='axis'):
+    """Coerce a `(low, high)` pair (or None) to a validated float tuple."""
+    if value is None:
+        return None
+    try:
+        low, high = value
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Axis limits for '{name}' must be a (min, max) pair."
+        ) from exc
+    if low is None and high is None:
+        return None
+    low_f = None if low is None else float(low)
+    high_f = None if high is None else float(high)
+    for bound in (low_f, high_f):
+        if bound is not None and not np.isfinite(bound):
+            raise ValueError(f"Axis limits for '{name}' must be finite numbers.")
+    if low_f is not None and high_f is not None and low_f == high_f:
+        raise ValueError(
+            f"Axis limits for '{name}' must have distinct min and max."
+        )
+    return (low_f, high_f)
+
+
+def _get_axis_limits_registry(experiment, *, create=False):
+    """Return the experiment's axis-limit registry dict, or an empty dict."""
+    if experiment is None:
+        return {}
+    current = getattr(experiment, 'axis_limits', None)
+    if isinstance(current, dict):
+        return current
+    if create:
+        setattr(experiment, 'axis_limits', {})
+        return experiment.axis_limits
+    return {}
+
+
+def _lookup_axis_registry(experiment, column_name):
+    """Look up a stored (low, high) axis range for `column_name`."""
+    if experiment is None or column_name is None:
+        return None
+    registry = _get_axis_limits_registry(experiment)
+    if not registry:
+        return None
+    stored = registry.get(column_name)
+    if stored is None:
+        return None
+    try:
+        return _coerce_axis_limit_pair(stored, name=str(column_name))
+    except ValueError:
+        return None
+
+
+def _resolve_effective_axis_range(experiment, column_name, explicit_range):
+    """Explicit range wins; otherwise consult the experiment registry."""
+    if explicit_range is not None:
+        return explicit_range
+    return _lookup_axis_registry(experiment, column_name)
+
+
+def _summary_for_queue_share(summary_df, specificity):
+    """Return the subset of `summary_df` relevant for queue-share ranges.
+
+    If `specificity` is a single filter tuple, apply it. If it is a queue of
+    tuples, union across all queued filters so sibling sub-calls share the
+    same combined range. ``None`` returns the summary unchanged.
+    """
+    if not isinstance(summary_df, pd.DataFrame) or summary_df.empty:
+        return summary_df
+    if specificity is None:
+        return summary_df
+    if _is_specificity_queue(specificity):
+        frames = []
+        for spec in _iter_specificities(specificity):
+            subset = _filter_df_by_specificity(summary_df, spec)
+            if isinstance(subset, pd.DataFrame) and not subset.empty:
+                frames.append(subset)
+        if not frames:
+            return summary_df
+        # Keep duplicate rows: we only need the frame for min/max of numeric
+        # columns, and summary columns can contain unhashable values (lists)
+        # that would break a dedup pass.
+        return pd.concat(frames)
+    filtered = _filter_df_by_specificity(summary_df, specificity)
+    if isinstance(filtered, pd.DataFrame) and not filtered.empty:
+        return filtered
+    return summary_df
+
+
+def _compute_queue_shared_ranges(df_source, columns):
+    """Return `{column: (low, high)}` for reused columns with finite data.
+
+    Columns not present in `df_source` or with <2 distinct finite values are
+    skipped so downstream auto-scaling can still fall back to matplotlib.
+    """
+    if df_source is None or not isinstance(df_source, pd.DataFrame):
+        return {}
+    result = {}
+    for col in columns:
+        if col is None or col in result:
+            continue
+        if col not in df_source.columns:
+            continue
+        series = _to_numeric_excluding_not_included(df_source[col]).dropna()
+        if len(series) == 0:
+            continue
+        low = float(series.min())
+        high = float(series.max())
+        if not (np.isfinite(low) and np.isfinite(high)) or low == high:
+            continue
+        result[col] = (low, high)
+    return result
+
+
+def set_axis_limits(experiment, mapping=None, **kwargs):
+    """Register manual axis ranges on `experiment` for reuse across plots.
+
+    The registry is consulted by plotting functions (regressions, scatter 3D,
+    histograms, ridgelines, ECDFs, mean bars) when their own ``x_range`` /
+    ``y_range`` / ``ymax`` parameters are not passed. Explicit per-call bounds
+    always override the registry.
+
+    Parameters
+    ----------
+    experiment : Experiment-like
+        Any object; the dict is stored on ``experiment.axis_limits``.
+    mapping : dict, optional
+        ``{column: (low, high)}``. Pass ``None`` as the value to clear a key.
+    **kwargs
+        Shorthand for ``{column: (low, high)}`` entries.
+
+    Examples
+    --------
+    >>> set_axis_limits(exp, {'PeriodMean': (22.0, 26.0)})
+    >>> set_axis_limits(exp, PeriodMean=(22.0, 26.0))
+    """
+    registry = _get_axis_limits_registry(experiment, create=True)
+    merged = {}
+    if mapping is not None:
+        if not isinstance(mapping, dict):
+            raise TypeError("`mapping` must be a dict of column -> (min, max).")
+        merged.update(mapping)
+    merged.update(kwargs)
+    for col, rng in merged.items():
+        key = str(col)
+        if rng is None:
+            registry.pop(key, None)
+            continue
+        coerced = _coerce_axis_limit_pair(rng, name=key)
+        if coerced is None:
+            registry.pop(key, None)
+            continue
+        registry[key] = coerced
+    return dict(registry)
+
+
+def clear_axis_limits(experiment, columns=None):
+    """Remove registry entries (all, or the given column subset)."""
+    registry = _get_axis_limits_registry(experiment)
+    if not registry:
+        return {}
+    if columns is None:
+        registry.clear()
+        return dict(registry)
+    if isinstance(columns, str):
+        columns = [columns]
+    for col in columns:
+        registry.pop(str(col), None)
+    return dict(registry)
+
+
+def lock_axis_limits(experiment, columns=None, *, source='summary',
+                     overwrite=False):
+    """Auto-populate the registry from the experiment's data ranges.
+
+    Parameters
+    ----------
+    experiment : Experiment-like
+        Source of data tables.
+    columns : list or None
+        Specific columns to lock. ``None`` = every numeric column in `source`.
+    source : str
+        ``'summary'`` uses ``experiment.summary``; any other value is treated
+        as a marker key and uses ``experiment.data[source].df``.
+    overwrite : bool
+        By default, existing registry entries are preserved. Set True to
+        replace them with freshly computed bounds.
+
+    Returns
+    -------
+    dict
+        A snapshot of the registry after locking.
+    """
+    registry = _get_axis_limits_registry(experiment, create=True)
+    if str(source) == 'summary':
+        df = getattr(experiment, 'summary', None)
+    else:
+        try:
+            df = experiment.data[source].df.reset_index()
+        except (AttributeError, KeyError) as exc:
+            raise ValueError(
+                f"Unknown lock_axis_limits source '{source}'."
+            ) from exc
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return dict(registry)
+
+    if columns is None:
+        target_cols = [
+            c for c in df.columns
+            if pd.api.types.is_numeric_dtype(df[c])
+            or df[c].dtype == object
+        ]
+    elif isinstance(columns, str):
+        target_cols = [columns]
+    else:
+        target_cols = [str(c) for c in columns]
+
+    for col in target_cols:
+        if col not in df.columns:
+            continue
+        if not overwrite and col in registry:
+            continue
+        series = _to_numeric_excluding_not_included(df[col]).dropna()
+        if len(series) == 0:
+            continue
+        low = float(series.min())
+        high = float(series.max())
+        if not (np.isfinite(low) and np.isfinite(high)) or low == high:
+            continue
+        registry[col] = (low, high)
+    return dict(registry)
+
+
 def _clip_segment_to_rect(x0, y0, x1, y1, x_limits, y_limits):
     """Clip a line segment to an axis-aligned rectangle."""
     xmin, xmax = sorted((float(x_limits[0]), float(x_limits[1])))
@@ -3661,6 +3894,144 @@ def _clip_segment_to_rect(x0, y0, x1, y1, x_limits, y_limits):
         (float(x0) + t0 * dx, float(y0) + t0 * dy),
         (float(x0) + t1 * dx, float(y0) + t1 * dy),
     )
+
+
+def _axis_lower_bound_is_explicit(experiment, column, explicit_range):
+    """Return True when the lower bound of an axis was pinned by the caller.
+
+    Used by plotting functions that want to pad the bottom/left of an axis
+    without overriding a user-supplied lower bound or a registry entry.
+    """
+    if explicit_range is not None:
+        try:
+            low = explicit_range[0]
+        except (TypeError, IndexError):
+            low = None
+        if low is not None:
+            return True
+    reg = _lookup_axis_registry(experiment, column)
+    if reg is not None and reg[0] is not None:
+        return True
+    return False
+
+
+def _axis_upper_bound_is_explicit(experiment, column, explicit_range):
+    """Mirror of `_axis_lower_bound_is_explicit` for the top/right side."""
+    if explicit_range is not None:
+        try:
+            high = explicit_range[1]
+        except (TypeError, IndexError):
+            high = None
+        if high is not None:
+            return True
+    reg = _lookup_axis_registry(experiment, column)
+    if reg is not None and reg[1] is not None:
+        return True
+    return False
+
+
+def _pad_axis_bounds(ax, margin, *,
+                     pad_x_low=True, pad_x_high=True,
+                     pad_y_low=True, pad_y_high=True):
+    """Extend x/y bounds so the nearest data point sits at ``margin`` fraction
+    of the axis span from each spine.
+
+    Each side is padded independently when its current margin is below the
+    target. When both sides of an axis need padding we solve simultaneously,
+    because extending one side changes the span and therefore the fraction
+    on the opposite side. If the current view already satisfies the target
+    on a side, the axis is left alone — we only ever extend, never shrink.
+    """
+    if margin is None:
+        return
+    try:
+        margin_f = float(margin)
+    except (TypeError, ValueError):
+        return
+    if not np.isfinite(margin_f) or margin_f <= 0 or margin_f >= 0.5:
+        return
+    _pad_axis_bounds_one(ax, 'x', margin_f, pad_x_low, pad_x_high)
+    _pad_axis_bounds_one(ax, 'y', margin_f, pad_y_low, pad_y_high)
+
+
+def _scatter_axis_extent(ax, axis_index):
+    """Return (min, max) from scatter-collection offsets on a given axis.
+
+    Prefers matplotlib ``PathCollection`` offsets (scatter markers) so that
+    extrapolated regression lines — whose clipped endpoints can sit far
+    outside the scatter cloud — don't distort the margin calculation.
+    """
+    vals = []
+    for coll in getattr(ax, 'collections', []):
+        try:
+            offsets = np.asarray(coll.get_offsets(), dtype=float)
+        except Exception:
+            continue
+        if offsets.ndim != 2 or offsets.shape[0] == 0 or offsets.shape[1] <= axis_index:
+            continue
+        col = offsets[:, axis_index]
+        finite = col[np.isfinite(col)]
+        if finite.size:
+            vals.append(finite)
+    if not vals:
+        return (None, None)
+    all_vals = np.concatenate(vals)
+    return (float(np.min(all_vals)), float(np.max(all_vals)))
+
+
+def _pad_axis_bounds_one(ax, axis_name, margin_f, pad_low, pad_high):
+    if not pad_low and not pad_high:
+        return
+    if axis_name == 'x':
+        lo, hi = ax.get_xlim()
+        dmin, dmax = _scatter_axis_extent(ax, 0)
+        setter = ax.set_xlim
+        datalim = ax.dataLim.intervalx
+    else:
+        lo, hi = ax.get_ylim()
+        dmin, dmax = _scatter_axis_extent(ax, 1)
+        setter = ax.set_ylim
+        datalim = ax.dataLim.intervaly
+    if dmin is None:
+        try:
+            dmin = float(datalim[0])
+        except Exception:
+            return
+    if dmax is None:
+        try:
+            dmax = float(datalim[1])
+        except Exception:
+            return
+    if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo
+            and np.isfinite(dmin) and np.isfinite(dmax) and dmax > dmin):
+        return
+    span = hi - lo
+    low_frac = (dmin - lo) / span
+    high_frac = (hi - dmax) / span
+    need_low = pad_low and low_frac < margin_f
+    need_high = pad_high and high_frac < margin_f
+    if not need_low and not need_high:
+        return
+    if need_low and need_high:
+        data_span = dmax - dmin
+        new_span = data_span / (1.0 - 2.0 * margin_f)
+        pad = margin_f * new_span
+        new_lo = dmin - pad
+        new_hi = dmax + pad
+    elif need_low:
+        new_lo = (dmin - margin_f * hi) / (1.0 - margin_f)
+        new_hi = hi
+    else:
+        new_hi = (dmax - margin_f * lo) / (1.0 - margin_f)
+        new_lo = lo
+    # Never shrink.
+    if new_lo > lo:
+        new_lo = lo
+    if new_hi < hi:
+        new_hi = hi
+    if new_lo == lo and new_hi == hi:
+        return
+    setter(new_lo, new_hi)
 
 
 def _clip_regression_line_to_axes(line, x_limits, y_limits):
@@ -9185,6 +9556,14 @@ def regression_action(ctx: Context, state: dict,
     df[x] = _normalize_regression_series(df[x], normalize_x, axis_name=x)
     df[y] = _normalize_regression_series(df[y], normalize_y, axis_name=y)
 
+    # Fall back to the experiment-level axis registry when no explicit bounds
+    # were supplied. Normalization remaps values, so the registry is only a
+    # valid reference when the axis is rendered in native units.
+    if not normalize_x:
+        x_range = _resolve_effective_axis_range(ctx.experiment, x, x_range)
+    if not normalize_y:
+        y_range = _resolve_effective_axis_range(ctx.experiment, y, y_range)
+
     if df.empty:
         set_display_name(ax, y, x, compact_per=True, fontdict={'weight': 'normal'}, size=25)
         sns.despine(trim=False, ax=ax)
@@ -9341,6 +9720,13 @@ def scatter_3d_action(ctx: Context, state: dict,
     df[x] = _normalize_regression_series(df[x], normalize_x, axis_name=x)
     df[y] = _normalize_regression_series(df[y], normalize_y, axis_name=y)
     df[z] = _normalize_regression_series(df[z], normalize_z, axis_name=z)
+
+    if not normalize_x:
+        x_range = _resolve_effective_axis_range(ctx.experiment, x, x_range)
+    if not normalize_y:
+        y_range = _resolve_effective_axis_range(ctx.experiment, y, y_range)
+    if not normalize_z:
+        z_range = _resolve_effective_axis_range(ctx.experiment, z, z_range)
 
     if df.empty:
         return {'scatter': None, 'group': group_name}
@@ -10016,6 +10402,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
         fig.set_size_inches(n_groups * 2/3, 5, forward=True)
 
         all_vals = pd.concat(col_dfs) if len(col_dfs) > 0 else pd.Series(dtype=float)
+        registry_range = _lookup_axis_registry(experiment, col)
         if len(all_vals) > 0:
             per_group_tops = []
             for s in col_dfs:
@@ -10026,9 +10413,17 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 sem_s = float(s.std(ddof=1) / np.sqrt(len(s))) if len(s) > 1 else 0.0
                 per_group_tops.append(max(float(s.max()), mean_s + sem_s))
             top_val = max(per_group_tops) if len(per_group_tops) > 0 else float(all_vals.max())
-            ymax = round_up_to_nearest_5(top_val)
+            if registry_range is not None and registry_range[1] is not None:
+                # Respect the registered upper bound so sibling figures line up
+                # even when individual groups don't hit the ceiling.
+                ymax = float(registry_range[1])
+            else:
+                ymax = round_up_to_nearest_5(top_val)
             if ymax > 0:
-                ax.set_ylim(ymax=ymax)
+                if registry_range is not None and registry_range[0] is not None:
+                    ax.set_ylim(bottom=float(registry_range[0]), top=ymax)
+                else:
+                    ax.set_ylim(ymax=ymax)
                 # Keep top major tick exactly at ymax so the top-left tick cap
                 # is present consistently across columns.
                 ax.yaxis.set_major_locator(LinearLocator(numticks=5))
@@ -10700,7 +11095,7 @@ def plot_regressions(experiment, x, y,
                      specificity=None, roi=None, save=True, combine=False,
                      x_range=None, y_range=None,
                      xmin=None, xmax=None, ymin=None, ymax=None,
-                     clip_fit_line=True):
+                     clip_fit_line=True, share_axes=True, margin=0.1):
     """
     Regression plot: one figure per condition/factor, or a combined overlay.
     Supports queued x/y inputs:
@@ -10709,6 +11104,29 @@ def plot_regressions(experiment, x, y,
         - x list, y list -> all x×y combinations
     `normalize_x` / `normalize_y` accept False, True (= 0-1 min-max), a
     `(min, max)` output range, or 'Z-score'.
+
+    Shared axis scales
+    ------------------
+    When ``x`` or ``y`` is a list, every column that appears in more than one
+    combination gets the same axis range in each panel (``share_axes=True``,
+    default). Pass ``share_axes=False`` to let each panel auto-scale. Explicit
+    ``x_range`` / ``y_range`` / ``xmin`` / ``xmax`` etc. always win.
+
+    For separate calls (e.g. different markers against the same x column),
+    register the shared column once via
+    ``IF_analysis.set_axis_limits(exp, {'PeriodMean': (22, 26)})`` and every
+    subsequent plot picks the bounds up automatically.
+
+    Axis breathing room
+    -------------------
+    ``margin`` (default ``0.1``) is the target fractional distance between
+    every spine and the nearest data point. With ``margin=0.1`` the lowest
+    and highest x/y values each sit 10% of the axis span off their spines.
+    Each side is padded independently and only when the autoscaled view
+    leaves less breathing room than the target — we never shrink the axis.
+    Sides that the caller pinned (``x_range`` / ``y_range`` / ``xmin`` /
+    ``xmax`` / ``ymin`` / ``ymax`` or a registry entry with that bound set)
+    are left untouched. Must be < 0.5. Pass ``margin=0`` to disable.
     """
     x_range = _merge_axis_range(x_range, xmin, xmax)
     y_range = _merge_axis_range(y_range, ymin, ymax)
@@ -10724,7 +11142,8 @@ def plot_regressions(experiment, x, y,
                 normalize_x=normalize_x, normalize_y=normalize_y,
                 specificity=specificity, roi=_rb, save=save, combine=combine,
                 x_range=x_range, y_range=y_range,
-                clip_fit_line=clip_fit_line,
+                clip_fit_line=clip_fit_line, share_axes=share_axes,
+                margin=margin,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -10738,10 +11157,54 @@ def plot_regressions(experiment, x, y,
         y_values = _flatten_specificity_values([y]) if y_is_queue else [y]
         if len(x_values) == 0 or len(y_values) == 0:
             raise ValueError("Queued x/y inputs must contain at least one value.")
+
+        # Pre-compute shared ranges for columns that appear in more than one
+        # combination so sibling panels line up on comparable axes.
+        shared_ranges = {}
+        if share_axes and not normalize_x and not normalize_y:
+            x_counts = pd.Series(x_values).value_counts()
+            y_counts = pd.Series(y_values).value_counts()
+            # X column is repeated if len(y_values) > 1; Y column is repeated
+            # if len(x_values) > 1. Also pick up any literal duplicates.
+            shared_cols = set()
+            for col, n in x_counts.items():
+                if n > 1 or len(y_values) > 1:
+                    shared_cols.add(col)
+            for col, n in y_counts.items():
+                if n > 1 or len(x_values) > 1:
+                    shared_cols.add(col)
+            shared_cols -= set(_get_axis_limits_registry(experiment).keys())
+            summary_df = getattr(experiment, 'summary', None)
+            # Restrict to rows that the active specificity/queue will actually
+            # plot, otherwise rows filtered out downstream still widen the
+            # shared range.
+            scoped_df = _summary_for_queue_share(summary_df, specificity)
+            shared_ranges = _compute_queue_shared_ranges(scoped_df, shared_cols)
+            # Pre-pad so the data minimum sits at `margin` fraction of the
+            # axis span from the spine, matching the teardown semantics. Child
+            # calls treat this padded range as a pinned bound and skip
+            # further padding.
+            try:
+                margin_f = float(margin) if margin is not None else 0.0
+            except (TypeError, ValueError):
+                margin_f = 0.0
+            if np.isfinite(margin_f) and 0 < margin_f < 0.5:
+                def _pad_both(low, high):
+                    data_span = high - low
+                    new_span = data_span / (1.0 - 2.0 * margin_f)
+                    pad = margin_f * new_span
+                    return (low - pad, high + pad)
+                shared_ranges = {
+                    col: _pad_both(low, high)
+                    for col, (low, high) in shared_ranges.items()
+                }
+
         queued_outputs = {}
         for x_val in x_values:
             for y_val in y_values:
                 key = (x_val, y_val)
+                sub_x_range = x_range if x_range is not None else shared_ranges.get(x_val)
+                sub_y_range = y_range if y_range is not None else shared_ranges.get(y_val)
                 queued_outputs[key] = plot_regressions(
                     experiment,
                     x=x_val,
@@ -10755,9 +11218,11 @@ def plot_regressions(experiment, x, y,
                     roi=roi,
                     save=save,
                     combine=combine,
-                    x_range=x_range,
-                    y_range=y_range,
+                    x_range=sub_x_range,
+                    y_range=sub_y_range,
                     clip_fit_line=clip_fit_line,
+                    share_axes=share_axes,
+                    margin=margin,
                 )
         return queued_outputs
 
@@ -10770,7 +11235,8 @@ def plot_regressions(experiment, x, y,
                 normalize_x=normalize_x, normalize_y=normalize_y,
                 specificity=spec, roi=roi, save=save, combine=combine,
                 x_range=x_range, y_range=y_range,
-                clip_fit_line=clip_fit_line,
+                clip_fit_line=clip_fit_line, share_axes=share_axes,
+                margin=margin,
             )
         return queued_outputs
 
@@ -10795,6 +11261,16 @@ def plot_regressions(experiment, x, y,
             state['ax'] = ax
             state['regression_stats_entries'] = []
 
+    # Margin applies to each spine independently whenever the corresponding
+    # bound wasn't pinned by the caller or the axis-limit registry.
+    # Normalized axes ([0, 1] / (min, max) / Z-score) benefit from the same
+    # breathing room so scatter points at the edges don't sit on the spine.
+    margin_enabled = bool(margin)
+    pad_x_low = margin_enabled and not _axis_lower_bound_is_explicit(experiment, x, x_range)
+    pad_x_high = margin_enabled and not _axis_upper_bound_is_explicit(experiment, x, x_range)
+    pad_y_low = margin_enabled and not _axis_lower_bound_is_explicit(experiment, y, y_range)
+    pad_y_high = margin_enabled and not _axis_upper_bound_is_explicit(experiment, y, y_range)
+
     def teardown(ctx, state, results):
         name, _ = _resolve_group_label_color(ctx)
         name = name or 'Combined'
@@ -10809,6 +11285,11 @@ def plot_regressions(experiment, x, y,
             ax = state.get('ax')
             if fig is None or ax is None:
                 return
+            _pad_axis_bounds(
+                ax, margin,
+                pad_x_low=pad_x_low, pad_x_high=pad_x_high,
+                pad_y_low=pad_y_low, pad_y_high=pad_y_high,
+            )
             _annotate_regression_stats_summary(
                 ax,
                 state.get('regression_stats_entries', []),
@@ -10827,6 +11308,11 @@ def plot_regressions(experiment, x, y,
             return
 
         fig = state['fig']
+        _pad_axis_bounds(
+            state['ax'], margin,
+            pad_x_low=pad_x_low, pad_x_high=pad_x_high,
+            pad_y_low=pad_y_low, pad_y_high=pad_y_high,
+        )
         _annotate_regression_stats_summary(
             state['ax'],
             state.get('regression_stats_entries', []),
@@ -10858,10 +11344,12 @@ def plot_scatter_3d(experiment, x, y, z,
                     by='conditions', factor=None,
                     specificity=None, roi=None, save=True, combine=False,
                     x_range=None, y_range=None, z_range=None,
+                    xmin=None, xmax=None, ymin=None, ymax=None,
+                    zmin=None, zmax=None,
                     normalize_x=False, normalize_y=False, normalize_z=False,
                     point_size=40, size_by=None, size_factor=1.0, alpha=0.7,
                     elevation=None, azimuth=None,
-                    figsize=(10, 8)):
+                    figsize=(10, 8), share_axes=True):
     """
     3D scatter plot: one figure per condition/factor, or a combined overlay.
     Supports queued x/y/z inputs:
@@ -10873,7 +11361,16 @@ def plot_scatter_3d(experiment, x, y, z,
         - point_size sets the baseline marker area
         - size_by maps marker size from a numeric summary column
         - size_factor multiplies the final marker sizes
+    Shared axis scales:
+        - `share_axes=True` (default) forces columns reused across queued
+          combinations to use the same range.
+        - Set ``experiment.axis_limits`` via ``set_axis_limits`` to share
+          ranges across separate calls.
     """
+    x_range = _merge_axis_range(x_range, xmin, xmax)
+    y_range = _merge_axis_range(y_range, ymin, ymax)
+    z_range = _merge_axis_range(z_range, zmin, zmax)
+
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -10887,7 +11384,7 @@ def plot_scatter_3d(experiment, x, y, z,
                 normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
                 point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
                 elevation=elevation, azimuth=azimuth,
-                figsize=figsize,
+                figsize=figsize, share_axes=share_axes,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -10903,22 +11400,51 @@ def plot_scatter_3d(experiment, x, y, z,
         z_values = _flatten_specificity_values([z]) if z_is_queue else [z]
         if len(x_values) == 0 or len(y_values) == 0 or len(z_values) == 0:
             raise ValueError("Queued x/y/z inputs must contain at least one value.")
+
+        shared_ranges = {}
+        if share_axes and not normalize_x and not normalize_y and not normalize_z:
+            # A column on axis A is "shared" whenever some other combo uses the
+            # same column on the same axis, i.e. either the value repeats along
+            # that axis or at least one of the other axes has multiple values.
+            shared_cols = set()
+            y_by_z = len(y_values) * len(z_values)
+            x_by_z = len(x_values) * len(z_values)
+            x_by_y = len(x_values) * len(y_values)
+            for col in set(x_values):
+                if x_values.count(col) > 1 or y_by_z > 1:
+                    shared_cols.add(col)
+            for col in set(y_values):
+                if y_values.count(col) > 1 or x_by_z > 1:
+                    shared_cols.add(col)
+            for col in set(z_values):
+                if z_values.count(col) > 1 or x_by_y > 1:
+                    shared_cols.add(col)
+            shared_cols -= set(_get_axis_limits_registry(experiment).keys())
+            summary_df = getattr(experiment, 'summary', None)
+            shared_ranges = _compute_queue_shared_ranges(summary_df, shared_cols)
+            # scatter_3d keeps its default autoscale behaviour (no pad) so no
+            # extra margin is folded in here. A future `margin` kwarg on
+            # plot_scatter_3d would hook in at this spot.
+
         queued_outputs = {}
         for x_val in x_values:
             for y_val in y_values:
                 for z_val in z_values:
                     key = (x_val, y_val, z_val)
+                    sub_x_range = x_range if x_range is not None else shared_ranges.get(x_val)
+                    sub_y_range = y_range if y_range is not None else shared_ranges.get(y_val)
+                    sub_z_range = z_range if z_range is not None else shared_ranges.get(z_val)
                     queued_outputs[key] = plot_scatter_3d(
                         experiment,
                         x=x_val, y=y_val, z=z_val,
                         by=by, factor=factor,
                         specificity=specificity, roi=roi,
                         save=save, combine=combine,
-                        x_range=x_range, y_range=y_range, z_range=z_range,
+                        x_range=sub_x_range, y_range=sub_y_range, z_range=sub_z_range,
                         normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
                         point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
                         elevation=elevation, azimuth=azimuth,
-                        figsize=figsize,
+                        figsize=figsize, share_axes=share_axes,
                     )
         return queued_outputs
 
@@ -10933,7 +11459,7 @@ def plot_scatter_3d(experiment, x, y, z,
                 normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
                 point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
                 elevation=elevation, azimuth=azimuth,
-                figsize=figsize,
+                figsize=figsize, share_axes=share_axes,
             )
         return queued_outputs
 
@@ -11028,7 +11554,8 @@ def plot_histograms(experiment, marker, x_attr,
                     alpha=0.5, stat='count',
                     merge=False, combine=False, invert_x=False, ymax=None, save=True,
                     specificity=None, roi=None,
-                    bin_range=None, bin_edges=None, share_bins=False):
+                    bin_range=None, bin_edges=None, share_bins=False,
+                    xmin=None, xmax=None, share_axes=True):
     """
     Histogram: one figure per condition/factor, or a combined overlay.
     Supports queued marker/x_attr inputs:
@@ -11043,9 +11570,14 @@ def plot_histograms(experiment, marker, x_attr,
     Bin behavior:
     - combine=True always shares bins across groups.
     - share_bins=True enables shared bins across separate per-group figures.
-    - Use bin_range=(min, max) for exact histogram range.
+    - Use bin_range=(min, max) / xmin / xmax for exact histogram range.
     - Use bin_edges=[...] for exact shared bin edges.
+    Shared axis scales:
+    - ``share_axes=True`` (default) lets the experiment-level axis registry
+      (see ``set_axis_limits``) supply ``bin_range`` and ``ymax`` when they
+      are not passed explicitly.
     """
+    bin_range = _merge_axis_range(bin_range, xmin, xmax)
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -11059,6 +11591,7 @@ def plot_histograms(experiment, marker, x_attr,
                 merge=merge, combine=combine, invert_x=invert_x, ymax=ymax, save=save,
                 specificity=specificity, roi=_rb,
                 bin_range=bin_range, bin_edges=bin_edges, share_bins=share_bins,
+                share_axes=share_axes,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -11097,6 +11630,7 @@ def plot_histograms(experiment, marker, x_attr,
                     save=save,
                     specificity=specificity,
                     roi=roi,
+                    share_axes=share_axes,
                 )
         return queued_outputs
 
@@ -11110,11 +11644,29 @@ def plot_histograms(experiment, marker, x_attr,
                 bin_edges=bin_edges, share_bins=share_bins, kde=kde,
                 alpha=alpha, stat=stat, merge=merge, combine=combine, invert_x=invert_x,
                 ymax=ymax, save=save, specificity=spec, roi=roi,
+                share_axes=share_axes,
             )
         return queued_outputs
 
     marker_key = _resolve_marker_data_key(experiment, marker)
     x = _resolve_histogram_x_column(experiment, marker_key, x_attr)
+    if share_axes and bin_range is None:
+        bin_range = _lookup_axis_registry(experiment, x)
+    # Fill any half-bounds (from partial xmin/xmax or a registry entry such as
+    # `(None, 25.0)`) from the marker data so downstream validation doesn't
+    # choke on None.
+    if bin_range is not None and (bin_range[0] is None or bin_range[1] is None):
+        marker_df_for_bounds = experiment.data[marker_key].df.reset_index()
+        marker_df_for_bounds = _filter_df_by_specificity(marker_df_for_bounds, specificity)
+        data_values = _to_numeric_excluding_not_included(marker_df_for_bounds[x]).dropna()
+        if len(data_values) == 0:
+            bin_range = None
+        else:
+            data_lo = float(data_values.min())
+            data_hi = float(data_values.max())
+            lo = data_lo if bin_range[0] is None else float(bin_range[0])
+            hi = data_hi if bin_range[1] is None else float(bin_range[1])
+            bin_range = (lo, hi) if hi > lo else None
     level = 'factors' if factor else by
     combine_mode = bool(combine or merge)
     share_bins_mode = bool(combine_mode or share_bins)
@@ -11235,14 +11787,21 @@ def plot_ridgeline(experiment, marker, x_attr,
                    ridge_height=0.85, alpha=0.55,
                    line_width=1.5, bw_adjust=1.0,
                    save=True, specificity=None, roi=None,
-                   bottom_ticks=True, bottom_tick_labels=True):
+                   bottom_ticks=True, bottom_tick_labels=True,
+                   x_range=None, xmin=None, xmax=None, share_axes=True):
     """
     Ridgeline density plot by condition/factor for one marker attribute.
 
     Similar input style to `plot_histograms`:
     - accepts marker and x_attr scalar or list-like (all combinations)
     - supports specificity queue mode
+
+    Shared axis scales:
+    - ``x_range=(min, max)`` / ``xmin`` / ``xmax`` force the x-axis range.
+    - ``share_axes=True`` (default) lets the experiment-level axis registry
+      (see ``set_axis_limits``) supply the x-axis range when none is passed.
     """
+    x_range = _merge_axis_range(x_range, xmin, xmax)
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -11255,6 +11814,7 @@ def plot_ridgeline(experiment, marker, x_attr,
                 line_width=line_width, bw_adjust=bw_adjust,
                 save=save, specificity=specificity, roi=_rb,
                 bottom_ticks=bottom_ticks, bottom_tick_labels=bottom_tick_labels,
+                x_range=x_range, share_axes=share_axes,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -11287,6 +11847,8 @@ def plot_ridgeline(experiment, marker, x_attr,
                     roi=roi,
                     bottom_ticks=bottom_ticks,
                     bottom_tick_labels=bottom_tick_labels,
+                    x_range=x_range,
+                    share_axes=share_axes,
                 )
         return queued_outputs
 
@@ -11308,6 +11870,8 @@ def plot_ridgeline(experiment, marker, x_attr,
                 roi=roi,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
+                x_range=x_range,
+                share_axes=share_axes,
             )
         return queued_outputs
 
@@ -11322,13 +11886,25 @@ def plot_ridgeline(experiment, marker, x_attr,
     if all_values.size == 0:
         raise ValueError(f"No numeric values available for ridgeline plot: {x}")
 
-    x_min = float(np.min(all_values))
-    x_max = float(np.max(all_values))
+    effective_range = x_range
+    if share_axes and effective_range is None:
+        effective_range = _lookup_axis_registry(experiment, x)
+
+    if effective_range is not None:
+        reg_low, reg_high = effective_range
+        data_min = float(np.min(all_values))
+        data_max = float(np.max(all_values))
+        x_min = data_min if reg_low is None else float(reg_low)
+        x_max = data_max if reg_high is None else float(reg_high)
+    else:
+        x_min = float(np.min(all_values))
+        x_max = float(np.max(all_values))
+
     if x_max <= x_min:
         pad = 1.0 if x_min == 0 else abs(x_min) * 0.05
         x_min -= pad
         x_max += pad
-    else:
+    elif effective_range is None:
         pad = (x_max - x_min) * 0.05
         x_min -= pad
         x_max += pad
@@ -11495,14 +12071,21 @@ def plot_ecdf(experiment, marker, x_attr,
               line_width=2.0, alpha=1.0,
               stat='proportion', complementary=False,
               save=True, specificity=None, roi=None,
-              bottom_ticks=True, bottom_tick_labels=True):
+              bottom_ticks=True, bottom_tick_labels=True,
+              x_range=None, xmin=None, xmax=None, share_axes=True):
     """
     ECDF plot by condition/factor for one marker attribute.
 
     Similar input style to `plot_histograms`:
     - accepts marker and x_attr scalar or list-like (all combinations)
     - supports specificity queue mode
+
+    Shared axis scales:
+    - ``x_range=(min, max)`` / ``xmin`` / ``xmax`` force the x-axis range.
+    - ``share_axes=True`` (default) lets the experiment-level axis registry
+      (see ``set_axis_limits``) supply the x-axis range when none is passed.
     """
+    x_range = _merge_axis_range(x_range, xmin, xmax)
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -11515,6 +12098,7 @@ def plot_ecdf(experiment, marker, x_attr,
                 stat=stat, complementary=complementary,
                 save=save, specificity=specificity, roi=_rb,
                 bottom_ticks=bottom_ticks, bottom_tick_labels=bottom_tick_labels,
+                x_range=x_range, share_axes=share_axes,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -11547,6 +12131,8 @@ def plot_ecdf(experiment, marker, x_attr,
                     roi=roi,
                     bottom_ticks=bottom_ticks,
                     bottom_tick_labels=bottom_tick_labels,
+                    x_range=x_range,
+                    share_axes=share_axes,
                 )
         return queued_outputs
 
@@ -11568,12 +12154,18 @@ def plot_ecdf(experiment, marker, x_attr,
                 roi=roi,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
+                x_range=x_range,
+                share_axes=share_axes,
             )
         return queued_outputs
 
     marker_key = _resolve_marker_data_key(experiment, marker)
     x = _resolve_histogram_x_column(experiment, marker_key, x_attr)
     level = 'factors' if factor else by
+
+    effective_x_range = x_range
+    if share_axes and effective_x_range is None:
+        effective_x_range = _lookup_axis_registry(experiment, x)
 
     stat_key = str(stat).strip().casefold()
     if stat_key not in {"proportion", "count"}:
@@ -11605,6 +12197,7 @@ def plot_ecdf(experiment, marker, x_attr,
         name = ctx.factor_value or ctx.condition or 'Combined'
         ax = state.get('ax')
         if ax is not None:
+            _apply_axis_range(ax, 'x', effective_x_range)
             ax.tick_params(
                 axis='x',
                 which='both',
@@ -14617,10 +15210,21 @@ _PARAM_DESCRIPTIONS = {
                             "(min, max), or 'Z-score'.",
     'x_range':              'Manual (min, max) for x-axis.',
     'y_range':              'Manual (min, max) for y-axis.',
+    'z_range':              'Manual (min, max) for z-axis (3D scatter).',
     'xmin':                 'Manual lower limit for x-axis.',
     'xmax':                 'Manual upper limit for x-axis.',
     'ymin':                 'Manual lower limit for y-axis.',
+    'zmin':                 'Manual lower limit for z-axis (3D scatter).',
+    'zmax':                 'Manual upper limit for z-axis (3D scatter).',
+    'share_axes':           'When True (default), consult the experiment-level axis registry '
+                            '(see `set_axis_limits`) for any missing x/y/z bounds, and reuse the '
+                            'same range across queued sibling combinations when a column repeats.',
     'clip_fit_line':        'Trim the regression line to the active x/y limits (default True).',
+    'margin':               'Target fractional distance between every spine and the nearest '
+                            'data point (default 0.1 = 10% of axis span). Each side is padded '
+                            'independently and only when the view has less breathing room than '
+                            'this target; we never shrink. Sides pinned by the caller or the '
+                            'axis registry are left untouched. Must be < 0.5. Pass 0 to disable.',
     # ── Volcano ──────────────────────────────────────────────────────
     'control':              'Name of the control condition for fold-change calculation.',
     'p_threshold':          'Significance threshold for highlighting (default 0.05).',

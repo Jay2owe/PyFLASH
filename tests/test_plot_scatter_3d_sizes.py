@@ -132,6 +132,42 @@ def test_scatter_3d_action_true_normalizes_axes_to_unit_interval():
     plt.close(fig)
 
 
+def test_plot_scatter_3d_queue_shares_singleton_axes(monkeypatch):
+    experiment = _build_scatter_experiment()
+    experiment.summary["y2"] = experiment.summary["y"] + 100.0
+    seen = []
+
+    def _recording(ctx, state, **kwargs):
+        seen.append(
+            (kwargs.get("x"), kwargs.get("y"), kwargs.get("z"),
+             kwargs.get("x_range"), kwargs.get("y_range"), kwargs.get("z_range"))
+        )
+        return {"group": ctx.factor_value or ctx.condition}
+
+    monkeypatch.setattr(plotting, "scatter_3d_action", _recording)
+
+    plotting.plot_scatter_3d(
+        experiment,
+        x="x",
+        y=["y", "y2"],
+        z="z",
+        factor="Genotype",
+        save=False,
+    )
+
+    # Singleton x and z appear in both y combos -> both must be shared.
+    x_ranges = {s[3] for s in seen}
+    z_ranges = {s[5] for s in seen}
+    assert x_ranges == {(1.0, 4.0)}
+    assert z_ranges == {(3.0, 6.0)}
+    # y columns appear in only one combo each -> not shared.
+    y_range_by_col = {}
+    for _, y_col, _, _, y_range, _ in seen:
+        y_range_by_col.setdefault(y_col, set()).add(y_range)
+    assert y_range_by_col["y"] == {None}
+    assert y_range_by_col["y2"] == {None}
+
+
 def test_scatter_3d_action_range_and_zscore_normalize_axes():
     experiment = _build_scatter_experiment()
     ctx = Context(experiment=experiment, factor="Genotype", factor_value="Syn", factor_index=0)
