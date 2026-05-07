@@ -4,11 +4,11 @@ import pandas as pd
 from matplotlib.axes import Axes
 from types import SimpleNamespace
 
-from IF_analysis.conditions import condition, conditionList
+from PyFLASH.conditions import condition, conditionList
 
 matplotlib.use("Agg")
 
-from IF_analysis import plotting
+from PyFLASH import plotting
 
 
 def _build_marker_specificity_experiment():

@@ -9,9 +9,9 @@ import pytest
 
 from types import SimpleNamespace
 
-from IF_analysis import plotting
-from IF_analysis.conditions import condition, conditionList
-from IF_analysis.iteration import Context
+from PyFLASH import plotting
+from PyFLASH.conditions import condition, conditionList
+from PyFLASH.iteration import Context
 
 
 def _build_regression_experiment():

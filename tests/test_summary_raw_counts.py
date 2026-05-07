@@ -1,13 +1,13 @@
 import pytest
 import pandas as pd
 
-from IF_analysis import plotting
-from IF_analysis.batch import Batch
-from IF_analysis.conditions import condition, conditionList
-from IF_analysis.config import Config
-from IF_analysis.experiment import Experiment, _standardize_csv_columns
-from IF_analysis.export import convert_name, convert_raw_name, format_summary_for_display
-from IF_analysis.markers import Antibody, Attribute, objectMarker
+from PyFLASH import plotting
+from PyFLASH.batch import Batch
+from PyFLASH.conditions import condition, conditionList
+from PyFLASH.config import Config
+from PyFLASH.experiment import Experiment, _standardize_csv_columns
+from PyFLASH.export import convert_name, convert_raw_name, format_summary_for_display
+from PyFLASH.markers import Antibody, Attribute, objectMarker
 
 
 def _build_summary_test_experiment():

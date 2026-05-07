@@ -3,10 +3,10 @@ from types import SimpleNamespace
 import pandas as pd
 from openpyxl import load_workbook
 
-from IF_analysis.batch import Batch
-from IF_analysis.conditions import condition, conditionList
-from IF_analysis.export import convert_summary_sheet_name
-from IF_analysis.markers import Antibody
+from PyFLASH.batch import Batch
+from PyFLASH.conditions import condition, conditionList
+from PyFLASH.export import convert_summary_sheet_name
+from PyFLASH.markers import Antibody
 
 
 def _build_export_batch(tmp_path):
@@ -78,6 +78,27 @@ def test_export_all_excel_rebuilds_missing_batch_summaries(tmp_path):
     assert (export_dir / "scn" / "IF_Summary_RegexFilters.txt").exists()
     assert (export_dir / "scn" / "IF_Extended_RegexFilters.txt").exists()
     assert "SCN" in batch.summaries
+
+
+def test_export_excel_resolves_relative_save_path_under_batch_exports(tmp_path, monkeypatch):
+    batch_root = tmp_path / "batch_root"
+    cwd = tmp_path / "cwd"
+    batch_root.mkdir()
+    cwd.mkdir()
+    batch, _ = _build_export_batch(batch_root)
+    batch.summaries = {}
+    monkeypatch.chdir(cwd)
+
+    batch.export_excel(
+        "No Combo",
+        behaviour=False,
+        if_extended=False,
+        if_summary=True,
+    )
+
+    expected_dir = batch_root / "Exports" / "No Combo"
+    assert (expected_dir / "scn" / "IF_Summary.xlsx").exists()
+    assert not (cwd / "No Combo").exists()
 
 
 def test_export_if_summary_recovers_legacy_batch_summary_cache(tmp_path):

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from IF_analysis.experiment import _apply_roi_name_map, _normalize_region_key_series
+from PyFLASH.experiment import _apply_roi_name_map, _normalize_region_key_series
 
 
 def test_normalize_region_key_series_unifies_numeric_and_string_scn_labels():

@@ -1,10 +1,10 @@
 import pandas as pd
 import pytest
 
-from IF_analysis.batch import Batch
-from IF_analysis.conditions import condition, conditionList
-from IF_analysis.experiment import Experiment, NOT_INCLUDED_SENTINEL
-from IF_analysis.markers import Attribute
+from PyFLASH.batch import Batch
+from PyFLASH.conditions import condition, conditionList
+from PyFLASH.experiment import Experiment, NOT_INCLUDED_SENTINEL
+from PyFLASH.markers import Attribute
 
 
 def _build_behavior_experiment(name, behavior_rows, metadata_rows=None):

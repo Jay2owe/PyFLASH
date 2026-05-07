@@ -8,7 +8,7 @@ import pytest
 
 from types import SimpleNamespace
 
-from IF_analysis import plotting
+from PyFLASH import plotting
 
 
 def _stub_experiment(summary=None):
@@ -92,7 +92,7 @@ def test_resolve_effective_axis_range_prefers_explicit():
 
 
 def test_plot_histograms_partial_xmin_xmax_fills_from_data(monkeypatch):
-    from IF_analysis.conditions import condition, conditionList
+    from PyFLASH.conditions import condition, conditionList
 
     class _FakeMarker:
         def __init__(self, df):

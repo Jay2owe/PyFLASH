@@ -1,8 +1,8 @@
 # ══════════════════════════════════════════════════════════════════════
-#  IF_analysis plot specification
+#  PyFLASH plot specification
 #
 #  Usage:
-#    from IF_analysis import run_spec
+#    from PyFLASH import run_spec
 #    run_spec({
 #        'batch1':    batch1,
 #        'CK1I':      batch_CK1I,

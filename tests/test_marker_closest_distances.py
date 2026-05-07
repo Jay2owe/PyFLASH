@@ -1,8 +1,8 @@
 import pandas as pd
 import pytest
 
-from IF_analysis.config import Config
-from IF_analysis.markers import objectMarker
+from PyFLASH.config import Config
+from PyFLASH.markers import objectMarker
 
 
 class DummyExperiment:

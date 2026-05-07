@@ -1,4 +1,4 @@
-# IF_analysis
+# PyFLASH
 
 A Python package for processing and analyzing immunofluorescence (IF) confocal microscopy data exported from ImageJ. Built for the Brancaccio Lab at the UK Dementia Research Institute.
 
@@ -6,7 +6,7 @@ A Python package for processing and analyzing immunofluorescence (IF) confocal m
 
 Takes CSV exports from ImageJ's 3D Object Counter and other plugins, processes them into structured experiment/batch objects, performs statistical analysis, generates publication-quality plots, and exports formatted Excel summaries.
 
-![Architecture](IF_analysis.svg)
+![Architecture](PyFLASH.svg)
 
 ## Installation
 
@@ -21,9 +21,9 @@ pip install -e .
 ## Quick start
 
 ```python
-from IF_analysis import *
-from IF_analysis.plotting import plot_mean_bars, plot_matrices, plot_location
-from IF_analysis.utils import rc_params, get_columns
+from PyFLASH import *
+from PyFLASH.plotting import plot_mean_bars, plot_matrices, plot_location
+from PyFLASH.utils import rc_params, get_columns
 
 rc_params()
 
@@ -112,17 +112,17 @@ crossed = (
 ## Controlling output
 
 ```python
-import IF_analysis
+import PyFLASH
 
 # Set verbosity: 0=error, 1=warning, 2=info (default), 3=hint, 4=debug
-IF_analysis.set_verbosity('debug')
+PyFLASH.set_verbosity('debug')
 
 # Silence all output for a block
-with IF_analysis.silent():
+with PyFLASH.silent():
     batch.export_all_excel()
 
 # Maximize detail for a block
-with IF_analysis.verbose():
+with PyFLASH.verbose():
     batch.processData()
 ```
 
