@@ -11,12 +11,19 @@ Takes CSV exports from ImageJ's 3D Object Counter and other plugins, processes t
 ## Installation
 
 ```bash
-pip install -e .
+pip install PyFLASH-analysis
 ```
+
+## License
+
+PyFLASH is distributed under the BSD 3-Clause License. See `LICENSE`.
 
 **Requires:** Python ≥ 3.9
 
 **Dependencies:** pandas, numpy, matplotlib, seaborn, scipy, statsmodels, scikit-posthocs, openpyxl, read-roi, Pillow
+
+The PyPI distribution is `PyFLASH-analysis`; the Python import package is `PyFLASH`.
+For local development, install from the repository with `pip install -e .`.
 
 ## Quick start
 

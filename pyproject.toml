@@ -1,12 +1,37 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "PyFLASH"
+name = "PyFLASH-analysis"
 version = "0.1.0"
-description = "ImageJ confocal microscopy data processing pipeline for amyloid project"
+description = "ImageJ confocal microscopy data processing and analysis pipeline"
+readme = "README.md"
 requires-python = ">=3.9"
+authors = [
+    { name = "Me" },
+]
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+keywords = [
+    "immunofluorescence",
+    "microscopy",
+    "imagej",
+    "confocal",
+    "analysis",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
 dependencies = [
     "pandas>=1.5",
     "numpy>=1.23",
@@ -23,5 +48,11 @@ dependencies = [
 [project.optional-dependencies]
 windows = ["pywin32"]
 
+[project.urls]
+Homepage = "https://github.com/Jay2owe/IF_analysis"
+Repository = "https://github.com/Jay2owe/IF_analysis"
+Issues = "https://github.com/Jay2owe/IF_analysis/issues"
+
 [tool.setuptools.packages.find]
-include = ["PyFLASH*"]
+include = ["PyFLASH", "PyFLASH.*"]
+exclude = ["tests", "tests.*"]
