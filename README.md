@@ -1,6 +1,6 @@
 # PyFLASH
 
-A Python package for processing and analyzing immunofluorescence (IF) confocal microscopy data exported from ImageJ. Built for the Brancaccio Lab at the UK Dementia Research Institute.
+A Python package for processing and analyzing immunofluorescence (IF) confocal microscopy data exported from the FLASH ImageJ Plugin.
 
 ## What it does
 
