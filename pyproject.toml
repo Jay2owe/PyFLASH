@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "PyFLASH-analysis"
+version = "0.1.3"
+description = "ImageJ confocal microscopy data processing and analysis pipeline"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "Jamie Malcolm", email = "jamiemalcolm12@gmail.com" },
+]
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+keywords = [
+    "immunofluorescence",
+    "microscopy",
+    "imagej",
+    "confocal",
+    "analysis",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "pandas>=1.5",
+    "numpy>=1.23",
+    "matplotlib>=3.6",
+    "seaborn>=0.12",
+    "scipy>=1.9",
+    "statsmodels>=0.14",
+    "scikit-posthocs>=0.9",
+    "openpyxl>=3.0",
+    "read-roi>=1.6",
+    "Pillow>=9.0",
+]
+
+[project.optional-dependencies]
+windows = ["pywin32"]
+
+[project.urls]
+Homepage = "https://github.com/Jay2owe/PyFLASH"
+Repository = "https://github.com/Jay2owe/PyFLASH"
+Issues = "https://github.com/Jay2owe/PyFLASH/issues"
+
+[tool.setuptools.packages.find]
+include = ["PyFLASH", "PyFLASH.*"]
+exclude = ["tests", "tests.*"]

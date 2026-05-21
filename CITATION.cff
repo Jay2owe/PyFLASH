@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use PyFLASH in academic work, please cite the software release you used."
+type: software
+title: "PyFLASH: ImageJ confocal microscopy data processing and analysis pipeline"
+authors:
+  - family-names: "Malcolm"
+    given-names: "Jamie"
+    orcid: "https://orcid.org/0009-0008-3862-2776"
+repository-code: "https://github.com/Jay2owe/PyFLASH"
+url: "https://pypi.org/project/PyFLASH-analysis/"
+license: "BSD-3-Clause"
+version: "0.1.3"
+date-released: "2026-05-21"

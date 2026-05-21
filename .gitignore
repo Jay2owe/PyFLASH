@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tmp/
+build/
+dist/
+*.egg-info/
+
+*.tmp.*
+*.bak
+
+# Local analysis outputs and private data exports.
+No Combo/
+Exports/
+*.xlsx
+*.xls
+*.pkl
+*.pickle
+
+# Local notebooks and agent handoff/context files can contain private paths.
+example_notebook.ipynb
+CONTEXT.md
+HANDOFF.md
+.claude/
