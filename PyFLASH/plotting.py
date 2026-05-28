@@ -69,6 +69,89 @@ except ImportError:
 LOCATION_MARKER_COLORS = stainColors
 
 
+_CORRELATION_ALIASES = {
+    "p": "pearsonr",
+    "pearson": "pearsonr",
+    "pearsonr": "pearsonr",
+    "s": "spearmanr",
+    "spearman": "spearmanr",
+    "spearmanr": "spearmanr",
+    "k": "kendalltau",
+    "kendall": "kendalltau",
+    "kendalltau": "kendalltau",
+}
+
+_CORRELATION_PANDAS_METHODS = {
+    "pearsonr": "pearson",
+    "spearmanr": "spearman",
+    "kendalltau": "kendall",
+}
+
+_CORRELATION_DISPLAY_NAMES = {
+    "pearsonr": "Pearson",
+    "spearmanr": "Spearman",
+    "kendalltau": "Kendall",
+}
+
+
+def _normalize_correlation_method(method):
+    """Normalize accepted correlation method aliases to scipy-style names."""
+    if method is None:
+        return "pearsonr"
+    key = str(method).strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+    if key in _CORRELATION_ALIASES:
+        return _CORRELATION_ALIASES[key]
+    valid = '"pearsonr"/"pearson"/"p", "spearmanr"/"spearman"/"s", or "kendalltau"/"kendall"/"k"'
+    raise ValueError(f"Correlation method must be {valid}; got {method!r}.")
+
+
+def _correlation_pandas_method(method):
+    return _CORRELATION_PANDAS_METHODS[_normalize_correlation_method(method)]
+
+
+def _correlation_display_name(method):
+    return _CORRELATION_DISPLAY_NAMES[_normalize_correlation_method(method)]
+
+
+def _correlation_function(method):
+    from scipy import stats as sp_stats
+
+    method = _normalize_correlation_method(method)
+    if method == "pearsonr":
+        return sp_stats.pearsonr
+    if method == "spearmanr":
+        return sp_stats.spearmanr
+    return sp_stats.kendalltau
+
+
+def _correlation_statistic(result):
+    if hasattr(result, "correlation"):
+        return result.correlation
+    if hasattr(result, "statistic"):
+        return result.statistic
+    return result[0]
+
+
+def _correlation_pvalue(result):
+    if hasattr(result, "pvalue"):
+        return result.pvalue
+    return result[1]
+
+
+def _compute_correlation(x, y, method):
+    """Return (coefficient, p-value) for supported correlation methods."""
+    method = _normalize_correlation_method(method)
+    corr_fn = _correlation_function(method)
+    if method == "pearsonr":
+        result = corr_fn(x, y)
+    else:
+        try:
+            result = corr_fn(x, y, nan_policy="omit")
+        except TypeError:
+            result = corr_fn(x, y)
+    return float(_correlation_statistic(result)), float(_correlation_pvalue(result))
+
+
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # DISPLAY NAME HELPERS
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -260,7 +343,7 @@ def _export_html_matrix(experiment, columns, specificity, save_path, by, factor,
         numeric = summary[columns].select_dtypes(include='number').dropna(axis=1, how='all')
         if numeric.shape[1] < 2:
             return
-        corr = numeric.corr(method='pearson' if 'pearson' in str(correlation) else 'spearman')
+        corr = numeric.corr(method=_correlation_pandas_method(correlation))
         corr_long = corr.reset_index().melt(id_vars='index')
         corr_long.columns = ['Variable 1', 'Variable 2', 'Correlation']
         corr_long['Variable 1'] = corr_long['Variable 1'].map(get_display_name)
@@ -9596,17 +9679,9 @@ def regression_action(ctx: Context, state: dict,
     if clip_fit_line and fit_line is not None:
         _clip_regression_line_to_axes(fit_line, ax.get_xlim(), ax.get_ylim())
 
-    from scipy import stats as sp_stats
     if len(df) >= 2:
         try:
-            if str(test).lower() == 'spearmanr':
-                stat_res = sp_stats.spearmanr(df[x], df[y], nan_policy='omit')
-                corr = float(stat_res.correlation)
-                pval = float(stat_res.pvalue)
-            else:
-                stat_res = sp_stats.pearsonr(df[x], df[y])
-                corr = float(stat_res.correlation)
-                pval = float(stat_res.pvalue)
+            corr, pval = _compute_correlation(df[x], df[y], test)
         except Exception:
             corr = np.nan
             pval = np.nan
@@ -9671,7 +9746,7 @@ def _format_regression_rvalue(r):
 
 
 def _regression_test_display_name(test):
-    return "Spearman" if "spearman" in str(test).lower() else "Pearson"
+    return _correlation_display_name(test)
 
 
 def _annotate_regression_stats_summary(ax, entries, test):
@@ -10041,9 +10116,9 @@ def matrix_action(ctx: Context, state: dict,
                   shared_columns=None,
                   **kwargs):
     """Plot a correlation matrix for one condition/factor."""
-    from scipy import stats as sp_stats
     ax = state['ax']
     fig = state['fig']
+    correlation = _normalize_correlation_method(correlation)
 
     by = 'factor' if ctx.factor_value else 'condition'
     if marker:
@@ -10116,13 +10191,12 @@ def matrix_action(ctx: Context, state: dict,
         grouped = sorted(df.columns.tolist(), key=_marker_sort_tuple)
         df = df.reindex(columns=grouped)
 
-    corr = df.corr()
+    corr = df.corr(method=_correlation_pandas_method(correlation))
     n_cols = max(1, len(corr.columns))
     # Adaptive sizing: treat tick_label_size as an upper bound.
     tick_fs = min(max(14, int(tick_label_size * 2.0)), max(14, int(640 / n_cols)))
     star_fs = min(25, max(8, int(220 / n_cols)))
-    corr_fn = sp_stats.pearsonr if correlation == 'pearsonr' else sp_stats.spearmanr
-    coeff_label = "Pearson coefficient" if correlation == 'pearsonr' else "Spearman coefficient"
+    coeff_label = f"{_correlation_display_name(correlation)} coefficient"
 
     heatmap = sns.heatmap(corr, annot=False, fmt=".2f", cmap='coolwarm',
                           linewidths=0.5, ax=ax, vmin=-1, vmax=1)
@@ -10148,11 +10222,11 @@ def matrix_action(ctx: Context, state: dict,
             if i < j:
                 valid = df[[c1, c2]].dropna()
                 if len(valid) > 1:
-                    result = corr_fn(valid[c1], valid[c2])
-                    star = _get_annotation(result.pvalue, ns='')
+                    coefficient, p_value = _compute_correlation(valid[c1], valid[c2], correlation)
+                    star = _get_annotation(p_value, ns='')
                     ax.text(j + 0.5, i + 0.6, star, ha='center', va='center',
                             fontsize=star_fs, color='black', fontweight='bold')
-                    results[f'{c1} vs {c2}'] = (result.pvalue, result.correlation)
+                    results[f'{c1} vs {c2}'] = (p_value, coefficient)
 
     # Relabel ticks
     labels = [get_display_name(c, minimal=True) for c in corr.columns]
@@ -13750,16 +13824,8 @@ def plot_rect_matrices(
     n_panels = len(panels)
     state = {}
     _init_progress_state(state, func_name='plot_rect_matrices', total=n_panels)
-    corr_fn = None
-    coeff_label = None
-    if correlation == 'spearmanr':
-        from scipy.stats import spearmanr as _corr_fn
-        corr_fn = _corr_fn
-        coeff_label = "Spearman coefficient"
-    else:
-        from scipy.stats import pearsonr as _corr_fn
-        corr_fn = _corr_fn
-        coeff_label = "Pearson coefficient"
+    correlation = _normalize_correlation_method(correlation)
+    coeff_label = f"{_correlation_display_name(correlation)} coefficient"
 
     outputs = {}
     max_y = max(1, len(panel_y_columns))
@@ -13858,12 +13924,12 @@ def plot_rect_matrices(
             for x_col in valid_x:
                 pair = num_df[[y_col, x_col]].dropna()
                 if len(pair) > 1:
-                    result = corr_fn(pair[y_col], pair[x_col])
-                    corr_mat.loc[y_col, x_col] = float(result.correlation)
-                    p_mat.loc[y_col, x_col] = float(result.pvalue)
+                    coefficient, p_value = _compute_correlation(pair[y_col], pair[x_col], correlation)
+                    corr_mat.loc[y_col, x_col] = coefficient
+                    p_mat.loc[y_col, x_col] = p_value
                     corr_results[f'{y_col} vs {x_col}'] = (
-                        float(result.pvalue),
-                        float(result.correlation),
+                        p_value,
+                        coefficient,
                     )
                 else:
                     corr_mat.loc[y_col, x_col] = np.nan
@@ -15203,7 +15269,8 @@ _PARAM_DESCRIPTIONS = {
     # ── ECDF ─────────────────────────────────────────────────────────
     'complementary':        'Plot 1-ECDF (survival function) instead of ECDF.',
     # ── Regression ───────────────────────────────────────────────────
-    'test':                 'Correlation test: "pearsonr" or "spearmanr".',
+    'test':                 'Correlation test: "pearsonr", "spearmanr", or "kendalltau" '
+                            '(aliases "pearson"/"p", "spearman"/"s", "kendall"/"k" also work).',
     'normalize_x':          "X normalization mode: False, True (= 0-1 min-max), "
                             "(min, max), or 'Z-score'.",
     'normalize_y':          "Y normalization mode: False, True (= 0-1 min-max), "
@@ -15241,7 +15308,8 @@ _PARAM_DESCRIPTIONS = {
     'as_counts':            'Legacy alias: show counts only when true, percent only when false.',
     'include_n':            'Legacy alias for include_N.',
     # ── Correlation matrices ─────────────────────────────────────────
-    'correlation':          'Correlation method: "pearsonr" or "spearmanr".',
+    'correlation':          'Correlation method: "pearsonr", "spearmanr", or "kendalltau" '
+                            '(aliases "pearson"/"p", "spearman"/"s", "kendall"/"k" also work).',
     'first_columns':        'Pin these columns to the left of the matrix.',
     'tick_label_size':      'Font size for axis tick labels.',
     'prefix_order':         'Custom ordering of column prefixes.',

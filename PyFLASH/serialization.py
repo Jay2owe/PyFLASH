@@ -13,6 +13,38 @@ from PyFLASH._logging import logger as _log
 
 
 LEGACY_IMAGE_CACHE_SUFFIX = ".images.pkl"
+_LEGACY_MODULE_ROOT = "IF_analysis"
+_CURRENT_MODULE_ROOT = "PyFLASH"
+
+
+def _remap_legacy_module(module):
+    """Return the current PyFLASH module path for legacy pickle references."""
+    if module == _LEGACY_MODULE_ROOT:
+        return _CURRENT_MODULE_ROOT
+
+    legacy_pyflash_prefix = f"{_LEGACY_MODULE_ROOT}.{_CURRENT_MODULE_ROOT}"
+    if module == legacy_pyflash_prefix:
+        return _CURRENT_MODULE_ROOT
+    if module.startswith(f"{legacy_pyflash_prefix}."):
+        return f"{_CURRENT_MODULE_ROOT}.{module[len(legacy_pyflash_prefix) + 1:]}"
+
+    legacy_prefix = f"{_LEGACY_MODULE_ROOT}."
+    if module.startswith(legacy_prefix):
+        return f"{_CURRENT_MODULE_ROOT}.{module[len(legacy_prefix):]}"
+
+    return module
+
+
+class _PyFLASHUnpickler(pickle.Unpickler):
+    """Unpickler that can read caches created before the package rename."""
+
+    def find_class(self, module, name):
+        return super().find_class(_remap_legacy_module(module), name)
+
+
+def _load_pickle(filename):
+    with open(filename, "rb") as f:
+        return _PyFLASHUnpickler(f).load()
 
 
 def _resolve_existing_path(path):
@@ -162,8 +194,7 @@ def load_state(filename, normalize_paths=True, resave_if_rebased=False, verbose=
     -------
     Experiment or Batch
     """
-    with open(filename, 'rb') as f:
-        obj = pickle.load(f)
+    obj = _load_pickle(filename)
 
     obj._state_path = filename
     legacy_arrays_removed = _strip_legacy_image_arrays(obj)
