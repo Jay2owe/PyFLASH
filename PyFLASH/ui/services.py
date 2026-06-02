@@ -10,9 +10,11 @@ logic is reimplemented (house rule 1).
 
 import os
 
+from PyFLASH.conditions import _resolve_color
 from PyFLASH.config import Config, check_directory
 from PyFLASH.export import format_summary_for_display
 from PyFLASH.serialization import load_state, save_state
+from PyFLASH.ui.project_io import build_condition_list
 from PyFLASH.utils import get_columns
 
 __all__ = [
@@ -26,6 +28,9 @@ __all__ = [
     "discover_experiments",
     "REQUIRED_ANY",
     "LAYOUT_DIRS",
+    "build_conditions",
+    "preview_conditions",
+    "resolve_color",
 ]
 
 
@@ -217,3 +222,82 @@ def discover_experiments(root: str) -> list:
             r["name"] = sub
             out.append(r)
     return out
+
+
+# ── Conditions builder (Stage 04) ───────────────────────────────────────────
+
+
+def resolve_color(color, index=0) -> str:
+    """Resolve a color spec to a hex string for swatch preview.
+
+    Thin wrapper over :func:`PyFLASH.conditions._resolve_color`: a
+    ``Config.COLORS`` key (wins), a CSS/matplotlib name, a ``#hex`` (passed
+    through), or ``None`` to auto-assign from the Okabe-Ito palette by *index*.
+    Lets the page show users the *actual* hex before they build, so a palette
+    key shadowing a CSS name is not a surprise (Stage 04 known risk).
+    """
+    return _resolve_color(color, index)
+
+
+def build_conditions(spec):
+    """Rebuild a ``conditionList`` from a JSON-serializable conditions *spec*.
+
+    Thin wrapper over :func:`PyFLASH.ui.project_io.build_condition_list` so the
+    page has a single ``services`` entry point. Replays the spec through
+    :class:`PyFLASH.conditions.ConditionBuilder` — it never unpickles built
+    condition objects. Builder ``ValueError``\\ s (including difflib "Did you
+    mean…?" suggestions for bad comparison names) propagate to the caller so the
+    page can surface them inline.
+    """
+    return build_condition_list(spec)
+
+
+def preview_conditions(cl) -> dict:
+    """Summarize a built ``conditionList`` for display (names, colors, pairs).
+
+    Returns a plain dict so the page can render swatches, the resolved ``'1-2'``
+    comparison index strings, and the per-condition explanation expansion
+    without touching core objects.
+
+    Returns
+    -------
+    dict
+        ``{"factor", "conditions": [{"name","label","color","factor",
+        "explanation"}], "comparisons": [...], "labelled_comparisons": [...]}``.
+        ``comparisons`` are the resolved ``'1-2'`` index strings exactly as the
+        builder produced them; ``labelled_comparisons`` map those back to
+        ``"<short> vs <short>"`` for human-readable preview.
+    """
+    if cl is None:
+        return {"factor": None, "conditions": [], "comparisons": None,
+                "labelled_comparisons": []}
+
+    conditions = [
+        {
+            "name": getattr(c, "name", None),
+            "label": getattr(c, "label", None),
+            "color": getattr(c, "color", None),
+            "factor": getattr(c, "factor", None),
+            "explanation": getattr(c, "factor_explanation", None),
+        }
+        for c in cl.condition_list
+    ]
+
+    comparisons = cl.comparisons
+    labelled = []
+    if comparisons:
+        # 1-based index -> short name, for a human-readable echo of '1-2'.
+        names = [c["name"] for c in conditions]
+        for pair in comparisons:
+            try:
+                a, b = (int(x) for x in str(pair).split("-"))
+                labelled.append(f"{names[a - 1]} vs {names[b - 1]}")
+            except (ValueError, IndexError):
+                labelled.append(str(pair))
+
+    return {
+        "factor": cl.factor,
+        "conditions": conditions,
+        "comparisons": comparisons,
+        "labelled_comparisons": labelled,
+    }
