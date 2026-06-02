@@ -19,10 +19,17 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List
 
+from PyFLASH.config import Config
+
 __all__ = ["Project", "load_project", "save_project"]
 
 # Bump when the on-disk schema changes (Stage 04 will define v1 fully).
 SCHEMA_VERSION = 0
+
+
+def _default_threshold() -> int:
+    """Read ``Config.THRESHOLD`` at construction time (defaults to 30)."""
+    return Config.THRESHOLD
 
 
 @dataclass
@@ -31,6 +38,15 @@ class Project:
 
     name: str = "Untitled"
     experiment_paths: List[str] = field(default_factory=list)
+    # ── Stage 03: experiment folder setup ───────────────────────────────────
+    # ``batch_path`` is the root/results folder; ``experiments`` maps an
+    # experiment name to its folder path (manual mode) and is empty when
+    # auto-discovering from ``batch_path``. ``pickle_path`` is the cache dir.
+    batch_path: str = ""
+    experiments: Dict[str, str] = field(default_factory=dict)
+    pickle_path: str = ""
+    threshold: int = field(default_factory=_default_threshold)
+    import_images: bool = True
     # TODO(Stage 04): replace ``Any`` with the real conditions schema.
     conditions: Dict[str, Any] = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION

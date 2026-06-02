@@ -9,6 +9,7 @@ installed** (house rule 2). These tests therefore:
   a real round-tripped pickle, with no streamlit dependency).
 """
 
+import os
 import sys
 import types
 
@@ -185,3 +186,152 @@ def test_batch_overview_reports_identity():
     assert overview["markers"] == ["DAPI", "NeuN"]
     assert overview["experiments"] == ["exp1"]
     assert overview["roi_bases"] == ["SCN", "OC"]
+
+
+# ── Stage 03: experiment folder validation ──────────────────────────────────
+
+
+def _make_experiment(parent, name, *, data_subdirs=(), csv_in_data=False,
+                     no_data_analysis=False):
+    """Create a fake experiment folder tree under *parent*; return its path.
+
+    Strictly local tmp dirs — never touches real data. Builds
+    ``<parent>/<name>/Data Analysis/<subdirs...>`` and, optionally, a stray
+    ``.csv`` directly under ``Data Analysis/``.
+    """
+    exp = os.path.join(parent, name)
+    os.makedirs(exp, exist_ok=True)
+    if no_data_analysis:
+        return exp
+    data = os.path.join(exp, "Data Analysis")
+    os.makedirs(data, exist_ok=True)
+    for sub in data_subdirs:
+        os.makedirs(os.path.join(data, sub), exist_ok=True)
+    if csv_in_data:
+        with open(os.path.join(data, "stray.csv"), "w", encoding="utf-8") as f:
+            f.write("col1,col2\n1,2\n")
+    return exp
+
+
+def test_validate_folder_valid_via_required_subdir(tmp_path):
+    # Data Analysis/Objects/ present -> valid (the REQUIRED_ANY branch).
+    exp = _make_experiment(str(tmp_path), "expA", data_subdirs=["Objects"])
+    # Drop a csv inside Objects/ to mirror the fixture description.
+    with open(os.path.join(exp, "Data Analysis", "Objects", "x.csv"),
+              "w", encoding="utf-8") as f:
+        f.write("a,b\n1,2\n")
+
+    result = services.validate_experiment_folder(exp)
+    assert result["valid"] is True
+    assert result["reason"] == "ok"
+    assert result["layout"]["Objects"] is True
+
+
+def test_validate_folder_valid_via_stray_csv(tmp_path):
+    # Data Analysis/ with only a stray .csv (no required subdirs) -> valid.
+    exp = _make_experiment(str(tmp_path), "expB", csv_in_data=True)
+    result = services.validate_experiment_folder(exp)
+    assert result["valid"] is True
+    assert result["reason"] == "ok"
+    # No required subdirs exist, but structure is still satisfied by the csv.
+    assert result["layout"]["Objects"] is False
+
+
+def test_validate_folder_invalid_missing_data_analysis(tmp_path):
+    exp = _make_experiment(str(tmp_path), "expC", no_data_analysis=True)
+    result = services.validate_experiment_folder(exp)
+    assert result["valid"] is False
+    assert result["reason"] == "missing 'Data Analysis/'"
+    assert all(v is False for v in result["layout"].values())
+
+
+def test_validate_folder_invalid_empty_data_analysis(tmp_path):
+    # Data Analysis/ exists but is empty -> invalid with the no-CSV reason.
+    exp = _make_experiment(str(tmp_path), "expD")
+    result = services.validate_experiment_folder(exp)
+    assert result["valid"] is False
+    assert result["reason"] == "no Objects/Attributes/ROI Intensities or CSVs"
+
+
+def test_validate_folder_has_images_reflects_images_subdir(tmp_path):
+    with_images = _make_experiment(
+        str(tmp_path), "expWith", data_subdirs=["Objects", "Images"])
+    without_images = _make_experiment(
+        str(tmp_path), "expWithout", data_subdirs=["Objects"])
+
+    assert services.validate_experiment_folder(with_images)["has_images"] is True
+    res = services.validate_experiment_folder(without_images)
+    assert res["has_images"] is False
+    assert res["layout"]["Images"] is False
+
+
+def test_discover_experiments_classifies_each_subfolder(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _make_experiment(str(root), "good_objects", data_subdirs=["Objects"])
+    _make_experiment(str(root), "good_csv", csv_in_data=True)
+    _make_experiment(str(root), "bad_no_da", no_data_analysis=True)
+    # A loose file at the root must be ignored (only directories scanned).
+    with open(os.path.join(str(root), "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("ignore me")
+
+    records = services.discover_experiments(str(root))
+    by_name = {r["name"]: r for r in records}
+
+    # All three subfolders reported (valid and invalid alike), file skipped.
+    assert set(by_name) == {"good_objects", "good_csv", "bad_no_da"}
+    assert by_name["good_objects"]["valid"] is True
+    assert by_name["good_csv"]["valid"] is True
+    assert by_name["bad_no_da"]["valid"] is False
+    assert by_name["bad_no_da"]["reason"] == "missing 'Data Analysis/'"
+
+
+def test_discover_experiments_sorted_by_name(tmp_path):
+    root = tmp_path / "root2"
+    root.mkdir()
+    for name in ["zeta", "alpha", "mid"]:
+        _make_experiment(str(root), name, data_subdirs=["Objects"])
+    records = services.discover_experiments(str(root))
+    assert [r["name"] for r in records] == ["alpha", "mid", "zeta"]
+
+
+# ── Stage 03: Project schema round-trip ─────────────────────────────────────
+
+
+def test_project_round_trips_new_fields(tmp_path):
+    from PyFLASH.config import Config
+    from PyFLASH.ui.project_io import Project, load_project, save_project
+
+    proj = Project(
+        name="trip",
+        batch_path=r"X:\some\root",
+        experiments={"exp1": r"X:\some\root\exp1"},
+        pickle_path=r"X:\cache",
+        threshold=55,
+        import_images=False,
+        experiment_paths=[r"X:\some\root\exp1"],
+    )
+    out = tmp_path / "proj.json"
+    save_project(proj, str(out))
+    loaded = load_project(str(out))
+
+    assert loaded.name == "trip"
+    assert loaded.batch_path == r"X:\some\root"
+    assert loaded.experiments == {"exp1": r"X:\some\root\exp1"}
+    assert loaded.pickle_path == r"X:\cache"
+    assert loaded.threshold == 55
+    assert loaded.import_images is False
+    assert loaded.experiment_paths == [r"X:\some\root\exp1"]
+    # Defaults still sensible on a bare Project.
+    assert Project().threshold == Config.THRESHOLD
+    assert Project().import_images is True
+
+
+def test_project_from_dict_ignores_unknown_fields():
+    from PyFLASH.ui.project_io import Project
+
+    proj = Project.from_dict(
+        {"name": "x", "batch_path": "p", "future_field": 123})
+    assert proj.name == "x"
+    assert proj.batch_path == "p"
+    assert not hasattr(proj, "future_field")

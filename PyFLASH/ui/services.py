@@ -8,6 +8,9 @@ Every heavy operation here wraps an *existing* PyFLASH function — no analysis
 logic is reimplemented (house rule 1).
 """
 
+import os
+
+from PyFLASH.config import Config, check_directory
 from PyFLASH.export import format_summary_for_display
 from PyFLASH.serialization import load_state, save_state
 from PyFLASH.utils import get_columns
@@ -19,6 +22,10 @@ __all__ = [
     "roi_bases",
     "summary_table",
     "batch_overview",
+    "validate_experiment_folder",
+    "discover_experiments",
+    "REQUIRED_ANY",
+    "LAYOUT_DIRS",
 ]
 
 
@@ -124,3 +131,89 @@ def batch_overview(batch) -> dict:
         "experiments": [getattr(e, "name", str(e))
                         for e in getattr(batch, "experiment_list", []) or []],
     }
+
+
+# ── Experiment folder validation (Stage 03) ─────────────────────────────────
+
+# These mirror the discovery rule in ``factory.py`` (the ``isinstance(str)``
+# branch of ``create_batch``) **read-only**: we never import or call core
+# processing, just replicate the os.path checks so the UI can give pre-flight
+# feedback before a long run (house rule 1). Keep these in sync with
+# ``PyFLASH/factory.py`` lines 176-184.
+REQUIRED_ANY = ["Objects", "Attributes", "ROI Intensities"]
+LAYOUT_DIRS = ["Objects", "Cells", "ROI Intensities", "Attributes", "ROIs",
+               "Images"]
+
+
+def validate_experiment_folder(path: str) -> dict:
+    """Check one experiment folder against ``create_batch``'s discovery rule.
+
+    Replicates ``factory.py:176-184`` read-only: a folder is *valid* when it
+    contains a ``Data Analysis/`` subdirectory which in turn contains any of
+    ``Objects`` / ``Attributes`` / ``ROI Intensities`` **or** any ``.csv``
+    file. Performs no writes and never imports core processing.
+
+    Parameters
+    ----------
+    path : str
+        The experiment subfolder (the parent of ``Data Analysis/``). Resolved
+        across machines via :func:`PyFLASH.config.check_directory`.
+
+    Returns
+    -------
+    dict
+        ``{"path", "valid", "reason", "has_images", "layout"}`` where
+        ``layout`` maps each of :data:`LAYOUT_DIRS` to whether that
+        subdirectory of ``Data Analysis/`` exists.
+    """
+    resolved = check_directory(path) or path
+    data = os.path.join(resolved, "Data Analysis")
+    ok = os.path.isdir(data)
+    contents = os.listdir(data) if ok else []
+    has_structure = ok and (
+        any(d in contents for d in REQUIRED_ANY)
+        or any(f.endswith(".csv") for f in contents)
+    )
+    layout = {
+        d: bool(ok and os.path.isdir(os.path.join(data, d)))
+        for d in LAYOUT_DIRS
+    }
+    if has_structure:
+        reason = "ok"
+    elif not ok:
+        reason = "missing 'Data Analysis/'"
+    else:
+        reason = "no Objects/Attributes/ROI Intensities or CSVs"
+    return {
+        "path": resolved,
+        "valid": bool(has_structure),
+        "reason": reason,
+        "has_images": layout["Images"],
+        "layout": layout,
+    }
+
+
+def discover_experiments(root: str) -> list:
+    """Validate every immediate subfolder of *root* as an experiment.
+
+    Mirrors the ``isinstance(experiments, str)`` branch of ``create_batch``
+    (``factory.py:169-186``): iterate the sorted subfolders of the resolved
+    root and validate each. Unlike core, **all** subfolders are returned (each
+    tagged ``valid`` True/False) so the UI can show ✓/✗ for every candidate
+    rather than silently dropping invalid ones.
+
+    Returns
+    -------
+    list of dict
+        One :func:`validate_experiment_folder` result per subdirectory, each
+        with an added ``"name"`` key (the subfolder name), sorted by name.
+    """
+    resolved = check_directory(root) or root
+    out = []
+    for sub in sorted(os.listdir(resolved)):
+        p = os.path.join(resolved, sub)
+        if os.path.isdir(p):
+            r = validate_experiment_folder(p)
+            r["name"] = sub
+            out.append(r)
+    return out
