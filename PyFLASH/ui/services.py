@@ -46,6 +46,12 @@ __all__ = [
     "run_plot_spec",
     "run_quick_plot",
     "IMAGE_PLOT_TYPES",
+    "image_table",
+    "run_image_grid",
+    "run_representative_panels",
+    "run_locations",
+    "get_representative_selections",
+    "set_representative_selections",
 ]
 
 
@@ -674,3 +680,121 @@ def run_quick_plot(batch, plot_type: str, params: dict):
     func = _resolve_func(PLOT_REGISTRY[plot_type])
     kwargs = _build_plot_kwargs(func, params)
     return func(batch, **kwargs)
+
+
+# ── Image, representative & location tools (Stage 08) ───────────────────────
+
+# IMPORTANT: ``PyFLASH.plotting`` is imported **lazily inside each wrapper**
+# below — never at module top — so importing ``services`` stays plotting-free
+# (house rule 2, established and tested in Stage 07). The interactive
+# ``plotting.select_representative_images`` (matplotlib click-to-pick) is
+# deliberately **not** wrapped here: it is event-driven and not web-portable, so
+# representative selection stays table-based (see the Images page deferral note).
+
+
+def image_table(batch):
+    """Return the imported-image table for *batch*, or ``None`` when empty.
+
+    Reads the ``images`` DataFrame populated by ``importImages``
+    (``experiment.py:2626`` / ``batch.py:270``). A ``None`` or empty table means
+    no ``Images/`` folder was found (or images were not imported), so the page
+    can disable image actions with a clear message. No plotting import is needed
+    — this is a pure attribute read.
+
+    Parameters
+    ----------
+    batch
+        A loaded ``Batch``/``Experiment`` that may expose an ``images`` table.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        The non-empty image table, else ``None``.
+    """
+    imgs = getattr(batch, "images", None)
+    if imgs is None:
+        return None
+    empty = getattr(imgs, "empty", None)
+    if empty is True:
+        return None
+    return imgs
+
+
+def run_image_grid(batch, markers, **kw):
+    """Render an image grid via :func:`PyFLASH.plotting.plot_images`.
+
+    Thin wrapper (house rule 1 — no image logic here). ``save=True`` so the grid
+    is written under ``batch.fig_path`` for the UI to embed (the function closes
+    its figure rather than returning one); ``show=False`` suppresses any GUI
+    window in the headless Streamlit process. Extra keyword arguments
+    (``animal_filter``, ``roi_filter``, ``tile_size``, ``fast_loading``,
+    ``preview_max_dim``, ``scale_bar`` …) forward verbatim to ``plot_images``.
+
+    ``PyFLASH.plotting`` is imported **inside** this function so importing
+    ``services`` never loads it (house rule 2).
+    """
+    import PyFLASH.plotting as plotting
+
+    return plotting.plot_images(batch, markers=markers, save=True, show=False,
+                                **kw)
+
+
+def run_representative_panels(batch, markers, **kw):
+    """Render representative panels via ``plot_representative_images``.
+
+    Thin wrapper over :func:`PyFLASH.plotting.plot_representative_images`
+    (house rule 1). The selections themselves come from ``batch``'s
+    ``representative_images`` table (viewed/edited on the page and persisted via
+    :func:`set_representative_selections` + ``save_state``); this only renders
+    the panels for the chosen *markers*. ``save=True`` is forwarded (unless the
+    caller overrides it) so the saved panels can be embedded by the page.
+
+    ``PyFLASH.plotting`` is imported **inside** this function so importing
+    ``services`` never loads it (house rule 2).
+    """
+    import PyFLASH.plotting as plotting
+
+    kw.setdefault("save", True)
+    return plotting.plot_representative_images(batch, markers=markers, **kw)
+
+
+def run_locations(experiment, objects, **kw):
+    """Render a spatial location map via :func:`PyFLASH.plotting.plot_locations`.
+
+    Thin wrapper (house rule 1). ``plot_locations`` takes an *Experiment*
+    (not the whole batch) for some flows, so the page picks the experiment
+    explicitly. ``save=True`` is forwarded so the saved map can be embedded;
+    extra keyword arguments (``separate_by``, ``colocalise``, ``draw_rois`` …)
+    pass through verbatim.
+
+    ``PyFLASH.plotting`` is imported **inside** this function so importing
+    ``services`` never loads it (house rule 2).
+    """
+    import PyFLASH.plotting as plotting
+
+    return plotting.plot_locations(experiment, objects, save=True, **kw)
+
+
+def get_representative_selections(batch):
+    """Return the ``representative_images`` selection table, or ``None``.
+
+    Plain attribute read of the table populated by representative-image
+    selection / carry-over (``factory.py:48-97`` copies it across reruns). The
+    page shows/edits this in a ``st.data_editor``; round-trip it with
+    :func:`set_representative_selections`. No plotting import is needed.
+    """
+    return getattr(batch, "representative_images", None)
+
+
+def set_representative_selections(batch, df):
+    """Store *df* as the batch ``representative_images`` selection table.
+
+    Assigns the edited table back onto the object so it is captured by the
+    Stage-06 ``save_state`` controls and carried over on the next
+    ``create_batch(rerun=True)`` (``factory.py:48-97``). This is a deliberate
+    plain assignment — no normalization or analysis logic is added here (house
+    rule 1); ``plot_representative_images`` normalizes the table when it reads
+    it. Returns the stored table for convenience.
+    """
+    batch.representative_images = df
+    return df
