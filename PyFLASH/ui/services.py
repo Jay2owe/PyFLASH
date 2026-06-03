@@ -11,6 +11,7 @@ logic is reimplemented (house rule 1).
 import contextlib
 import io
 import os
+import re
 
 from PyFLASH._logging import logger
 from PyFLASH.conditions import _resolve_color
@@ -37,6 +38,9 @@ __all__ = [
     "resolve_color",
     "capture_output",
     "run_create_batch",
+    "validate_regex",
+    "export_excel",
+    "save_batch",
 ]
 
 
@@ -396,3 +400,127 @@ def run_create_batch(*, name, conditions, batch_path, experiments=None,
             progress=True,
         )
     return batch, buf.getvalue()
+
+
+# ── Excel export & save-state (Stage 06) ────────────────────────────────────
+
+
+def validate_regex(patterns):
+    """Pre-compile a list of regex *patterns*, raising on the first bad one.
+
+    Mirrors the validation ``batch.py:_prepare_export_regex_filters`` performs
+    (it compiles each include/exclude pattern and re-raises as ``ValueError``),
+    so the page can surface a friendly message *before* kicking off a slow
+    export rather than failing mid-write. Empty/blank patterns and ``None`` are
+    skipped — they impose no filter, matching how the core normalizer drops
+    them.
+
+    Parameters
+    ----------
+    patterns : iterable of str or None
+        The candidate regex strings (typically one page field split on commas).
+
+    Raises
+    ------
+    re.error
+        From :func:`re.compile` on the first malformed pattern (e.g. ``"["``).
+        The page catches this and shows the offending message.
+    """
+    for p in patterns or []:
+        if p:
+            re.compile(p)
+
+
+def export_excel(batch, *, save_path=None, if_summary=True, if_extended=True,
+                 behaviour=True, if_summary_exclude=None,
+                 if_extended_exclude=None, behaviour_exclude=None,
+                 if_summary_include=None, if_extended_include=None,
+                 behaviour_include=None, capture=True):
+    """Export the formatted Excel workbooks, capturing the progress log.
+
+    Thin wrapper over :meth:`PyFLASH.batch.Batch.export_all_excel` (which
+    delegates to ``export_excel``). Every toggle and include/exclude regex is
+    forwarded verbatim; no filtering or analysis logic is reimplemented here
+    (house rule 1). When *capture* is ``True`` the call runs inside
+    :func:`capture_output`, so the per-sheet status lines and the
+    ``"Exported … to …"`` confirmations stream into a buffer the page renders
+    (the extended export can be slow — known risk in Stage 06).
+
+    ``batch.export_all_excel`` itself re-raises a ``ValueError`` for malformed
+    regex (``batch.py:50-57``) and writes a ``<stem>_RegexFilters.txt`` report
+    beside each workbook; a batch with no behaviour table simply skips the
+    behaviour workbook (``batch.py:961-964``). A relative ``save_path`` lands
+    under the batch ``Exports/`` folder; an absolute one is used as-is
+    (``batch.py:208-220``).
+
+    Parameters
+    ----------
+    batch
+        A loaded ``Batch`` exposing ``export_all_excel``.
+    save_path : str, optional
+        Target directory. ``None`` -> the batch ``Exports/`` folder.
+    if_summary, if_extended, behaviour : bool
+        Which workbooks to write.
+    *_include, *_exclude : str or list of str, optional
+        Per-workbook column-name regex filters (case-insensitive in core).
+    capture : bool
+        When ``True`` (default) run inside :func:`capture_output` and return the
+        captured log; otherwise run directly and return ``""``.
+
+    Returns
+    -------
+    str
+        The captured log text (empty string when ``capture=False``).
+
+    Raises
+    ------
+    ValueError
+        Propagated from core for a malformed include/exclude regex; the page
+        catches it and shows a clean message. The output buffer is always
+        restored because :func:`capture_output` restores in ``finally``.
+    """
+    def _run():
+        batch.export_all_excel(
+            save_path=save_path,
+            if_summary=if_summary,
+            if_extended=if_extended,
+            behaviour=behaviour,
+            if_summary_exclude=if_summary_exclude,
+            if_extended_exclude=if_extended_exclude,
+            behaviour_exclude=behaviour_exclude,
+            if_summary_include=if_summary_include,
+            if_extended_include=if_extended_include,
+            behaviour_include=behaviour_include,
+        )
+
+    if capture:
+        with capture_output() as buf:
+            _run()
+        return buf.getvalue()
+    _run()
+    return ""
+
+
+def save_batch(batch, filename):
+    """Save the in-memory ``Batch`` to *filename*, returning the path written.
+
+    Thin wrapper over :func:`PyFLASH.serialization.save_state` (imported at
+    module top for ``open_pickle`` — reused here) with ``verbose=False`` so no
+    output leaks to the terminal. ``save_state`` records ``_state_path`` on the
+    object and creates the parent directory, so the page can show the path and
+    re-open it via :func:`open_pickle` (Stage 02).
+
+    Parameters
+    ----------
+    batch
+        A ``Batch``/``Experiment`` to pickle.
+    filename : str
+        Destination ``.pkl`` path.
+
+    Returns
+    -------
+    str
+        The *filename* that was written (echoed back for the page to display).
+    """
+    save_state(batch, filename, verbose=False)
+    return filename

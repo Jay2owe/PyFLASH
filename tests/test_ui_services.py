@@ -9,11 +9,14 @@ installed** (house rule 2). These tests therefore:
   a real round-tripped pickle, with no streamlit dependency).
 """
 
+import ast
 import os
+import re
 import sys
 import types
 
 import pandas as pd
+import pytest
 
 from PyFLASH.batch import Batch
 from PyFLASH.serialization import save_state
@@ -450,3 +453,133 @@ def test_run_create_batch_restores_logger_on_error(monkeypatch):
         raise AssertionError("expected ValueError")
 
     assert logger._output is prev
+
+
+# ── Stage 06: Excel export & save-state ──────────────────────────────────────
+
+
+def test_validate_regex_passes_for_valid_patterns():
+    # Valid patterns (and blank/None entries, which impose no filter) are fine.
+    services.validate_regex(["DAPI", r"NeuN_\w+", ""])
+    services.validate_regex(None)
+    services.validate_regex([None, ""])
+
+
+def test_validate_regex_raises_on_malformed_pattern():
+    # An unbalanced character class is a classic re.error.
+    with pytest.raises(re.error):
+        services.validate_regex(["["])
+
+
+class _FakeExportBatch:
+    """Records the kwargs export_all_excel received and emits some output."""
+
+    def __init__(self):
+        self.calls = []
+
+    def export_all_excel(self, **kwargs):
+        self.calls.append(kwargs)
+        # Mimic core's status/confirm lines so capture_output has something to
+        # collect (these go through plain print -> redirected stdout).
+        print("Starting export…")
+        print("Exported IF summary to /tmp/if/IF_Summary.xlsx")
+
+
+def test_export_excel_forwards_kwargs_and_returns_log():
+    batch = _FakeExportBatch()
+
+    log = services.export_excel(
+        batch,
+        save_path="MyExports",
+        if_summary=True,
+        if_extended=False,
+        behaviour=True,
+        if_summary_include=["DAPI"],
+        if_extended_exclude=["NeuN"],
+        behaviour_include=None,
+    )
+
+    # Captured output came back as the log text.
+    assert "Starting export" in log
+    assert "Exported IF summary" in log
+
+    # Exactly one call, with every keyword forwarded verbatim.
+    assert len(batch.calls) == 1
+    kw = batch.calls[0]
+    assert kw["save_path"] == "MyExports"
+    assert kw["if_summary"] is True
+    assert kw["if_extended"] is False
+    assert kw["behaviour"] is True
+    assert kw["if_summary_include"] == ["DAPI"]
+    assert kw["if_extended_exclude"] == ["NeuN"]
+    assert kw["behaviour_include"] is None
+    # Unspecified filters default to None and are still forwarded.
+    assert kw["if_summary_exclude"] is None
+    assert kw["if_extended_include"] is None
+    assert kw["behaviour_exclude"] is None
+
+
+def test_export_excel_capture_false_runs_without_capturing():
+    batch = _FakeExportBatch()
+    log = services.export_excel(batch, capture=False)
+    # No capture -> empty log, but the export still ran with defaults.
+    assert log == ""
+    assert len(batch.calls) == 1
+    assert batch.calls[0]["if_summary"] is True
+    assert batch.calls[0]["save_path"] is None
+
+
+def test_export_excel_propagates_value_error():
+    # A bad regex surfaces from core as ValueError; export_excel must not
+    # swallow it (the page catches and shows it). The output buffer is restored.
+    from PyFLASH._logging import logger
+
+    class _Boom:
+        def export_all_excel(self, **kwargs):
+            raise ValueError("Invalid include regex for IF summary export")
+
+    prev = logger._output
+    with pytest.raises(ValueError, match="Invalid include regex"):
+        services.export_excel(_Boom())
+    assert logger._output is prev
+
+
+def test_save_batch_forwards_filename_and_returns_it(monkeypatch):
+    # Monkeypatch the module-level save_state with a recorder; assert save_batch
+    # forwards (obj, filename, verbose=False) and returns the filename.
+    recorded = {}
+
+    def fake_save_state(obj, filename, verbose=True):
+        recorded["obj"] = obj
+        recorded["filename"] = filename
+        recorded["verbose"] = verbose
+
+    monkeypatch.setattr(services, "save_state", fake_save_state)
+
+    sentinel = object()
+    out = services.save_batch(sentinel, r"X:\cache\batch.pkl")
+
+    assert out == r"X:\cache\batch.pkl"
+    assert recorded["obj"] is sentinel
+    assert recorded["filename"] == r"X:\cache\batch.pkl"
+    assert recorded["verbose"] is False
+
+
+def test_save_batch_round_trips_a_picklable_object(tmp_path):
+    # Real round-trip via the actual save_state: a trivially-picklable Batch
+    # writes a .pkl that exists on disk (no real batch internals required).
+    batch = _make_minimal_batch()
+    out = tmp_path / "saved.pkl"
+    written = services.save_batch(batch, str(out))
+    assert written == str(out)
+    assert out.exists()
+
+
+def test_export_page_parses_as_valid_python():
+    # The Streamlit page must at least parse (we never launch Streamlit here).
+    page = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "PyFLASH", "ui", "pages", "8_export.py",
+    )
+    with open(page, encoding="utf-8") as fh:
+        ast.parse(fh.read())
