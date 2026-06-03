@@ -335,3 +335,118 @@ def test_project_from_dict_ignores_unknown_fields():
     assert proj.name == "x"
     assert proj.batch_path == "p"
     assert not hasattr(proj, "future_field")
+
+
+# ── Stage 05: batch processing — output capture + run_create_batch ──────────
+
+
+def test_capture_output_captures_logger_and_stdout_then_restores():
+    # capture_output must collect BOTH the package logger and plain stdout
+    # (ProgressTracker prints off-notebook), and ALWAYS restore the prior
+    # logger output target afterwards.
+    from PyFLASH._logging import logger
+
+    prev = logger._output
+    with services.capture_output() as buf:
+        # Logger channel (status() writes through logger._output).
+        logger.status("hello")
+        # stdout channel (ProgressTracker fallback uses print()).
+        print("world")
+        captured = buf.getvalue()
+
+    assert "hello" in captured
+    assert "world" in captured
+    # The global logger output target is restored to exactly what it was.
+    assert logger._output is prev
+
+
+def test_capture_output_restores_logger_on_exception():
+    # Even when the body raises, the finally clause must restore logger._output.
+    from PyFLASH._logging import logger
+
+    prev = logger._output
+    try:
+        with services.capture_output():
+            logger.status("before boom")
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+
+    assert logger._output is prev
+
+
+def test_run_create_batch_forwards_kwargs_and_returns_log(monkeypatch):
+    # Monkeypatch the module-level create_batch with a fake that emits output
+    # (both channels) and returns a sentinel batch. Assert the sentinel comes
+    # back, the captured log contains the emitted text, and every kwarg is
+    # forwarded exactly.
+    from PyFLASH._logging import logger
+
+    captured_call = {}
+    sentinel = types.SimpleNamespace(name="fake", _last_process_summary="3|9")
+
+    def fake_create_batch(name, conditions, batch_path, **kwargs):
+        captured_call["name"] = name
+        captured_call["conditions"] = conditions
+        captured_call["batch_path"] = batch_path
+        captured_call.update(kwargs)
+        # Emit on both channels that capture_output redirects.
+        logger.status("fake progress line")
+        print("ProgressTracker fallback line")
+        return sentinel
+
+    monkeypatch.setattr(services, "create_batch", fake_create_batch)
+
+    cond = object()
+    batch, log = services.run_create_batch(
+        name="run_test",
+        conditions=cond,
+        batch_path=r"X:\root",
+        experiments={"e1": r"X:\root\e1"},
+        pickle_path=r"X:\cache",
+        threshold=42,
+        rerun=True,
+        import_images=False,
+        reimport_images=True,
+    )
+
+    assert batch is sentinel
+    # Output from both channels lands in the returned log text.
+    assert "fake progress line" in log
+    assert "ProgressTracker fallback line" in log
+
+    # Positional args forwarded.
+    assert captured_call["name"] == "run_test"
+    assert captured_call["conditions"] is cond
+    assert captured_call["batch_path"] == r"X:\root"
+    # Keyword args forwarded verbatim, including progress=True (always set).
+    assert captured_call["experiments"] == {"e1": r"X:\root\e1"}
+    assert captured_call["pickle_path"] == r"X:\cache"
+    assert captured_call["threshold"] == 42
+    assert captured_call["rerun"] is True
+    assert captured_call["import_images"] is False
+    assert captured_call["reimport_images"] is True
+    assert captured_call["progress"] is True
+
+
+def test_run_create_batch_restores_logger_on_error(monkeypatch):
+    # A create_batch error (e.g. ValueError: No experiment folders found) must
+    # propagate, but the global logger output is still restored by the
+    # capture_output finally clause.
+    from PyFLASH._logging import logger
+
+    def boom(*args, **kwargs):
+        raise ValueError("No experiment folders found in X:\\root")
+
+    monkeypatch.setattr(services, "create_batch", boom)
+
+    prev = logger._output
+    try:
+        services.run_create_batch(
+            name="bad", conditions=object(), batch_path=r"X:\root")
+    except ValueError as exc:
+        assert "No experiment folders found" in str(exc)
+    else:  # pragma: no cover - the fake always raises
+        raise AssertionError("expected ValueError")
+
+    assert logger._output is prev

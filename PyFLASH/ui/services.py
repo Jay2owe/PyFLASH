@@ -8,11 +8,15 @@ Every heavy operation here wraps an *existing* PyFLASH function — no analysis
 logic is reimplemented (house rule 1).
 """
 
+import contextlib
+import io
 import os
 
+from PyFLASH._logging import logger
 from PyFLASH.conditions import _resolve_color
 from PyFLASH.config import Config, check_directory
 from PyFLASH.export import format_summary_for_display
+from PyFLASH.factory import create_batch
 from PyFLASH.serialization import load_state, save_state
 from PyFLASH.ui.project_io import build_condition_list
 from PyFLASH.utils import get_columns
@@ -31,6 +35,8 @@ __all__ = [
     "build_conditions",
     "preview_conditions",
     "resolve_color",
+    "capture_output",
+    "run_create_batch",
 ]
 
 
@@ -301,3 +307,92 @@ def preview_conditions(cl) -> dict:
         "comparisons": comparisons,
         "labelled_comparisons": labelled,
     }
+
+
+# ── Batch processing (Stage 05) ─────────────────────────────────────────────
+
+
+@contextlib.contextmanager
+def capture_output():
+    """Capture all PyFLASH output emitted inside the ``with`` block.
+
+    Off-notebook, PyFLASH writes through two channels: the package
+    :data:`PyFLASH._logging.logger` (status/timing/confirm lines) and plain
+    ``stdout`` (``ProgressTracker`` falls back to ``print`` when ``IPython``
+    display is unavailable — ``utils.py:452``). Both are redirected into a
+    single in-memory buffer so the page can show one readable log.
+
+    ``logger.set_output`` is **process-global**, so the previous output target
+    is always restored in ``finally`` — even if the wrapped call raises (house
+    rule: never leak the redirect). We avoid ``logger.set_output(None)`` on
+    restore because that hard-resets to ``sys.stdout`` rather than whatever was
+    in place before; we re-assign the captured previous target directly.
+
+    Yields
+    ------
+    io.StringIO
+        The buffer accumulating both logger and stdout text. Read it with
+        ``buf.getvalue()`` after (or during) the block.
+    """
+    buf = io.StringIO()
+    prev = logger._output
+    logger.set_output(buf)
+    try:
+        # ProgressTracker prints to stdout when not in a notebook; redirect it
+        # into the same buffer as the logger so the captured log is complete.
+        with contextlib.redirect_stdout(buf):
+            yield buf
+    finally:
+        # Restore the exact prior target (not sys.stdout) — set_output(obj)
+        # assigns it verbatim, so this round-trips _output cleanly.
+        logger._output = prev
+
+
+def run_create_batch(*, name, conditions, batch_path, experiments=None,
+                     pickle_path=None, threshold=None, rerun=False,
+                     import_images=True, reimport_images=False):
+    """Run :func:`PyFLASH.factory.create_batch`, capturing its progress log.
+
+    Thin wrapper that forwards every argument to ``create_batch`` (with
+    ``progress=True``) inside :func:`capture_output`, so the long-running build
+    streams its ``ProgressTracker`` steps and logger lines into a buffer instead
+    of the terminal. No analysis logic is added here (house rule 1).
+
+    ``create_batch`` is imported at module top as
+    ``from PyFLASH.factory import create_batch`` specifically so tests can
+    monkeypatch ``PyFLASH.ui.services.create_batch``.
+
+    Parameters mirror ``create_batch``'s keyword-only surface: ``name``,
+    ``conditions`` (a built ``conditionList``), ``batch_path``, optional
+    ``experiments`` (dict/list/str/None for auto-discovery), ``pickle_path``
+    (cache dir), ``threshold``, ``rerun``, ``import_images``, and
+    ``reimport_images``.
+
+    Returns
+    -------
+    tuple
+        ``(batch, log_text)`` — the built/cached ``Batch`` and the full captured
+        log string. On a cache hit the log still contains the
+        ``ProgressTracker`` "Loaded existing pickle" line.
+
+    Raises
+    ------
+    ValueError
+        Propagated from ``create_batch`` (e.g. "No experiment folders found");
+        the page catches and displays it cleanly. The output buffer is always
+        restored first because :func:`capture_output` restores in ``finally``.
+    """
+    with capture_output() as buf:
+        batch = create_batch(
+            name,
+            conditions,
+            batch_path,
+            experiments=experiments,
+            threshold=threshold,
+            pickle_path=pickle_path,
+            rerun=rerun,
+            import_images=import_images,
+            reimport_images=reimport_images,
+            progress=True,
+        )
+    return batch, buf.getvalue()
