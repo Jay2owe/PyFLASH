@@ -180,6 +180,15 @@ def test_summary_table_column_filter_exclude():
     assert "SCN_NeuN_Area_um2" not in filtered.columns
 
 
+def test_summary_table_returns_none_when_object_has_no_summary():
+    # An object with neither summaries nor a summary must yield None (which the
+    # Summary page renders as a clean "no summary" notice) rather than raising
+    # AttributeError from get_columns/format_summary_for_display.
+    empty = types.SimpleNamespace()
+    assert services.summary_table(empty, column_strings=["DAPI"]) is None
+    assert services.summary_table(empty, display=True) is None
+
+
 def test_batch_overview_reports_identity():
     batch = _fake_batch()
     overview = services.batch_overview(batch)
@@ -527,6 +536,34 @@ def test_export_excel_capture_false_runs_without_capturing():
     assert len(batch.calls) == 1
     assert batch.calls[0]["if_summary"] is True
     assert batch.calls[0]["save_path"] is None
+
+
+def test_export_excel_forwards_save_names():
+    # The Export page's per-workbook filename fields must reach core. Core
+    # accepts if_summary_save_name / if_extended_save_name / behaviour_save_name
+    # (batch.py export_excel) and treats None as "use the default stem".
+    batch = _FakeExportBatch()
+    services.export_excel(
+        batch,
+        if_summary_save_name="My_IF_Summary",
+        if_extended_save_name="My_IF_Extended",
+        behaviour_save_name="My_Behaviour",
+    )
+    kw = batch.calls[0]
+    assert kw["if_summary_save_name"] == "My_IF_Summary"
+    assert kw["if_extended_save_name"] == "My_IF_Extended"
+    assert kw["behaviour_save_name"] == "My_Behaviour"
+
+
+def test_export_excel_save_names_default_to_none():
+    # When the page leaves a filename blank it passes None; the wrapper forwards
+    # None so core falls back to its default stem.
+    batch = _FakeExportBatch()
+    services.export_excel(batch)
+    kw = batch.calls[0]
+    assert kw["if_summary_save_name"] is None
+    assert kw["if_extended_save_name"] is None
+    assert kw["behaviour_save_name"] is None
 
 
 def test_export_excel_propagates_value_error():

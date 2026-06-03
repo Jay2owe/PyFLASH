@@ -126,6 +126,11 @@ def summary_table(batch, roi_base=None, display=True, column_strings=None,
     df = summaries.get(roi_base) if roi_base else None
     if df is None:
         df = getattr(batch, "summary", None)
+    if df is None:
+        # No summary on this object at all — return None so the Summary page
+        # shows its clean "no summary table" notice (5_summary.py) instead of
+        # raising AttributeError from get_columns/format_summary_for_display.
+        return None
 
     if column_strings:
         # get_columns(df, column_strings=..., exclude='') — exclude must be a
@@ -446,7 +451,9 @@ def export_excel(batch, *, save_path=None, if_summary=True, if_extended=True,
                  behaviour=True, if_summary_exclude=None,
                  if_extended_exclude=None, behaviour_exclude=None,
                  if_summary_include=None, if_extended_include=None,
-                 behaviour_include=None, capture=True):
+                 behaviour_include=None,
+                 if_summary_save_name=None, if_extended_save_name=None,
+                 behaviour_save_name=None, capture=True):
     """Export the formatted Excel workbooks, capturing the progress log.
 
     Thin wrapper over :meth:`PyFLASH.batch.Batch.export_all_excel` (which
@@ -474,6 +481,10 @@ def export_excel(batch, *, save_path=None, if_summary=True, if_extended=True,
         Which workbooks to write.
     *_include, *_exclude : str or list of str, optional
         Per-workbook column-name regex filters (case-insensitive in core).
+    *_save_name : str, optional
+        Per-workbook output filename stem (without ``.xlsx``). ``None`` falls
+        back to the core default stem (``IF_Summary`` / ``IF_Extended`` /
+        ``Behavior_Summary``) via ``batch.py:_resolve_export_stem``.
     capture : bool
         When ``True`` (default) run inside :func:`capture_output` and return the
         captured log; otherwise run directly and return ``""``.
@@ -502,6 +513,9 @@ def export_excel(batch, *, save_path=None, if_summary=True, if_extended=True,
             if_summary_include=if_summary_include,
             if_extended_include=if_extended_include,
             behaviour_include=behaviour_include,
+            if_summary_save_name=if_summary_save_name,
+            if_extended_save_name=if_extended_save_name,
+            behaviour_save_name=behaviour_save_name,
         )
 
     if capture:

@@ -190,6 +190,9 @@ if export:
                 if_summary_exclude=exclude_lists["if_summary"],
                 if_extended_exclude=exclude_lists["if_extended"],
                 behaviour_exclude=exclude_lists["behaviour"],
+                if_summary_save_name=_name("if_summary"),
+                if_extended_save_name=_name("if_extended"),
+                behaviour_save_name=_name("behaviour"),
             )
         except ValueError as exc:
             # Expected, user-actionable (bad regex re-raised by core, etc.).
