@@ -9,6 +9,7 @@ logic is reimplemented (house rule 1).
 """
 
 import contextlib
+import inspect
 import io
 import os
 import re
@@ -41,6 +42,10 @@ __all__ = [
     "validate_regex",
     "export_excel",
     "save_batch",
+    "available_plots",
+    "run_plot_spec",
+    "run_quick_plot",
+    "IMAGE_PLOT_TYPES",
 ]
 
 
@@ -524,3 +529,148 @@ def save_batch(batch, filename):
     """
     save_state(batch, filename, verbose=False)
     return filename
+
+
+# ── Plotting presets (Stage 07) ─────────────────────────────────────────────
+
+# Plot types that require imported images / object locations to be present.
+# These are deferred to Stage 08 (image / representative / location tools); the
+# Quick-plot form routes them there rather than offering a parameter form.
+IMAGE_PLOT_TYPES = ("locations", "images", "representative_images")
+
+
+def available_plots() -> list:
+    """Return the sorted plot-type names from ``spec.PLOT_REGISTRY``.
+
+    These are the short keys (e.g. ``"mean_bars"``, ``"matrices"``) the Quick-plot
+    tab and the Spec-file ``type`` field use. Resolving the registry does **not**
+    import the heavy plotting module — ``PLOT_REGISTRY`` holds lazy string
+    references that :func:`PyFLASH.spec._resolve_func` only resolves on demand
+    (so importing ``services`` stays plotting-free, house rule 2).
+    """
+    from PyFLASH.spec import PLOT_REGISTRY
+
+    return sorted(PLOT_REGISTRY)
+
+
+def _build_plot_kwargs(func, params: dict) -> dict:
+    """Filter *params* down to a kwargs dict valid for plot *func*.
+
+    Mirrors the kwarg handling in :func:`PyFLASH.spec.run_spec` so a guided form
+    behaves exactly like a declarative spec entry. Extracted as a standalone,
+    side-effect-free helper so it can be unit-tested against a real plot
+    function's signature **without** calling the plot (no data required).
+
+    The three rules, in order:
+
+    * ``"columns"`` is remapped to ``"filtered_columns"`` when the function takes
+      ``filtered_columns`` (the notebook/spec name) but not ``columns``.
+    * ``"specificity"`` values are converted from JSON/YAML lists to the tuple /
+      list-of-tuples form the plot functions expect, via
+      :func:`PyFLASH.spec._convert_specificity`.
+    * any key not present in the function signature is dropped (unknown keys are
+      silently ignored, matching ``run_spec``'s final ``{k: v ... if k in
+      valid_params}`` filter).
+
+    Parameters
+    ----------
+    func : callable
+        A resolved ``plot_*`` function (e.g. ``spec._resolve_func(...)``).
+    params : dict
+        Raw form values keyed by spec-style names.
+
+    Returns
+    -------
+    dict
+        Kwargs safe to splat into ``func(experiment, **kwargs)``.
+    """
+    from PyFLASH.spec import _convert_specificity
+
+    valid_params = set(inspect.signature(func).parameters)
+    kwargs = {}
+    for key, value in params.items():
+        param_key = key
+        if (key == "columns"
+                and "columns" not in valid_params
+                and "filtered_columns" in valid_params):
+            param_key = "filtered_columns"
+        if key == "specificity":
+            value = _convert_specificity(value)
+        kwargs[param_key] = value
+    return {k: v for k, v in kwargs.items() if k in valid_params}
+
+
+def run_plot_spec(batch_or_dict, path) -> dict:
+    """Validate then run a declarative plot spec file against a batch.
+
+    Thin wrapper over :func:`PyFLASH.spec.load_spec`, ``validate_spec`` and
+    ``run_spec`` (house rule 1 — no plotting logic here). Validation runs first;
+    **errors block** (the spec is not executed) while **warnings are surfaced**
+    and the spec still runs. ``run_spec`` itself catches each entry's exceptions
+    and returns ``None`` for failures, so a single bad entry never aborts the
+    others — this reports each as ``"ok"`` or ``"failed"`` accordingly.
+
+    Parameters
+    ----------
+    batch_or_dict
+        A single ``Batch``/``Experiment`` or a ``{name: source}`` dict (entries
+        select a source via ``batch: name``), exactly as ``run_spec`` accepts.
+    path : str
+        Path to a ``.yaml`` / ``.json`` / ``.toml`` spec file. (YAML needs
+        PyYAML; JSON works with no extra dependency.)
+
+    Returns
+    -------
+    dict
+        On a validation error: ``{"ok": False, "errors": [...],
+        "warnings": [...]}`` (nothing was run). Otherwise ``{"ok": True,
+        "warnings": [...], "results": ["ok" | "failed", ...]}`` with one entry
+        per plot in spec order.
+    """
+    from PyFLASH.spec import load_spec, run_spec, validate_spec
+
+    spec = load_spec(path)
+    errors, warnings = validate_spec(spec, batch_or_dict)
+    if errors:
+        return {"ok": False, "errors": errors, "warnings": warnings}
+
+    results = run_spec(batch_or_dict, path)
+    return {
+        "ok": True,
+        "warnings": warnings,
+        "results": ["ok" if r is not None else "failed" for r in results],
+    }
+
+
+def run_quick_plot(batch, plot_type: str, params: dict):
+    """Run one plot type with form *params*, returning whatever the plot returns.
+
+    Resolves the ``plot_*`` function lazily through
+    :func:`PyFLASH.spec._resolve_func` (so importing ``services`` never imports
+    plotting), filters *params* to the function's signature via
+    :func:`_build_plot_kwargs` (``columns`` → ``filtered_columns`` remap,
+    ``specificity`` list → tuple conversion, unknown keys dropped), then calls
+    ``func(batch, **kwargs)``. Figures are written to ``batch.fig_path`` when the
+    function's ``save`` is left True; the return value is plot-specific (most
+    ``plot_*`` close the figure and return non-``Figure`` data — embed via the
+    saved files located by :mod:`PyFLASH.ui.figures`).
+
+    Parameters
+    ----------
+    batch
+        A loaded ``Batch``/``Experiment``.
+    plot_type : str
+        A key of ``spec.PLOT_REGISTRY`` (see :func:`available_plots`).
+    params : dict
+        Raw form values keyed by spec-style names.
+
+    Returns
+    -------
+    object
+        Whatever the underlying ``plot_*`` returns (do not assume a ``Figure``).
+    """
+    from PyFLASH.spec import PLOT_REGISTRY, _resolve_func
+
+    func = _resolve_func(PLOT_REGISTRY[plot_type])
+    kwargs = _build_plot_kwargs(func, params)
+    return func(batch, **kwargs)
