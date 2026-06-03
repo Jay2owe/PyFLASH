@@ -76,13 +76,21 @@ class Config:
     ALIASES = {}
 
 
-def _apply_matplotlib_fast_path():
+_fast_path_applied = False
+
+
+def apply_matplotlib_fast_path():
     """Set matplotlib rcParams for faster rendering.
 
-    Called once at import time.  The 'fast' style aggressively simplifies
-    paths and chunks the Agg rasteriser, which speeds up saving large SVGs
-    with many data-heavy artists.
+    Idempotent and lazy.  Importing PyFLASH no longer triggers a matplotlib
+    import; this runs the first time a plotting/stats/modelling module loads
+    (or a figure is saved).  The 'fast' settings aggressively simplify paths
+    and chunk the Agg rasteriser, which speeds up saving large SVGs with many
+    data-heavy artists, and turn off interactive mode.
     """
+    global _fast_path_applied
+    if _fast_path_applied:
+        return
     try:
         import matplotlib as mpl
         from matplotlib import pyplot as _plt
@@ -90,11 +98,13 @@ def _apply_matplotlib_fast_path():
         mpl.rcParams['path.simplify_threshold'] = 1.0
         mpl.rcParams['agg.path.chunksize'] = 10000
         _plt.ioff()
+        _fast_path_applied = True
     except Exception:
         pass
 
 
-_apply_matplotlib_fast_path()
+# Backwards-compatible private alias (kept for any external references).
+_apply_matplotlib_fast_path = apply_matplotlib_fast_path
 
 
 def generate_palettes(colors=None):

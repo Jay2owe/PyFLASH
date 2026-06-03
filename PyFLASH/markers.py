@@ -7,8 +7,6 @@ These represent individual staining channels or attributes within an experiment.
 import re
 import numpy as np
 import pandas as pd
-import seaborn as sns
-from matplotlib import pyplot as plt
 from collections import defaultdict
 try:
     from scipy.spatial import cKDTree
@@ -353,6 +351,10 @@ class Antibody(Attribute):
         )
 
         if visualise:
+            from matplotlib import pyplot as plt
+            import seaborn as sns
+            from PyFLASH.config import apply_matplotlib_fast_path
+            apply_matplotlib_fast_path()
             fig, ax = plt.subplots(1, 1)
             ax.invert_yaxis()
             ax.plot(x, y, c='yellow', lw=4)

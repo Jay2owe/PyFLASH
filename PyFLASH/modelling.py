@@ -20,6 +20,8 @@ import statsmodels.api as sm
 from matplotlib import pyplot as plt
 
 from PyFLASH._logging import logger as _log
+from PyFLASH.config import apply_matplotlib_fast_path
+apply_matplotlib_fast_path()
 try:
     from patsy import dmatrices
 except Exception:  # pragma: no cover - optional import fallback

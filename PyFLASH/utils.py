@@ -8,7 +8,6 @@ import math
 import time
 import numpy as np
 import pandas as pd
-from matplotlib import pyplot as plt
 
 from PyFLASH._logging import logger as _log
 
@@ -782,6 +781,9 @@ def rc_params(line_width=3, tick_major_width=3, tick_major_size=11.5,
               tick_label_size=25, font_weight='bold', font_family='Arial',
               labelsize=22, labelweight='bold'):
     """Set matplotlib rcParams for publication-quality figures."""
+    from matplotlib import pyplot as plt
+    from PyFLASH.config import apply_matplotlib_fast_path
+    apply_matplotlib_fast_path()
     plt.rcParams.update({
         'axes.linewidth': line_width,
         'xtick.major.width': tick_major_width,
@@ -831,7 +833,9 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         If True, skip saving when the output file already exists.
         None falls back to ``Config.SKIP_EXISTING``.
     """
-    from PyFLASH.config import Config
+    from matplotlib import pyplot as plt
+    from PyFLASH.config import Config, apply_matplotlib_fast_path
+    apply_matplotlib_fast_path()
 
     image_name = strip_name(image_name)
     if subfolder is not None:
@@ -874,6 +878,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
 
 def plot_legend_separately(ax, n_labels, flat=False):
     """Extract a legend from axes into its own figure."""
+    from matplotlib import pyplot as plt
     label_params = ax.get_legend_handles_labels()
     figl, axl = plt.subplots()
     axl.axis(False)

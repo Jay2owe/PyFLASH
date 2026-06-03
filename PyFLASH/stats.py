@@ -22,6 +22,9 @@ from scipy.stats import anderson, f_oneway, kstest, normaltest, ttest_ind_from_s
 from statsmodels.formula.api import ols
 import itertools
 
+from PyFLASH.config import apply_matplotlib_fast_path
+apply_matplotlib_fast_path()
+
 try:
     from scipy.stats import tukey_hsd
 except ImportError:  # pragma: no cover

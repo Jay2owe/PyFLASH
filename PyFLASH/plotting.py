@@ -32,7 +32,8 @@ from matplotlib.colors import to_rgb as mpl_to_rgb
 from matplotlib.ticker import LinearLocator
 
 from PyFLASH.iteration import Context, run
-from PyFLASH.config import Config
+from PyFLASH.config import Config, apply_matplotlib_fast_path
+apply_matplotlib_fast_path()  # apply path-simplify rcParams + ioff() once, lazily
 from PyFLASH._logging import logger as _log
 from PyFLASH.experiment import _source_panel_order_rows
 from PyFLASH.image_io import read_image_array, resolve_image_worker_count, get_image_shape
@@ -111,6 +112,10 @@ def _correlation_pandas_method(method):
 
 def _correlation_display_name(method):
     return _CORRELATION_DISPLAY_NAMES[_normalize_correlation_method(method)]
+
+
+def _correlation_filename_label(method):
+    return _correlation_display_name(method)
 
 
 def _correlation_function(method):
@@ -354,7 +359,8 @@ def _export_html_matrix(experiment, columns, specificity, save_path, by, factor,
             color=alt.Color('Correlation:Q', scale=alt.Scale(scheme='redblue', domain=[-1, 1])),
             tooltip=['Variable 1', 'Variable 2', 'Correlation'],
         ).properties(title='Correlation Matrix')
-        html_path = os.path.join(save_path, 'interactive_matrix.html')
+        corr_label = _correlation_filename_label(correlation).lower()
+        html_path = os.path.join(save_path, f'interactive_matrix_{corr_label}.html')
         os.makedirs(save_path, exist_ok=True)
         chart.save(html_path, inline=True)
     except Exception:
@@ -11222,6 +11228,7 @@ def plot_regressions(experiment, x, y,
         return _queued
     _roi_base = _roi_bases[0]
     _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+    test_label = _correlation_filename_label(test)
 
     queue_types = (list, tuple, set, np.ndarray, pd.Series, pd.Index)
     x_is_queue = isinstance(x, queue_types)
@@ -11377,7 +11384,7 @@ def plot_regressions(experiment, x, y,
             )
             if save:
                 save_fig(fig, experiment.fig_path,
-                         f'{x} vs {y} (Combined)' + suffix, subfolder=subfolder)
+                         f'{x} vs {y} (Combined) {test_label}' + suffix, subfolder=subfolder)
             plt.close(fig)
             return
 
@@ -11400,7 +11407,7 @@ def plot_regressions(experiment, x, y,
         )
         if save:
             save_fig(fig, experiment.fig_path,
-                     f'{x} vs {y} ({name})' + suffix, subfolder=subfolder)
+                     f'{x} vs {y} ({name}) {test_label}' + suffix, subfolder=subfolder)
         plt.close(fig)
 
     return run(
@@ -13447,6 +13454,8 @@ def plot_matrices(experiment, filtered_columns=None,
             )
         return queued_outputs
 
+    corr_label = _correlation_filename_label(correlation)
+
     matrix_source_df = experiment.summary
     if marker is not None:
         marker_key = _resolve_marker_data_key(experiment, marker)
@@ -13578,7 +13587,7 @@ def plot_matrices(experiment, filtered_columns=None,
             roi_base=_roi_base, multi_roi=_multi_roi,
         )
         if save:
-            title = f'{name} Correlation Matrix'
+            title = f'{name} {corr_label} Correlation Matrix'
             if marker is not None:
                 title = f'{marker} {title}'
             save_fig(fig, experiment.fig_path, title + suffix, subfolder=subfolder)
@@ -13825,7 +13834,8 @@ def plot_rect_matrices(
     state = {}
     _init_progress_state(state, func_name='plot_rect_matrices', total=n_panels)
     correlation = _normalize_correlation_method(correlation)
-    coeff_label = f"{_correlation_display_name(correlation)} coefficient"
+    corr_label = _correlation_filename_label(correlation)
+    coeff_label = f"{corr_label} coefficient"
 
     outputs = {}
     max_y = max(1, len(panel_y_columns))
@@ -14069,7 +14079,7 @@ def plot_rect_matrices(
         panel_names = " and ".join([p[1] for p in panels[:3]])
         if len(panels) > 3:
             panel_names += " and more"
-        title = f"Rectangular Correlation Matrix ({panel_names})"
+        title = f"Rectangular {corr_label} Correlation Matrix ({panel_names})"
         save_fig(big_fig, experiment.fig_path, title + suffix, subfolder=subfolder)
     plt.close(big_fig)
     return outputs
