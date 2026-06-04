@@ -41,7 +41,6 @@ dependencies = [
     "statsmodels>=0.14",
     "scikit-posthocs>=0.9",
     "scikit-learn>=1.2",   # PCA / clustering of marker profiles
-    "lmfit>=1.2",          # growth-curve / dose-response fitting with parameter CIs
     "openpyxl>=3.0",
     "read-roi>=1.6",
     "Pillow>=9.0",

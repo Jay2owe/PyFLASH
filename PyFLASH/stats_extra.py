@@ -286,3 +286,300 @@ def icc1(roi_df, value_col, group_col="AnimalName") -> float:
     k0 = (n - sum(ni ** 2 for ni in n_i) / n) / (k - 1)  # corrected mean group size
     denom = msb + (k0 - 1) * msw
     return float((msb - msw) / denom) if np.isfinite(denom) and denom > 0 else float("nan")
+
+
+# ── Batch multiplicity control ───────────────────────────────────────
+def apply_fdr(pvalues, labels=None, families=None, method="fdr_bh", alpha=0.05):
+    """Adjust a collection of p-values, optionally within families.
+
+    Use this across a whole multi-marker sweep (Bonferroni/Sidak in the
+    per-figure path are too conservative for dozens of comparisons).  Pass a
+    dict ``{label: p}``, a ``pd.Series``, or a list (plus optional ``labels``).
+    ``families`` (dict ``{label: family}`` or list) applies the correction
+    within each family separately, e.g. all Abeta markers vs all glial markers.
+
+    Returns a tidy DataFrame: ``label, family, p_value, p_adjusted, reject``.
+    """
+    if isinstance(pvalues, dict):
+        labels = list(pvalues.keys())
+        pv = list(pvalues.values())
+    elif isinstance(pvalues, pd.Series):
+        labels = list(pvalues.index) if labels is None else labels
+        pv = list(pvalues.values)
+    else:
+        pv = list(pvalues)
+        if labels is None:
+            labels = list(range(len(pv)))
+
+    n = len(pv)
+    if families is None:
+        fam = ["all"] * n
+    elif isinstance(families, dict):
+        fam = [families.get(lab, "all") for lab in labels]
+    else:
+        fam = list(families)
+
+    out = pd.DataFrame({
+        "label": labels,
+        "family": fam,
+        "p_value": [float(x) for x in pv],
+    })
+    out["p_adjusted"] = np.nan
+    for fam_name in out["family"].unique():
+        mask = out["family"] == fam_name
+        _, adj = adjust_pvalues(out.loc[mask, "p_value"].tolist(), method=method)
+        out.loc[mask, "p_adjusted"] = adj
+    out["reject"] = out["p_adjusted"] <= float(alpha)
+    return out.reset_index(drop=True)
+
+
+# ── Many-to-one (treatment vs control) ───────────────────────────────
+def dunnett_vs_control(groups, labels=None, control=0, alternative="two-sided"):
+    """Dunnett's test: each treatment group vs a single control.
+
+    More powerful and appropriate than all-pairwise Tukey for genotype x drug
+    designs where the question is "does each treatment differ from vehicle/WT?"
+
+    Requires SciPy >= 1.11 (``scipy.stats.dunnett``); raises a clear ImportError
+    otherwise.  ``control`` is an index or a value in ``labels``.
+    Returns a DataFrame: ``comparison, statistic, p_value``.
+    """
+    dunnett = getattr(_sps, "dunnett", None)
+    if dunnett is None:
+        raise ImportError(
+            "Dunnett's test requires SciPy >= 1.11 (scipy.stats.dunnett); "
+            "the installed SciPy is older."
+        )
+    groups = [np.asarray(pd.to_numeric(pd.Series(g), errors="coerce").dropna(), float) for g in groups]
+    if labels is None:
+        labels = [str(i + 1) for i in range(len(groups))]
+    labels = [str(x) for x in labels]
+    if len(labels) != len(groups):
+        raise ValueError("labels and groups must be the same length.")
+
+    if isinstance(control, str):
+        if control not in labels:
+            raise ValueError(f"control '{control}' not found in labels {labels}.")
+        ci = labels.index(control)
+    else:
+        ci = int(control)
+    if not (0 <= ci < len(groups)):
+        raise ValueError("control index out of range.")
+
+    treatment_idx = [i for i in range(len(groups)) if i != ci]
+    if len(treatment_idx) < 1:
+        raise ValueError("Need at least one treatment group besides the control.")
+    treatments = [groups[i] for i in treatment_idx]
+    res = dunnett(*treatments, control=groups[ci], alternative=alternative)
+
+    stats_arr = np.atleast_1d(res.statistic)
+    pvals_arr = np.atleast_1d(res.pvalue)
+    rows = []
+    for k, i in enumerate(treatment_idx):
+        rows.append({
+            "comparison": f"{labels[i]} vs {labels[ci]}",
+            "statistic": float(stats_arr[k]),
+            "p_value": float(pvals_arr[k]),
+        })
+    return pd.DataFrame(rows)
+
+
+# ── Proportions / counts ─────────────────────────────────────────────
+def proportion_test(table, force=None):
+    """Chi-square test of independence, with automatic Fisher's exact fallback.
+
+    For comparing proportions (e.g. % marker-positive cells, fraction of animals
+    with plaques) across conditions.  ``table`` is a contingency table of counts
+    (DataFrame or 2D array).  Fisher's exact is used for a 2x2 table when any
+    expected cell < 5 (or ``force='fisher'``); ``force='chi2'`` keeps chi-square.
+
+    Returns ``{test, statistic, p_value, dof, expected}``.
+    """
+    arr = np.asarray(pd.DataFrame(table).to_numpy() if not isinstance(table, np.ndarray) else table, float)
+    arr = np.atleast_2d(arr)
+    if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+        raise ValueError("Contingency table must be at least 2x2.")
+
+    is_2x2 = arr.shape == (2, 2)
+    chi2, p, dof, expected = _sps.chi2_contingency(arr, correction=is_2x2)
+    use_fisher = (force == "fisher") or (force is None and is_2x2 and expected.min() < 5)
+    if use_fisher and is_2x2:
+        odds, p_f = _sps.fisher_exact(arr)
+        return {"test": "Fisher exact", "statistic": float(odds), "p_value": float(p_f),
+                "dof": None, "expected": expected}
+    return {"test": "Chi-square", "statistic": float(chi2), "p_value": float(p),
+            "dof": int(dof), "expected": expected}
+
+
+# ── Longitudinal helpers ─────────────────────────────────────────────
+def _resolve_numeric_time(series, time_map=None):
+    """Coerce a time factor to numbers: explicit map -> numeric -> trailing digits."""
+    s = pd.Series(series)
+    if time_map:
+        mapped = s.map(time_map)
+        if mapped.notna().any():
+            return pd.to_numeric(mapped, errors="coerce")
+    num = pd.to_numeric(s, errors="coerce")
+    if num.notna().any():
+        return num
+    digits = s.astype(str).str.extract(r"(\d+\.?\d*)")[0]
+    return pd.to_numeric(digits, errors="coerce")
+
+
+def timecourse_auc(df, time_col, value_col, animal_col="AnimalName",
+                   group_col=None, time_map=None, baseline=None):
+    """Trapezoidal area under the time-course, one value per animal.
+
+    Collapses a longitudinal series to a single scalar per animal (total
+    exposure), sidestepping pseudoreplication for the downstream group test.
+    ``time_map`` (e.g. ``{'WeekTwo': 2, 'WeekEight': 8}``) maps a categorical
+    time factor to numbers; otherwise numeric values or trailing digits are used.
+
+    Returns a DataFrame with ``[group_col,] AnimalName, auc``.
+    """
+    work = df.copy()
+    work["_t"] = _resolve_numeric_time(work[time_col], time_map)
+    work["_v"] = pd.to_numeric(work[value_col], errors="coerce")
+    if baseline is not None:
+        work["_v"] = work["_v"] - float(baseline)
+    work = work.dropna(subset=["_t", "_v"])
+
+    keys = [animal_col] + ([group_col] if group_col else [])
+    rows = []
+    grouped = work.groupby(keys) if len(keys) > 1 else work.groupby(animal_col)
+    for key, g in grouped:
+        g = g.sort_values("_t")
+        if len(g) < 2:
+            continue
+        _trapz = getattr(np, "trapezoid", np.trapz)
+        auc = float(_trapz(g["_v"].to_numpy(), g["_t"].to_numpy()))
+        rec = {}
+        key_tuple = key if isinstance(key, tuple) else (key,)
+        for kcol, kval in zip(keys, key_tuple):
+            rec[kcol] = kval
+        rec["auc"] = auc
+        rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def _growth_models():
+    """name -> (model function, n_params, requires_positive_x)."""
+    def linear(x, slope, intercept):
+        return slope * x + intercept
+
+    def exponential(x, amplitude, rate, offset):
+        return amplitude * np.exp(rate * x) + offset
+
+    def logistic(x, bottom, top, ec50, hill):
+        return bottom + (top - bottom) / (1.0 + (ec50 / x) ** hill)
+
+    return {
+        "linear": (linear, 2, False),
+        "exponential": (exponential, 3, False),
+        "logistic": (logistic, 4, True),
+    }
+
+
+def _growth_p0_bounds(name, x, y):
+    """Initial guesses and parameter bounds for each growth model."""
+    ymin, ymax = float(np.min(y)), float(np.max(y))
+    xmin, xmax = float(np.min(x)), float(np.max(x))
+    if name == "linear":
+        slope0 = (y[-1] - y[0]) / (x[-1] - x[0]) if x[-1] != x[0] else 0.0
+        return [slope0, ymin], (-np.inf, np.inf)
+    if name == "exponential":
+        return [(ymax - ymin) or 1.0, 0.1, ymin], (-np.inf, np.inf)
+    if name == "logistic":
+        p0 = [ymin, ymax if ymax > ymin else ymin + 1.0, ((xmin + xmax) / 2.0) or 1.0, 1.0]
+        lb = [-np.inf, -np.inf, 1e-9, 0.1]
+        ub = [np.inf, np.inf, np.inf, 10.0]
+        return p0, (lb, ub)
+    return None, (-np.inf, np.inf)
+
+
+def _aic_least_squares(sse, n, k):
+    """AIC for a least-squares fit (Gaussian errors)."""
+    if sse <= 0 or n <= 0:
+        return -np.inf
+    return float(n * np.log(sse / n) + 2 * k)
+
+
+def fit_growth_curve(x, y, model="auto"):
+    """Fit a growth/decay curve to (x, y) with parameter uncertainties.
+
+    Models: ``'linear'``, ``'exponential'``, ``'logistic'`` (4-parameter), or
+    ``'auto'`` (best by AIC among models with enough residual degrees of
+    freedom).  Uses ``scipy.optimize.curve_fit``; parameter standard errors come
+    from the covariance matrix.
+
+    Returns ``{model, params:{name:{value,stderr}}, r_squared, aic, n,
+    predict(callable), all_models}``.
+    """
+    import inspect
+    from scipy.optimize import curve_fit
+
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    n = len(x)
+    if n < 3:
+        raise ValueError("Need >= 3 finite (x, y) points to fit a growth curve.")
+
+    models = _growth_models()
+    if model == "auto":
+        candidates = [
+            name for name, (_, npar, pos) in models.items()
+            if npar <= n - 1 and not (pos and np.min(x) <= 0)
+        ]
+    else:
+        if model not in models:
+            raise ValueError(f"model must be one of {list(models)} or 'auto'.")
+        func, npar, pos = models[model]
+        if pos and np.min(x) <= 0:
+            raise ValueError(f"model '{model}' requires strictly positive x values.")
+        candidates = [model]
+
+    sst = float(np.sum((y - y.mean()) ** 2))
+    results = {}
+    for name in candidates:
+        func, npar, _ = models[name]
+        names = [p for p in inspect.signature(func).parameters if p != "x"]
+        p0, bounds = _growth_p0_bounds(name, x, y)
+        try:
+            popt, pcov = curve_fit(func, x, y, p0=p0, bounds=bounds, maxfev=20000)
+        except Exception:
+            continue
+        yhat = func(x, *popt)
+        sse = float(np.sum((y - yhat) ** 2))
+        if not np.isfinite(sse):
+            continue
+        perr = (np.sqrt(np.diag(pcov)) if pcov is not None and np.all(np.isfinite(pcov))
+                else np.full(npar, np.nan))
+        results[name] = {
+            "func": func, "names": names, "popt": popt, "perr": perr,
+            "r2": (1.0 - sse / sst) if sst > 0 else float("nan"),
+            "aic": _aic_least_squares(sse, n, npar),
+        }
+    if not results:
+        raise RuntimeError("All growth-curve fits failed for the given data.")
+
+    best_name = min(results, key=lambda k: results[k]["aic"]) if model == "auto" else candidates[0]
+    best = results[best_name]
+    params_out = {
+        nm: {"value": float(v), "stderr": float(e)}
+        for nm, v, e in zip(best["names"], best["popt"], best["perr"])
+    }
+    func = best["func"]
+    popt = best["popt"]
+    return {
+        "model": best_name,
+        "params": params_out,
+        "r_squared": float(best["r2"]),
+        "aic": float(best["aic"]),
+        "n": int(n),
+        "predict": (lambda xx, _f=func, _p=popt: np.asarray(_f(np.asarray(xx, float), *_p), float)),
+        "all_models": {k: {"aic": float(v["aic"])} for k, v in results.items()},
+    }
