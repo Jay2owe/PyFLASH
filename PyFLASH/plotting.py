@@ -3668,6 +3668,196 @@ def _normalize_regression_series(series, mode, axis_name='value'):
     )
 
 
+def _compute_radar_scale_reference(df_source, columns):
+    """Return per-column numeric min/max ranges for radar normalization."""
+    if not isinstance(df_source, pd.DataFrame):
+        return {}
+    ranges = {}
+    for col in columns:
+        if col not in df_source.columns:
+            continue
+        values = _to_numeric_excluding_not_included(df_source[col]).to_numpy(dtype=float)
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            continue
+        ranges[col] = (float(np.min(finite)), float(np.max(finite)))
+    return ranges
+
+
+def _normalize_radar_value(value, value_range):
+    """Normalize one radar value to 0-1; constant ranges map to 0.5."""
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    if not np.isfinite(value_f) or value_range is None:
+        return np.nan
+    low, high = value_range
+    low = float(low)
+    high = float(high)
+    if not np.isfinite(low) or not np.isfinite(high):
+        return np.nan
+    if high == low:
+        return 0.5
+    return float(np.clip((value_f - low) / (high - low), 0.0, 1.0))
+
+
+def _radar_statistic(values, statistic):
+    """Reduce a numeric Series for one radar axis."""
+    clean = _to_numeric_excluding_not_included(values).dropna()
+    if len(clean) == 0:
+        return np.nan
+    arr = clean.to_numpy(dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return np.nan
+
+    if callable(statistic):
+        try:
+            return float(statistic(arr))
+        except TypeError:
+            return float(statistic(pd.Series(arr)))
+
+    key = str(statistic).strip().casefold()
+    if key == "mean":
+        return float(np.mean(arr))
+    if key == "median":
+        return float(np.median(arr))
+    if key == "sum":
+        return float(np.sum(arr))
+    if key == "min":
+        return float(np.min(arr))
+    if key == "max":
+        return float(np.max(arr))
+    raise ValueError("statistic must be 'mean', 'median', 'sum', 'min', 'max', or a callable.")
+
+
+def _radar_statistic_label(statistic):
+    if callable(statistic):
+        return getattr(statistic, "__name__", "custom")
+    return str(statistic).strip() or "statistic"
+
+
+def _radar_wrap_label(label, width):
+    """Wrap long radar labels without adding a dependency."""
+    import textwrap
+
+    try:
+        width_i = int(width)
+    except (TypeError, ValueError):
+        width_i = 0
+    if width_i <= 0:
+        return str(label)
+    return "\n".join(textwrap.wrap(str(label), width=width_i, break_long_words=False)) or str(label)
+
+
+def _style_radar_axis(ax, columns, *, normalize=True, tick_label_size=10, label_wrap=18,
+                      radial_max=None):
+    """Apply common polar-axis styling for radar plots."""
+    n_cols = len(columns)
+    if n_cols == 0:
+        return np.asarray([], dtype=float)
+    angles = np.linspace(0, 2 * np.pi, n_cols, endpoint=False)
+    labels = [
+        _radar_wrap_label(get_display_name(c, minimal=True, compact_per=True), label_wrap)
+        for c in columns
+    ]
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    ax.set_xticks(angles)
+    ax.set_xticklabels(labels, fontsize=tick_label_size)
+    ax.tick_params(axis='x', pad=10)
+    if normalize:
+        ax.set_ylim(0.0, 1.0)
+        ax.set_yticks([0.25, 0.5, 0.75, 1.0])
+        ax.set_yticklabels(["0.25", "0.50", "0.75", "1.00"], fontsize=max(7, tick_label_size - 2))
+    else:
+        if radial_max is None or not np.isfinite(radial_max) or radial_max <= 0:
+            radial_max = 1.0
+        ax.set_ylim(0.0, float(radial_max) * 1.08)
+        ax.tick_params(axis='y', labelsize=max(7, tick_label_size - 2))
+    ax.set_rlabel_position(90)
+    ax.grid(True, alpha=0.35)
+    return angles
+
+
+def _radar_group_order(experiment, summary, *, factor=None):
+    """Return plotted group names in PyFLASH condition/factor order."""
+    if not isinstance(summary, pd.DataFrame) or summary.empty:
+        return []
+    if factor is not None:
+        if factor not in summary.columns:
+            return []
+        values = summary[factor].dropna().unique().tolist()
+        ordered = []
+        for cond in getattr(experiment, 'condition_list', []):
+            match = next((v for v in values if str(v) in str(getattr(cond, 'name', ''))), None)
+            if match is not None and match not in ordered:
+                ordered.append(match)
+        for v in values:
+            if v not in ordered:
+                ordered.append(v)
+        return ordered
+
+    if "Condition" not in summary.columns:
+        return []
+    present = set(summary["Condition"].dropna().astype(str).tolist())
+    ordered = [
+        str(getattr(cond, 'name'))
+        for cond in getattr(experiment, 'condition_list', [])
+        if str(getattr(cond, 'name', '')) in present
+    ]
+    for v in summary["Condition"].dropna().astype(str).tolist():
+        if v not in ordered:
+            ordered.append(v)
+    return ordered
+
+
+def _filter_radar_numeric_columns(experiment, columns, *, factor=None, specificity=None,
+                                  roi_base=None, share_columns_across_panels=True):
+    """Keep radar columns with numeric data in the relevant plotted groups."""
+    summaries = getattr(experiment, 'summaries', None)
+    if roi_base is not None and isinstance(summaries, dict) and roi_base in summaries:
+        base_source = summaries[roi_base]
+    else:
+        base_source = experiment.summary
+    source = _summary_for_queue_share(base_source, specificity)
+    if not isinstance(source, pd.DataFrame) or source.empty:
+        return []
+    group_col = factor if factor is not None else "Condition"
+    if group_col not in source.columns:
+        return []
+    group_order = _radar_group_order(experiment, source, factor=factor)
+    groups = [g for g in group_order if len(source[source[group_col].astype(str) == str(g)]) > 0]
+
+    keep = []
+    for col in columns:
+        if col not in source.columns:
+            continue
+        if not bool(share_columns_across_panels):
+            values = _to_numeric_excluding_not_included(source[col]).dropna()
+            if len(values) > 0 and np.isfinite(values.to_numpy(dtype=float)).any():
+                keep.append(col)
+            continue
+
+        if len(groups) == 0:
+            values = _to_numeric_excluding_not_included(source[col]).dropna()
+            if len(values) > 0 and np.isfinite(values.to_numpy(dtype=float)).any():
+                keep.append(col)
+            continue
+
+        has_all_groups = True
+        for group in groups:
+            group_df = source[source[group_col].astype(str) == str(group)]
+            values = _to_numeric_excluding_not_included(group_df[col]).dropna()
+            if len(values) == 0 or not np.isfinite(values.to_numpy(dtype=float)).any():
+                has_all_groups = False
+                break
+        if has_all_groups:
+            keep.append(col)
+    return keep
+
+
 def _merge_axis_range(axis_range=None, minimum=None, maximum=None):
     """Merge a `(min, max)` pair with explicit bound overrides."""
     lower = None
@@ -9621,6 +9811,117 @@ def combo_pie_action(ctx: Context, state: dict,
     }
 
 
+def radar_action(ctx: Context, state: dict,
+                 filtered_columns=None, statistic="mean", normalize=True,
+                 fill=True, alpha=0.20, line_width=2.0, point_size=28,
+                 tick_label_size=10, label_wrap=18, include_N=False,
+                 **kwargs):
+    """Plot one radar polygon for one condition/factor group."""
+    by = 'factor' if ctx.factor_value is not None else 'condition'
+    idx = ctx.factor_index if by == 'factor' else ctx.condition_index
+    combine = bool(kwargs.get('combine', False))
+    ax_idx = 0 if combine else idx
+    ax = _resolve_action_axis(state, ax_idx)
+    if ax is None:
+        raise IndexError(f"No valid axis available for radar_action ({by} index={idx}).")
+
+    columns = list(filtered_columns or [])
+    if len(columns) < 3:
+        raise ValueError("plot_radar needs at least three numeric columns.")
+
+    source_df = ctx.factor_df if by == 'factor' else ctx.condition_df
+    group_name, group_color = _resolve_group_label_color(ctx)
+    raw_values = np.asarray([
+        _radar_statistic(source_df[col], statistic) if col in source_df.columns else np.nan
+        for col in columns
+    ], dtype=float)
+
+    valid_row_mask = pd.Series(False, index=source_df.index)
+    for col in columns:
+        if col in source_df.columns:
+            valid_row_mask = valid_row_mask | _to_numeric_excluding_not_included(source_df[col]).notna()
+    if 'AnimalName' in source_df.columns:
+        n_animals = int(source_df.loc[valid_row_mask, 'AnimalName'].nunique())
+    else:
+        n_animals = int(valid_row_mask.sum())
+
+    if bool(normalize):
+        scale_reference = kwargs.get('scale_reference')
+        if scale_reference is None:
+            scale_reference = _compute_radar_scale_reference(source_df, columns)
+        values = np.asarray([
+            _normalize_radar_value(raw, scale_reference.get(col))
+            for raw, col in zip(raw_values, columns)
+        ], dtype=float)
+    else:
+        values = raw_values
+
+    finite = np.isfinite(values)
+    if not finite.any():
+        state['radar_skip_save'] = True
+        return {
+            'radar': None,
+            'group': group_name,
+            'n_animals': n_animals,
+            'values': values,
+            'raw_values': raw_values,
+        }
+
+    state['radar_skip_save'] = False
+    state['radar_series_count'] = int(state.get('radar_series_count', 0)) + 1
+    raw_max = float(np.nanmax(values[finite]))
+    state['radar_raw_max'] = max(float(state.get('radar_raw_max', 0.0)), raw_max)
+
+    radial_max = None if bool(normalize) else state.get('radar_raw_max')
+    angles = _style_radar_axis(
+        ax,
+        columns,
+        normalize=bool(normalize),
+        tick_label_size=tick_label_size,
+        label_wrap=label_wrap,
+        radial_max=radial_max,
+    )
+    closed_angles = np.concatenate([angles, angles[:1]])
+    closed_values = np.concatenate([values, values[:1]])
+    legend_label = str(group_name)
+    if include_N:
+        legend_label = f"{legend_label} (n={n_animals})"
+
+    ax.plot(
+        closed_angles,
+        closed_values,
+        color=group_color,
+        linewidth=float(line_width),
+        label=legend_label,
+        zorder=3,
+    )
+    if bool(fill):
+        ax.fill(closed_angles, closed_values, color=group_color, alpha=float(alpha), zorder=2)
+    if point_size is not None and float(point_size) > 0:
+        ax.scatter(
+            angles,
+            values,
+            color=group_color,
+            s=float(point_size),
+            edgecolor='black',
+            linewidth=0.4,
+            zorder=4,
+        )
+
+    title_label = f"{group_name} ({_radar_statistic_label(statistic)})"
+    if include_N and not combine:
+        title_label = f"{title_label}, n={n_animals}"
+    if not combine:
+        ax.set_title(title_label, fontsize=13, weight='bold', pad=18)
+    return {
+        'radar': ax,
+        'group': group_name,
+        'n_animals': n_animals,
+        'values': values,
+        'raw_values': raw_values,
+    }
+
+
 def regression_action(ctx: Context, state: dict,
                       x=None, y=None, normalize_x=True, normalize_y=True,
                       test=None, **kwargs):
@@ -12707,6 +13008,260 @@ def plot_volcano(experiment, filtered_columns=None,
     return result
 
 
+def plot_radar(experiment, filtered_columns=None,
+               by='conditions', factor=None,
+               specificity=None, roi=None, save=True,
+               combine=False,
+               column_strings=None, regex_string=None, exclude='',
+               statistic='mean',
+               normalize=True, share_scale=True,
+               share_columns_across_panels=True,
+               fill=True, alpha=0.20, line_width=2.0, point_size=28,
+               tick_label_size=10, label_wrap=18,
+               include_N=False, figsize=(8, 8),
+               _scale_reference=None, _resolved_columns=None):
+    """
+    Radar/spider plot across selected summary columns.
+
+    One polygon is drawn per condition or factor level.  With combine=False,
+    each group is saved as a separate radar plot.  With combine=True, all
+    groups are overlaid on one radar plot.
+
+    `filtered_columns` defines the radar axes.  `column_strings`,
+    `regex_string`, and `exclude` use the same column-filtering style as
+    `plot_mean_bars`, `plot_matrices`, and `plot_volcano`.
+
+    `specificity` supports a single tuple, e.g. ("Time", "WeekEight"), or a
+    queue of tuples, e.g. [("Time", "WeekFour"), ("Time", "WeekEight")].
+    When normalize=True and share_scale=True, queued calls share the same
+    per-column min/max reference so sibling radar plots are comparable.
+    """
+    # ROI queue mode - iterate over ROI bases
+    _roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(_roi_bases) > 1:
+        _queued = {}
+        for _rb in _roi_bases:
+            _queued[_rb] = plot_radar(
+                experiment,
+                filtered_columns=filtered_columns,
+                by=by, factor=factor,
+                specificity=specificity, roi=_rb, save=save,
+                combine=combine,
+                column_strings=column_strings, regex_string=regex_string, exclude=exclude,
+                statistic=statistic,
+                normalize=normalize, share_scale=share_scale,
+                share_columns_across_panels=share_columns_across_panels,
+                fill=fill, alpha=alpha, line_width=line_width, point_size=point_size,
+                tick_label_size=tick_label_size, label_wrap=label_wrap,
+                include_N=include_N, figsize=figsize,
+                _scale_reference=_scale_reference,
+                _resolved_columns=_resolved_columns,
+            )
+        return _queued
+    _roi_base = _roi_bases[0]
+    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+
+    if _resolved_columns is None:
+        summaries = getattr(experiment, 'summaries', None)
+        resolved_columns = _resolve_filtered_columns(
+            experiment,
+            filtered_columns=filtered_columns,
+            column_strings=column_strings,
+            regex_string=regex_string,
+            exclude=exclude,
+            source_df=(summaries[_roi_base] if isinstance(summaries, dict) and _roi_base in summaries else None),
+        )
+        resolved_columns = _filter_radar_numeric_columns(
+            experiment,
+            resolved_columns,
+            factor=factor,
+            specificity=specificity,
+            roi_base=_roi_base,
+            share_columns_across_panels=share_columns_across_panels,
+        )
+    else:
+        resolved_columns = list(_resolved_columns)
+
+    if len(resolved_columns) < 3:
+        raise ValueError(
+            "plot_radar needs at least three plottable numeric columns after filtering."
+        )
+
+    scale_reference = _scale_reference
+    if bool(normalize) and bool(share_scale) and scale_reference is None:
+        summaries = getattr(experiment, 'summaries', None)
+        if isinstance(summaries, dict) and _roi_base in summaries:
+            scale_source = summaries[_roi_base]
+        else:
+            scale_source = experiment.summary
+        scale_source = _summary_for_queue_share(scale_source, specificity)
+        scale_reference = _compute_radar_scale_reference(scale_source, resolved_columns)
+
+    if _is_specificity_queue(specificity):
+        queued_outputs = {}
+        for spec in _iter_specificities(specificity):
+            queued_outputs[spec] = plot_radar(
+                experiment,
+                filtered_columns=resolved_columns,
+                by=by,
+                factor=factor,
+                specificity=spec,
+                roi=roi,
+                save=save,
+                combine=combine,
+                statistic=statistic,
+                normalize=normalize,
+                share_scale=share_scale,
+                share_columns_across_panels=share_columns_across_panels,
+                fill=fill,
+                alpha=alpha,
+                line_width=line_width,
+                point_size=point_size,
+                tick_label_size=tick_label_size,
+                label_wrap=label_wrap,
+                include_N=include_N,
+                figsize=figsize,
+                _scale_reference=scale_reference,
+                _resolved_columns=resolved_columns,
+            )
+        return queued_outputs
+
+    level = 'factors' if factor else by
+    if level not in {'conditions', 'factors'}:
+        raise ValueError("plot_radar supports grouping by conditions or factors.")
+    if level == 'factors':
+        summary_for_factor = _filtered_summary_for_specificity(experiment, specificity, roi_base=_roi_base)
+        if factor is None or factor not in summary_for_factor.columns:
+            raise ValueError(f"Factor column '{factor}' not found in summary.")
+
+    combine_mode = bool(combine)
+    _radar_shared_fig_ref = {"fig": None}
+
+    def _new_radar_fig():
+        return plt.subplots(figsize=figsize, subplot_kw={'projection': 'polar'})
+
+    def setup(ctx, state):
+        _init_progress_state(
+            state,
+            func_name='plot_radar',
+            total=_count_level_processes(experiment, level, factor=factor, specificity=specificity, roi_base=_roi_base),
+        )
+        _progress_start_item(state)
+        if combine_mode:
+            if state.get('fig') is None or state.get('ax') is None:
+                fig, ax = _new_radar_fig()
+                state['fig'] = fig
+                state['ax'] = ax
+                state['radar_series_count'] = 0
+                state['radar_raw_max'] = 0.0
+        else:
+            if 'shared_fig' not in state or 'shared_ax' not in state:
+                fig, ax = _new_radar_fig()
+                state['shared_fig'] = fig
+                state['shared_ax'] = ax
+                _radar_shared_fig_ref["fig"] = fig
+            else:
+                fig = state['shared_fig']
+                ax = state['shared_ax']
+                ax.clear()
+            state['fig'] = fig
+            state['ax'] = ax
+            state['radar_series_count'] = 0
+            state['radar_raw_max'] = 0.0
+        state['radar_skip_save'] = False
+
+    def teardown(ctx, state, results):
+        fig = state.get('fig')
+        ax = state.get('ax')
+        name = ctx.factor_value or ctx.condition or 'Combined'
+        _progress_finish_item(state, name)
+
+        subfolder, suffix = build_subfolder(
+            plot_type='Radar',
+            factor=factor,
+            specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+            roi_base=_roi_base,
+            multi_roi=_multi_roi,
+        )
+        stat_label = _radar_statistic_label(statistic)
+
+        if combine_mode:
+            prog = state.get('progress_state', {})
+            is_last = int(prog.get('completed', 0)) >= int(prog.get('total', 1))
+            if not is_last:
+                return
+            if fig is None or ax is None:
+                return
+            if int(state.get('radar_series_count', 0)) == 0:
+                ax.text(0.5, 0.5, "No data available", transform=ax.transAxes,
+                        ha='center', va='center')
+            else:
+                if not bool(normalize):
+                    _style_radar_axis(
+                        ax,
+                        resolved_columns,
+                        normalize=False,
+                        tick_label_size=tick_label_size,
+                        label_wrap=label_wrap,
+                        radial_max=state.get('radar_raw_max'),
+                    )
+                handles, labels = ax.get_legend_handles_labels()
+                if len(labels) > 0:
+                    seen = {}
+                    for h, l in zip(handles, labels):
+                        if l not in seen:
+                            seen[l] = h
+                    legend_title = str(factor) if factor is not None else 'Condition'
+                    ax.legend(
+                        list(seen.values()), list(seen.keys()),
+                        title=legend_title,
+                        frameon=False,
+                        loc='center left',
+                        bbox_to_anchor=(1.08, 0.5),
+                    )
+            ax.set_title(f"Radar {stat_label} (Combined)", fontsize=14, weight='bold', pad=18)
+            if save:
+                save_fig(fig, experiment.fig_path,
+                         f'Radar {stat_label} Combined' + suffix,
+                         subfolder=subfolder)
+            plt.close(fig)
+            return
+
+        if int(state.get('radar_series_count', 0)) == 0 or bool(state.get('radar_skip_save', False)):
+            return
+        if fig is not None and ax is not None and save:
+            save_fig(fig, experiment.fig_path,
+                     f'Radar {stat_label} {name}' + suffix,
+                     subfolder=subfolder)
+
+    result = run(
+        experiment,
+        over=level,
+        action=radar_action,
+        factor=factor,
+        specificity=specificity,
+        setup=setup,
+        teardown=teardown,
+        filtered_columns=resolved_columns,
+        statistic=statistic,
+        normalize=normalize,
+        fill=fill,
+        alpha=alpha,
+        line_width=line_width,
+        point_size=point_size,
+        tick_label_size=tick_label_size,
+        label_wrap=label_wrap,
+        include_N=include_N,
+        combine=combine_mode,
+        scale_reference=scale_reference if bool(share_scale) else None,
+        roi_base=_roi_base,
+    )
+    if not combine_mode and _radar_shared_fig_ref.get("fig") is not None:
+        plt.close(_radar_shared_fig_ref["fig"])
+    return result
+
+
 def plot_pie_charts(experiment, marker, x_attr,
                     by='conditions', factor=None,
                     threshold=None,
@@ -15306,6 +15861,13 @@ _PARAM_DESCRIPTIONS = {
     'control':              'Name of the control condition for fold-change calculation.',
     'p_threshold':          'Significance threshold for highlighting (default 0.05).',
     'label_points':         '"significant" to label sig. points, "all", or None.',
+    # Radar
+    'statistic':            'Group summary for each radar axis: "mean", "median", "sum", "min", "max", or callable.',
+    'share_scale':          'For normalized radar plots, use one per-column min/max scale across panels/queues.',
+    'fill':                 'Fill radar polygons as well as drawing outlines.',
+    'point_size':           'Marker size for radar vertices or baseline size for 3D scatter points.',
+    'label_wrap':           'Maximum radar-axis label width before wrapping. Use 0 to disable wrapping.',
+    'figsize':              'Matplotlib figure size in inches.',
     # ── Pie charts ───────────────────────────────────────────────────
     'threshold':            'Value(s) for binning data into groups.',
     'start_angle':          'Rotation angle for the first slice (default 90).',

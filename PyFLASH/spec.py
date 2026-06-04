@@ -23,6 +23,7 @@ PLOT_REGISTRY = {
     'mean_bars': 'plot_mean_bars',
     'histograms': 'plot_histograms',
     'matrices': 'plot_matrices',
+    'radar': 'plot_radar',
     'volcano': 'plot_volcano',
     'ridgeline': 'plot_ridgeline',
     'ecdf': 'plot_ecdf',

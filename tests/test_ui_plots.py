@@ -40,7 +40,7 @@ def test_available_plots_matches_registry():
     plots = services.available_plots()
     assert plots == sorted(PLOT_REGISTRY)
     # Spot-check a few expected keys are present.
-    for key in ("mean_bars", "matrices", "regressions", "volcano",
+    for key in ("mean_bars", "matrices", "radar", "regressions", "volcano",
                 "histograms"):
         assert key in plots
 
