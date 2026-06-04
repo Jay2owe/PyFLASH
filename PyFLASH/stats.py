@@ -396,11 +396,22 @@ def _fmt_p(p):
     return f"{p:.4f}".rstrip("0").rstrip(".")
 
 
+def _fmt_es(v):
+    """Format an effect size / CI bound (not a p-value): fixed 2 decimals."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "n/a"
+    if np.isnan(v):
+        return "n/a"
+    return f"{v:.2f}"
+
+
 def _name_of(item):
     return item.name if hasattr(item, "name") else str(item)
 
 
-def _annotate_stats_summary(ax, test, post_hoc, overall, comparisons, pairwise_pvalues, condition_list, factor_list=None):
+def _annotate_stats_summary(ax, test, post_hoc, overall, comparisons, pairwise_pvalues, condition_list, factor_list=None, effect_strings=None):
     """Draw a compact statistics summary to the right of the plot."""
     lines = [f"Test: {test}", f"Post-hoc: {post_hoc}"]
 
@@ -426,6 +437,10 @@ def _annotate_stats_summary(ax, test, post_hoc, overall, comparisons, pairwise_p
         except Exception:
             label = comp
         lines.append(f"{label}: p={_fmt_p(p)}")
+
+    if effect_strings:
+        lines.append("")
+        lines.extend(str(s) for s in effect_strings)
 
     ax.text(
         1.02, 1.0, "\n".join(lines),
@@ -622,6 +637,50 @@ def plot_comparison_lines_from_fig_data(*args, **kwargs):
     return plot_comparison_lines_from_figdata(*args, **kwargs)
 
 
+def _effects_to_results_dict(effects, results_dict):
+    """Record computed effect sizes into the results dict written to CSV."""
+    for key, value in (effects.get("overall") or {}).items():
+        results_dict[f"Effect overall ({key})"] = [
+            float(value) if value is not None else np.nan, np.nan,
+        ]
+    for row in effects.get("pairwise", []):
+        results_dict[f"Effect {row['comparison']} ({row['metric']})"] = [
+            float(row["value"]) if row.get("value") is not None else np.nan,
+            [row.get("ci_low"), row.get("ci_high")],
+        ]
+    return results_dict
+
+
+def _format_effect_strings(effects, condition_list):
+    """Build compact, human-readable effect-size lines for figure/CSV."""
+    if not effects:
+        return []
+    out = []
+    for key, value in (effects.get("overall") or {}).items():
+        out.append(f"{key.replace('_', ' ')}={_fmt_es(value)}")
+    for row in effects.get("pairwise", []):
+        comp = row.get("comparison", "")
+        try:
+            a, b = [int(x) - 1 for x in str(comp).split("-")]
+            if 0 <= a < len(condition_list) and 0 <= b < len(condition_list):
+                label = f"{_name_of(condition_list[a])} vs {_name_of(condition_list[b])}"
+            else:
+                label = comp
+        except Exception:
+            label = comp
+        metric = row.get("metric", "effect")
+        short = {"hedges_g": "g", "rank_biserial_r": "r"}.get(metric, metric)
+        lo, hi = row.get("ci_low"), row.get("ci_high")
+        if lo is not None and hi is not None and np.isfinite(lo) and np.isfinite(hi):
+            ci_txt = f" [{_fmt_es(lo)}, {_fmt_es(hi)}]"
+        else:
+            ci_txt = ""
+        interp = row.get("interpretation", "")
+        interp_txt = f" {interp}" if interp and interp != "n/a" else ""
+        out.append(f"{label}: {short}={_fmt_es(row.get('value'))}{ci_txt}{interp_txt}")
+    return (["Effect sizes:"] + out) if out else []
+
+
 def multipleComparisons(
     experiment,
     dfs,
@@ -676,6 +735,7 @@ def multipleComparisons(
         comparisons = cached['comparisons']
         cond_list = group_labels if group_labels is not None else experiment.condition_list
         results_strings = cached.get('results_strings', {})
+        effect_strings = cached.get('effect_strings', [])
         if save_name:
             results_to_excel(results_dict, results_strings, experiment.data_path, save_name, verbose=verbose)
         annotation_objects = None
@@ -696,6 +756,7 @@ def multipleComparisons(
                     comparisons=comparisons, pairwise_pvalues=results,
                     condition_list=cond_list,
                     factor_list=experiment.factor if hasattr(experiment, "factor") else None,
+                    effect_strings=effect_strings,
                 )
         return test, post_hoc, annotation_objects, results_dict
 
@@ -783,6 +844,25 @@ def multipleComparisons(
         "Post-Hoc Test Used": post_hoc,
         "Comparisons": comp_strings,
     }
+
+    # ── Effect sizes ────────────────────────────────────────────────
+    effects = {}
+    effect_strings = []
+    if getattr(Config, "EFFECT_SIZES", True):
+        try:
+            from PyFLASH import stats_extra as _se
+            effects = _se.effect_sizes_for_test(
+                valid_groups, test, comparisons,
+                ci=getattr(Config, "EFFECT_CI", True),
+                n_resamples=getattr(Config, "EFFECT_CI_RESAMPLES", 5000),
+            )
+            _effects_to_results_dict(effects, results_dict)
+            effect_strings = _format_effect_strings(effects, cond_list)
+            if effect_strings:
+                results_strings["Effect sizes"] = effect_strings[1:]  # drop header for CSV
+        except Exception as e:
+            results_dict["Effect_error"] = [str(e), np.nan]
+
     if save_name:
         results_to_excel(results_dict, results_strings, experiment.data_path, save_name, verbose=verbose)
     annotation_objects = None
@@ -810,6 +890,7 @@ def multipleComparisons(
                 pairwise_pvalues=results,
                 condition_list=cond_list,
                 factor_list=experiment.factor if hasattr(experiment, "factor") else None,
+                effect_strings=effect_strings,
             )
 
     # ── Cache store ──────────────────────────────────────────────────
@@ -823,6 +904,7 @@ def multipleComparisons(
             'results_dict': results_dict,
             'comparisons': comparisons,
             'results_strings': results_strings,
+            'effect_strings': effect_strings,
         }
 
     return test, post_hoc, annotation_objects, results_dict

@@ -69,6 +69,11 @@ class Config:
     EXPORT_HTML = False  # True to export interactive Altair HTML alongside SVG plots
     STATS_CACHE = False  # True to cache stats results within a session
 
+    # ── Effect sizes ───────────────────────────────────────────────────
+    EFFECT_SIZES = True        # compute effect sizes alongside p-values
+    EFFECT_CI = True           # bootstrap CIs for parametric pairwise effects
+    EFFECT_CI_RESAMPLES = 5000  # bootstrap resamples for EFFECT_CI
+
     # ── Path aliases ──────────────────────────────────────────────────
     # User-defined overrides for specificity/factor abbreviations.
     # Auto-generated aliases are built at batch creation; manual entries

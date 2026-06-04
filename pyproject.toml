@@ -40,6 +40,8 @@ dependencies = [
     "scipy>=1.9",
     "statsmodels>=0.14",
     "scikit-posthocs>=0.9",
+    "scikit-learn>=1.2",   # PCA / clustering of marker profiles
+    "lmfit>=1.2",          # growth-curve / dose-response fitting with parameter CIs
     "openpyxl>=3.0",
     "read-roi>=1.6",
     "Pillow>=9.0",
@@ -48,6 +50,8 @@ dependencies = [
 [project.optional-dependencies]
 windows = ["pywin32"]
 ui = ["streamlit>=1.36", "pyyaml>=6"]   # pyyaml needed by run_spec for YAML specs
+spatial = ["pointpats>=2.4"]            # Ripley's K / spatial point-pattern stats
+estimation = ["dabest>=2024.3"]         # Gardner-Altman estimation plots
 
 [project.scripts]
 pyflash-ui = "PyFLASH.ui:main"
