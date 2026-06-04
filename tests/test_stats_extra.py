@@ -164,7 +164,7 @@ class _Batch:
 
 
 def test_plot_power_curve_smoke():
-    from PyFLASH import plots_extra as pe
+    from PyFLASH import plotting as pe
     fig, data = pe.plot_power_curve(effect_sizes=(0.5, 0.8), n_range=(2, 12),
                                     observed=0.6, observed_n=5, return_data=True)
     assert fig is not None
@@ -172,7 +172,7 @@ def test_plot_power_curve_smoke():
 
 
 def test_plot_marker_pca_smoke():
-    from PyFLASH import plots_extra as pe
+    from PyFLASH import plotting as pe
     rng = np.random.default_rng(3)
     n = 12
     summary = pd.DataFrame({
@@ -190,7 +190,7 @@ def test_plot_marker_pca_smoke():
 
 
 def test_plot_timecourse_smoke():
-    from PyFLASH import plots_extra as pe
+    from PyFLASH import plotting as pe
     df, tmap = _timecourse_df()
     fig, fits = pe.plot_timecourse(_Batch(df), "Abeta_Count", time_col="Time",
                                    group_col="Genotype", time_map=tmap, return_data=True)

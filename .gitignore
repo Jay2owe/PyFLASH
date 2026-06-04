@@ -16,6 +16,7 @@ dist/
 # Local analysis outputs and private data exports.
 No Combo/
 Exports/
+Results/
 *.xlsx
 *.xls
 *.pkl
@@ -26,3 +27,9 @@ example_notebook.ipynb
 CONTEXT.md
 HANDOFF.md
 .claude/
+
+# Agent/dev execution artifacts and internal step-plan folders (contain
+# private absolute paths; not for public release).
+.swarm_logs/
+docs/plot-superplot/
+docs/pyflash-ui/

@@ -36,6 +36,9 @@ PLOT_REGISTRY = {
     'rect_matrices': 'plot_rect_matrices',
     'coloc_upset': 'plot_coloc_upset',
     'coloc_sankey': 'plot_coloc_sankey',
+    'power_curve': 'plot_power_curve',
+    'marker_pca': 'plot_marker_pca',
+    'timecourse': 'plot_timecourse',
 }
 
 # Keys consumed by the spec runner, not passed to plot functions

@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import matplotlib
 matplotlib.use("Agg")
+from matplotlib import pyplot as plt
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -9,6 +11,7 @@ from PyFLASH.conditions import condition, conditionList
 from PyFLASH.plotting import (
     _compute_radar_scale_reference,
     _normalize_radar_value,
+    _style_radar_axis,
     plot_radar,
 )
 
@@ -56,6 +59,22 @@ def test_radar_normalization_maps_constant_columns_to_midpoint():
     assert _normalize_radar_value(3, reference["b"]) == pytest.approx(0.5)
 
 
+def test_radar_axis_labels_requested_radii_in_grey():
+    fig, ax = plt.subplots(subplot_kw={"projection": "polar"})
+
+    _style_radar_axis(
+        ax,
+        ["A_Count", "B_IntDen", "C_Area"],
+        radial_value_radii=(0.30, 1.00),
+        radial_value_color="grey",
+    )
+
+    labels = ax.get_yticklabels()
+    assert [label.get_text() for label in labels] == ["0.30", "1.00"]
+    assert [label.get_color() for label in labels] == ["grey", "grey"]
+    plt.close(fig)
+
+
 def test_plot_radar_combined_factor_saves_one_svg(tmp_path):
     exp = _fake_experiment(tmp_path)
 
@@ -71,6 +90,26 @@ def test_plot_radar_combined_factor_saves_one_svg(tmp_path):
     saved = list((tmp_path / "Radar").glob("*.svg"))
     assert len(saved) == 1
     assert "Combined" in saved[0].name
+
+
+def test_plot_radar_returns_per_animal_x_values(tmp_path):
+    exp = _fake_experiment(tmp_path)
+
+    result = plot_radar(
+        exp,
+        filtered_columns=["A_Count", "B_IntDen", "C_Area"],
+        factor="Genotype",
+        specificity=("Time", "WeekFour"),
+        combine=True,
+        save=False,
+    )
+
+    assert result["group"] == ["Syn", "hAPP"]
+    assert [record["animal"] for record in result["animal_values"][0]] == ["S1W4", "S2W4"]
+    assert [record["animal"] for record in result["animal_values"][1]] == ["H1W4", "H2W4"]
+    assert result["animal_values"][0][0]["values"][0] == pytest.approx(0.0)
+    assert result["animal_values"][0][1]["values"][0] == pytest.approx(1 / 3)
+    assert np.isnan(result["animal_values"][0][1]["values"][2])
 
 
 def test_plot_radar_separate_factor_saves_one_svg_per_factor(tmp_path):

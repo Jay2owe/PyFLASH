@@ -3702,6 +3702,86 @@ def _normalize_radar_value(value, value_range):
     return float(np.clip((value_f - low) / (high - low), 0.0, 1.0))
 
 
+def _normalize_radar_radial_value_radii(radial_value_radii):
+    """Validate fractional radii used for radar radial value labels."""
+    if radial_value_radii is None or radial_value_radii is False:
+        return ()
+
+    if isinstance(radial_value_radii, str):
+        text = radial_value_radii.strip()
+        if text == "" or text.casefold() in {"none", "false", "off"}:
+            return ()
+        items = [p.strip() for p in re.split(r"[,;]", text) if p.strip() != ""]
+    elif np.isscalar(radial_value_radii):
+        items = [radial_value_radii]
+    else:
+        items = list(radial_value_radii)
+
+    radii = []
+    for item in items:
+        radius = float(item)
+        if not np.isfinite(radius) or radius < 0.0 or radius > 1.0:
+            raise ValueError("radial_value_radii entries must be finite values between 0 and 1.")
+        if not any(abs(radius - existing) < 1e-12 for existing in radii):
+            radii.append(radius)
+    return tuple(radii)
+
+
+def _format_radar_radial_value_label(value, *, normalize=True):
+    """Format values shown at selected radar radii."""
+    value_f = float(value)
+    if not np.isfinite(value_f):
+        return ""
+    if normalize:
+        return f"{value_f:.2f}"
+    return f"{value_f:.3g}"
+
+
+def _radar_values_for_frame(df, columns, statistic, *, normalize=True,
+                            scale_reference=None):
+    """Return raw and plotted radar values for a dataframe slice."""
+    raw_values = np.asarray([
+        _radar_statistic(df[col], statistic) if col in df.columns else np.nan
+        for col in columns
+    ], dtype=float)
+    if bool(normalize):
+        if scale_reference is None:
+            scale_reference = _compute_radar_scale_reference(df, columns)
+        values = np.asarray([
+            _normalize_radar_value(raw, scale_reference.get(col))
+            for raw, col in zip(raw_values, columns)
+        ], dtype=float)
+    else:
+        values = raw_values
+    return raw_values, values
+
+
+def _radar_animal_value_records(source_df, columns, statistic, *, normalize=True,
+                                scale_reference=None):
+    """Return per-animal radar values for overlay markers."""
+    if not isinstance(source_df, pd.DataFrame) or "AnimalName" not in source_df.columns:
+        return []
+
+    records = []
+    for animal_name, animal_df in source_df.groupby("AnimalName", sort=False, dropna=True):
+        if str(animal_name).strip() == "":
+            continue
+        raw_values, values = _radar_values_for_frame(
+            animal_df,
+            columns,
+            statistic,
+            normalize=normalize,
+            scale_reference=scale_reference,
+        )
+        if np.isfinite(values).any():
+            records.append({
+                "animal": animal_name,
+                "values": values,
+                "raw_values": raw_values,
+            })
+    return records
+
+
 def _radar_statistic(values, statistic):
     """Reduce a numeric Series for one radar axis."""
     clean = _to_numeric_excluding_not_included(values).dropna()
@@ -3752,7 +3832,8 @@ def _radar_wrap_label(label, width):
 
 
 def _style_radar_axis(ax, columns, *, normalize=True, tick_label_size=10, label_wrap=18,
-                      radial_max=None):
+                      radial_max=None, radial_value_radii=None,
+                      radial_value_color="grey", radial_value_size=None):
     """Apply common polar-axis styling for radar plots."""
     n_cols = len(columns)
     if n_cols == 0:
@@ -3767,15 +3848,34 @@ def _style_radar_axis(ax, columns, *, normalize=True, tick_label_size=10, label_
     ax.set_xticks(angles)
     ax.set_xticklabels(labels, fontsize=tick_label_size)
     ax.tick_params(axis='x', pad=10)
+    label_radii = _normalize_radar_radial_value_radii(radial_value_radii)
+    radial_tick_size = max(7, tick_label_size - 2) if radial_value_size is None else float(radial_value_size)
     if normalize:
         ax.set_ylim(0.0, 1.0)
-        ax.set_yticks([0.25, 0.5, 0.75, 1.0])
-        ax.set_yticklabels(["0.25", "0.50", "0.75", "1.00"], fontsize=max(7, tick_label_size - 2))
+        if len(label_radii) > 0:
+            ax.set_yticks(list(label_radii))
+            ax.set_yticklabels(
+                [_format_radar_radial_value_label(r, normalize=True) for r in label_radii],
+                fontsize=radial_tick_size,
+                color=str(radial_value_color),
+            )
+        else:
+            ax.set_yticks([0.25, 0.5, 0.75, 1.0])
+            ax.set_yticklabels(["0.25", "0.50", "0.75", "1.00"], fontsize=max(7, tick_label_size - 2))
     else:
         if radial_max is None or not np.isfinite(radial_max) or radial_max <= 0:
             radial_max = 1.0
         ax.set_ylim(0.0, float(radial_max) * 1.08)
-        ax.tick_params(axis='y', labelsize=max(7, tick_label_size - 2))
+        if len(label_radii) > 0:
+            tick_values = [float(radial_max) * r for r in label_radii]
+            ax.set_yticks(tick_values)
+            ax.set_yticklabels(
+                [_format_radar_radial_value_label(v, normalize=False) for v in tick_values],
+                fontsize=radial_tick_size,
+                color=str(radial_value_color),
+            )
+        else:
+            ax.tick_params(axis='y', labelsize=max(7, tick_label_size - 2))
     ax.set_rlabel_position(90)
     ax.grid(True, alpha=0.35)
     return angles
@@ -9815,6 +9915,10 @@ def radar_action(ctx: Context, state: dict,
                  filtered_columns=None, statistic="mean", normalize=True,
                  fill=True, alpha=0.20, line_width=2.0, point_size=28,
                  tick_label_size=10, label_wrap=18, include_N=False,
+                 show_animal_xs=True, animal_x_marker="x", animal_x_size=38,
+                 animal_x_alpha=0.75, animal_x_color=None,
+                 radial_value_radii=(0.30, 1.00), radial_value_color="grey",
+                 radial_value_size=None,
                  **kwargs):
     """Plot one radar polygon for one condition/factor group."""
     by = 'factor' if ctx.factor_value is not None else 'condition'
@@ -9831,10 +9935,27 @@ def radar_action(ctx: Context, state: dict,
 
     source_df = ctx.factor_df if by == 'factor' else ctx.condition_df
     group_name, group_color = _resolve_group_label_color(ctx)
-    raw_values = np.asarray([
-        _radar_statistic(source_df[col], statistic) if col in source_df.columns else np.nan
-        for col in columns
-    ], dtype=float)
+    scale_reference = kwargs.get('scale_reference')
+    if bool(normalize) and scale_reference is None:
+        scale_reference = _compute_radar_scale_reference(source_df, columns)
+    raw_values, values = _radar_values_for_frame(
+        source_df,
+        columns,
+        statistic,
+        normalize=normalize,
+        scale_reference=scale_reference,
+    )
+    animal_values = (
+        _radar_animal_value_records(
+            source_df,
+            columns,
+            statistic,
+            normalize=normalize,
+            scale_reference=scale_reference,
+        )
+        if bool(show_animal_xs)
+        else []
+    )
 
     valid_row_mask = pd.Series(False, index=source_df.index)
     for col in columns:
@@ -9845,17 +9966,6 @@ def radar_action(ctx: Context, state: dict,
     else:
         n_animals = int(valid_row_mask.sum())
 
-    if bool(normalize):
-        scale_reference = kwargs.get('scale_reference')
-        if scale_reference is None:
-            scale_reference = _compute_radar_scale_reference(source_df, columns)
-        values = np.asarray([
-            _normalize_radar_value(raw, scale_reference.get(col))
-            for raw, col in zip(raw_values, columns)
-        ], dtype=float)
-    else:
-        values = raw_values
-
     finite = np.isfinite(values)
     if not finite.any():
         state['radar_skip_save'] = True
@@ -9865,6 +9975,7 @@ def radar_action(ctx: Context, state: dict,
             'n_animals': n_animals,
             'values': values,
             'raw_values': raw_values,
+            'animal_values': animal_values,
         }
 
     state['radar_skip_save'] = False
@@ -9880,6 +9991,9 @@ def radar_action(ctx: Context, state: dict,
         tick_label_size=tick_label_size,
         label_wrap=label_wrap,
         radial_max=radial_max,
+        radial_value_radii=radial_value_radii,
+        radial_value_color=radial_value_color,
+        radial_value_size=radial_value_size,
     )
     closed_angles = np.concatenate([angles, angles[:1]])
     closed_values = np.concatenate([values, values[:1]])
@@ -9907,6 +10021,30 @@ def radar_action(ctx: Context, state: dict,
             linewidth=0.4,
             zorder=4,
         )
+    if (
+        bool(show_animal_xs)
+        and animal_x_marker is not None
+        and animal_x_size is not None
+        and float(animal_x_size) > 0
+    ):
+        marker_color = group_color if animal_x_color is None else animal_x_color
+        marker_alpha = None if animal_x_alpha is None else float(animal_x_alpha)
+        for record in animal_values:
+            animal_y = np.asarray(record.get("values", []), dtype=float)
+            animal_mask = np.isfinite(animal_y)
+            if not animal_mask.any():
+                continue
+            ax.scatter(
+                angles[animal_mask],
+                animal_y[animal_mask],
+                marker=animal_x_marker,
+                s=float(animal_x_size),
+                color=marker_color,
+                alpha=marker_alpha,
+                linewidths=1.0,
+                label="_nolegend_",
+                zorder=5,
+            )
 
     title_label = f"{group_name} ({_radar_statistic_label(statistic)})"
     if include_N and not combine:
@@ -9919,6 +10057,7 @@ def radar_action(ctx: Context, state: dict,
         'n_animals': n_animals,
         'values': values,
         'raw_values': raw_values,
+        'animal_values': animal_values,
     }
 
 
@@ -13018,7 +13157,12 @@ def plot_radar(experiment, filtered_columns=None,
                share_columns_across_panels=True,
                fill=True, alpha=0.20, line_width=2.0, point_size=28,
                tick_label_size=10, label_wrap=18,
-               include_N=False, figsize=(8, 8),
+               include_N=False,
+               show_animal_xs=True, animal_x_marker="x", animal_x_size=38,
+               animal_x_alpha=0.75, animal_x_color=None,
+               radial_value_radii=(0.30, 1.00), radial_value_color="grey",
+               radial_value_size=None,
+               figsize=(8, 8),
                _scale_reference=None, _resolved_columns=None):
     """
     Radar/spider plot across selected summary columns.
@@ -13035,7 +13179,14 @@ def plot_radar(experiment, filtered_columns=None,
     queue of tuples, e.g. [("Time", "WeekFour"), ("Time", "WeekEight")].
     When normalize=True and share_scale=True, queued calls share the same
     per-column min/max reference so sibling radar plots are comparable.
+
+    By default, x markers show each contributing animal's values on the same
+    axes as the group polygon. Grey radial value labels are shown at 30% and
+    100% of the plotted radius; pass radial_value_radii=None to disable them
+    or provide custom fractional radii.
     """
+    radial_value_radii = _normalize_radar_radial_value_radii(radial_value_radii)
+
     # ROI queue mode - iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -13053,7 +13204,16 @@ def plot_radar(experiment, filtered_columns=None,
                 share_columns_across_panels=share_columns_across_panels,
                 fill=fill, alpha=alpha, line_width=line_width, point_size=point_size,
                 tick_label_size=tick_label_size, label_wrap=label_wrap,
-                include_N=include_N, figsize=figsize,
+                include_N=include_N,
+                show_animal_xs=show_animal_xs,
+                animal_x_marker=animal_x_marker,
+                animal_x_size=animal_x_size,
+                animal_x_alpha=animal_x_alpha,
+                animal_x_color=animal_x_color,
+                radial_value_radii=radial_value_radii,
+                radial_value_color=radial_value_color,
+                radial_value_size=radial_value_size,
+                figsize=figsize,
                 _scale_reference=_scale_reference,
                 _resolved_columns=_resolved_columns,
             )
@@ -13120,6 +13280,14 @@ def plot_radar(experiment, filtered_columns=None,
                 tick_label_size=tick_label_size,
                 label_wrap=label_wrap,
                 include_N=include_N,
+                show_animal_xs=show_animal_xs,
+                animal_x_marker=animal_x_marker,
+                animal_x_size=animal_x_size,
+                animal_x_alpha=animal_x_alpha,
+                animal_x_color=animal_x_color,
+                radial_value_radii=radial_value_radii,
+                radial_value_color=radial_value_color,
+                radial_value_size=radial_value_size,
                 figsize=figsize,
                 _scale_reference=scale_reference,
                 _resolved_columns=resolved_columns,
@@ -13205,6 +13373,9 @@ def plot_radar(experiment, filtered_columns=None,
                         tick_label_size=tick_label_size,
                         label_wrap=label_wrap,
                         radial_max=state.get('radar_raw_max'),
+                        radial_value_radii=radial_value_radii,
+                        radial_value_color=radial_value_color,
+                        radial_value_size=radial_value_size,
                     )
                 handles, labels = ax.get_legend_handles_labels()
                 if len(labels) > 0:
@@ -13253,6 +13424,14 @@ def plot_radar(experiment, filtered_columns=None,
         tick_label_size=tick_label_size,
         label_wrap=label_wrap,
         include_N=include_N,
+        show_animal_xs=show_animal_xs,
+        animal_x_marker=animal_x_marker,
+        animal_x_size=animal_x_size,
+        animal_x_alpha=animal_x_alpha,
+        animal_x_color=animal_x_color,
+        radial_value_radii=radial_value_radii,
+        radial_value_color=radial_value_color,
+        radial_value_size=radial_value_size,
         combine=combine_mode,
         scale_reference=scale_reference if bool(share_scale) else None,
         roi_base=_roi_base,
@@ -15867,6 +16046,14 @@ _PARAM_DESCRIPTIONS = {
     'fill':                 'Fill radar polygons as well as drawing outlines.',
     'point_size':           'Marker size for radar vertices or baseline size for 3D scatter points.',
     'label_wrap':           'Maximum radar-axis label width before wrapping. Use 0 to disable wrapping.',
+    'show_animal_xs':       'For radar plots, overlay one x marker per contributing animal on each axis.',
+    'animal_x_marker':      'Marker style for per-animal radar overlays (default "x").',
+    'animal_x_size':        'Marker size for per-animal radar x overlays. Use 0 to hide them.',
+    'animal_x_alpha':       'Transparency for per-animal radar x overlays.',
+    'animal_x_color':       'Optional color override for per-animal radar x overlays (default group color).',
+    'radial_value_radii':   'Fractional radar radii to label with values, e.g. (0.30, 1.00). None disables labels.',
+    'radial_value_color':   'Color for radar radial value labels (default grey).',
+    'radial_value_size':    'Font size for radar radial value labels (default follows tick_label_size).',
     'figsize':              'Matplotlib figure size in inches.',
     # ── Pie charts ───────────────────────────────────────────────────
     'threshold':            'Value(s) for binning data into groups.',
@@ -16050,3 +16237,255 @@ def cheat_sheet(func_name=None):
     print("-" * 70)
     print("  * = required parameter")
     print("=" * 70)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Statistical analysis plots: power curves, marker-profile PCA, and
+# time-course growth-curve fits.  These complement the stats helpers in
+# PyFLASH.stats_extra and are registered in spec.PLOT_REGISTRY.
+# ─────────────────────────────────────────────────────────────────────
+def _stat_plot_save_path(batch, save_path):
+    """Resolve a save directory for a stats plot from an explicit path or batch."""
+    if save_path is not None:
+        return save_path
+    for attr in ("fig_path", "data_path"):
+        p = getattr(batch, attr, None)
+        if p:
+            return p
+    return "."
+
+
+def _categorical_colors(values, palette=None):
+    """Map unique categorical values to colors (provided palette or tab10)."""
+    uniques = list(dict.fromkeys(values))
+    if isinstance(palette, dict):
+        return {v: palette.get(v, "grey") for v in uniques}
+    cmap = plt.get_cmap("tab10")
+    return {v: cmap(i % 10) for i, v in enumerate(uniques)}
+
+
+def _numeric_feature_matrix(df, columns):
+    """Coerce selected columns to a numeric matrix, dropping rows with any NaN."""
+    num = df[columns].apply(pd.to_numeric, errors="coerce")
+    num = num.replace([np.inf, -np.inf], np.nan)
+    keep = num.notna().all(axis=1)
+    return num.loc[keep], keep
+
+
+def plot_power_curve(batch=None, *, effect_sizes=(0.2, 0.5, 0.8), n_range=(2, 30),
+                     alpha=0.05, observed=None, observed_n=None,
+                     target_powers=(0.8, 0.9), test="t-test", k_groups=2,
+                     title=None, save=False, save_path=None,
+                     save_name="power_curve", dpi=600, return_data=False):
+    """Plot statistical power vs sample size per group.
+
+    One curve per entry in ``effect_sizes`` (plus the ``observed`` effect if
+    given).  Vertical line at ``observed_n``; horizontal guides at
+    ``target_powers``.  ``test='t-test'`` (two groups) or ``'anova'``
+    (``k_groups`` groups).  ``batch`` is unused except for save-path resolution
+    (present so the function is callable from the spec runner).  Returns the
+    figure (or ``(fig, DataFrame)`` when ``return_data=True``).
+    """
+    if str(test).lower() in ("anova", "f", "f-test"):
+        from statsmodels.stats.power import FTestAnovaPower
+        analysis = FTestAnovaPower()
+
+        def _power(es, n):
+            return float(analysis.power(effect_size=es, nobs=n * k_groups,
+                                        alpha=alpha, k_groups=k_groups))
+    else:
+        from statsmodels.stats.power import TTestIndPower
+        analysis = TTestIndPower()
+
+        def _power(es, n):
+            return float(analysis.power(effect_size=es, nobs1=n, alpha=alpha, ratio=1.0))
+
+    ns = np.arange(int(n_range[0]), int(n_range[1]) + 1)
+    effects = list(effect_sizes)
+    if observed is not None and np.isfinite(observed):
+        effects = effects + [abs(float(observed))]
+
+    fig, ax = plt.subplots(figsize=(8, 6), layout="constrained")
+    rows = []
+    for es in effects:
+        powers = [_power(abs(es), int(n)) for n in ns]
+        is_obs = observed is not None and np.isclose(es, abs(float(observed)))
+        label = f"observed d={abs(es):.2f}" if is_obs else f"d={es:.2f}"
+        ax.plot(ns, powers, lw=2.5 if is_obs else 2,
+                ls="--" if is_obs else "-",
+                color="black" if is_obs else None, label=label)
+        for n, p in zip(ns, powers):
+            rows.append({"effect_size": abs(es), "n_per_group": int(n), "power": p, "observed": is_obs})
+
+    for tp in target_powers:
+        ax.axhline(tp, color="grey", lw=1, ls=":")
+        ax.text(ns[-1], tp, f" {int(tp * 100)}%", va="center", fontsize=10, color="grey")
+    if observed_n is not None:
+        ax.axvline(observed_n, color="crimson", lw=1.5, ls="-.")
+        ax.text(observed_n, 0.02, f" n={observed_n}", color="crimson", fontsize=10, rotation=90, va="bottom")
+
+    ax.set_xlabel("n per group")
+    ax.set_ylabel("Power")
+    ax.set_ylim(0, 1.02)
+    ax.set_title(title or f"Power analysis ({test}, alpha={alpha})")
+    ax.legend(frameon=False)
+
+    if save:
+        save_fig(fig, _stat_plot_save_path(batch, save_path), strip_name(save_name), verbose=False)
+    data = pd.DataFrame(rows)
+    return (fig, data) if return_data else fig
+
+
+def plot_marker_pca(batch, columns=None, column_strings=None, regex_string=None,
+                    exclude='', hue_column="Condition", specificity=None,
+                    standardize=True, n_components=2, annotate_loadings=True,
+                    max_loadings=12, palette=None, title=None,
+                    save=False, save_path=None, save_name=None, dpi=600,
+                    return_data=False):
+    """PCA biplot of animal-level marker profiles, coloured by ``hue_column``.
+
+    Builds the feature matrix from ``batch.summary`` (one row per animal),
+    selecting columns by explicit list or ``column_strings``/``regex_string``/
+    ``exclude`` (same semantics as ``get_columns``).  Standardises per column by
+    default so large-magnitude IntDen columns do not dominate.  Returns the
+    figure (or ``(fig, {scores, loadings, explained_variance})``).
+    """
+    from sklearn.decomposition import PCA
+
+    summary = getattr(batch, "summary", None)
+    if not isinstance(summary, pd.DataFrame) or summary.empty:
+        raise ValueError("batch.summary must be a non-empty DataFrame.")
+    df = filter_df_by_specificity(summary, specificity)
+
+    if columns is not None:
+        feat_cols = [c for c in columns if c in df.columns]
+    else:
+        feat_cols = get_columns(df, column_strings=column_strings,
+                                regex_string=regex_string, exclude=exclude)
+    feat_cols = [c for c in feat_cols if c != hue_column]
+    if len(feat_cols) < 2:
+        raise ValueError("Need at least 2 numeric feature columns for PCA.")
+
+    X, keep = _numeric_feature_matrix(df, feat_cols)
+    if len(X) < 3:
+        raise ValueError("Need at least 3 complete rows (animals) for PCA.")
+    if hue_column in df.columns:
+        hue = df.loc[keep, hue_column].astype(str)
+    else:
+        hue = pd.Series(["all"] * len(X), index=X.index)
+
+    Xv = X.to_numpy(dtype=float)
+    if standardize:
+        mu = Xv.mean(axis=0)
+        sd = Xv.std(axis=0, ddof=0)
+        sd[sd == 0] = 1.0
+        Xv = (Xv - mu) / sd
+
+    n_keep = min(max(2, int(n_components)), Xv.shape[1], Xv.shape[0])
+    pca = PCA(n_components=n_keep)
+    scores = pca.fit_transform(Xv)
+    evr = pca.explained_variance_ratio_
+
+    fig, ax = plt.subplots(figsize=(8, 7), layout="constrained")
+    color_map = _categorical_colors(list(hue.unique()), palette)
+    for level in hue.unique():
+        m = (hue == level).to_numpy()
+        ax.scatter(scores[m, 0], scores[m, 1], s=70, alpha=0.85,
+                   color=color_map[level], edgecolor="black", linewidth=0.5, label=str(level))
+
+    if annotate_loadings:
+        load = pca.components_[:2].T  # (features, 2)
+        scale = 0.9 * np.abs(scores[:, :2]).max() / (np.abs(load).max() or 1.0)
+        order = np.argsort(-(load[:, 0] ** 2 + load[:, 1] ** 2))[:max_loadings]
+        for i in order:
+            ax.arrow(0, 0, load[i, 0] * scale, load[i, 1] * scale,
+                     color="grey", alpha=0.6, head_width=scale * 0.02, length_includes_head=True)
+            ax.text(load[i, 0] * scale * 1.08, load[i, 1] * scale * 1.08,
+                    str(feat_cols[i]), fontsize=8, color="dimgrey", ha="center", va="center")
+
+    ax.axhline(0, color="lightgrey", lw=0.8, zorder=0)
+    ax.axvline(0, color="lightgrey", lw=0.8, zorder=0)
+    ax.set_xlabel(f"PC1 ({evr[0] * 100:.1f}%)")
+    ax.set_ylabel(f"PC2 ({evr[1] * 100:.1f}%)")
+    ax.set_title(title or f"Marker profile PCA (n={len(X)} animals)")
+    ax.legend(frameon=False, title=hue_column)
+
+    if save:
+        save_fig(fig, _stat_plot_save_path(batch, save_path),
+                 strip_name(save_name or "marker_pca"), verbose=False)
+
+    if return_data:
+        scores_df = pd.DataFrame(scores[:, :2], columns=["PC1", "PC2"], index=X.index)
+        scores_df[hue_column] = hue
+        loadings_df = pd.DataFrame(pca.components_[:2].T, index=feat_cols, columns=["PC1", "PC2"])
+        return fig, {"scores": scores_df, "loadings": loadings_df, "explained_variance": evr}
+    return fig
+
+
+def plot_timecourse(batch, column, time_col="Time", group_col="Genotype",
+                    model="auto", specificity=None, time_map=None,
+                    animal_col="AnimalName", palette=None, show_points=True,
+                    title=None, save=False, save_path=None, save_name=None,
+                    dpi=600, return_data=False):
+    """Fit and plot a growth curve per group across an ordered time factor.
+
+    Fits :func:`PyFLASH.stats_extra.fit_growth_curve` to the animal-level points
+    of each ``group_col`` level (x = numeric time, y = ``column``), overlays the
+    fitted curve and the per-timepoint mean +/- SEM.  ``time_map`` maps a
+    categorical time factor to numbers (e.g. ``{'WeekTwo': 2, 'WeekEight': 8}``).
+    Returns the figure (or ``(fig, {group: fit_dict})``).
+    """
+    from PyFLASH.stats_extra import _resolve_numeric_time, fit_growth_curve
+
+    summary = getattr(batch, "summary", None)
+    if not isinstance(summary, pd.DataFrame) or summary.empty:
+        raise ValueError("batch.summary must be a non-empty DataFrame.")
+    df = filter_df_by_specificity(summary, specificity).copy()
+    for needed in (column, time_col):
+        if needed not in df.columns:
+            raise ValueError(f"column '{needed}' not found in batch.summary.")
+    df["_t"] = _resolve_numeric_time(df[time_col], time_map)
+    df["_v"] = pd.to_numeric(df[column], errors="coerce")
+    df = df.dropna(subset=["_t", "_v"])
+    if df.empty:
+        raise ValueError("No numeric (time, value) rows after parsing; pass time_map?")
+
+    if group_col in df.columns:
+        groups = list(dict.fromkeys(df[group_col].astype(str)))
+    else:
+        df[group_col] = "all"
+        groups = ["all"]
+
+    fig, ax = plt.subplots(figsize=(8, 6), layout="constrained")
+    color_map = _categorical_colors(groups, palette)
+    fits = {}
+    for grp in groups:
+        sub = df[df[group_col].astype(str) == grp]
+        x = sub["_t"].to_numpy(float)
+        y = sub["_v"].to_numpy(float)
+        color = color_map[grp]
+        if show_points:
+            ax.scatter(x, y, s=30, alpha=0.4, color=color, edgecolor="none")
+        agg = sub.groupby("_t")["_v"].agg(["mean", "sem", "count"]).reset_index()
+        ax.errorbar(agg["_t"], agg["mean"], yerr=agg["sem"].fillna(0.0),
+                    fmt="o", color=color, capsize=4, lw=2, markersize=7, zorder=3)
+        try:
+            fit = fit_growth_curve(x, y, model=model)
+            xs = np.linspace(float(np.min(x)), float(np.max(x)), 100)
+            ax.plot(xs, fit["predict"](xs), color=color, lw=2.5,
+                    label=f"{grp} ({fit['model']}, R^2={fit['r_squared']:.2f})")
+            fits[grp] = fit
+        except Exception as e:
+            _log.hint(f"[plot_timecourse] fit failed for group '{grp}': {e}")
+            ax.plot([], [], color=color, label=f"{grp} (fit failed)")
+            fits[grp] = None
+
+    ax.set_xlabel(time_col)
+    ax.set_ylabel(str(column))
+    ax.set_title(title or f"{column} time-course")
+    ax.legend(frameon=False, title=group_col)
+
+    if save:
+        save_fig(fig, _stat_plot_save_path(batch, save_path),
+                 strip_name(save_name or f"{column}_timecourse"), verbose=False)
+    return (fig, fits) if return_data else fig
