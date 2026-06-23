@@ -28,6 +28,11 @@ CONTEXT.md
 HANDOFF.md
 .claude/
 
+# Graphify knowledge graph artifacts are local/generated.
+graphify-out/
+.graphify_*.json
+.graphify_python
+
 # Agent/dev execution artifacts and internal step-plan folders (contain
 # private absolute paths; not for public release).
 .swarm_logs/
