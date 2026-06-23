@@ -16,11 +16,16 @@ Conditions JSON schema (``Project.conditions``)::
 
     {
       "factor": "Genotype",
-      "entries": [{"label": "WT", "short": "WT", "color": "blue"},
-                  {"label": "KO", "short": "KO", "color": "red"}],
+      "entries": [{"label": "WT", "short": "WT", "color": "blue", "style": "fill"},
+                  {"label": "KO", "short": "KO", "color": "red", "style": "fill"}],
       "comparisons": {"mode": "pairs", "pairs": [["WT", "KO"]]},
       "explanation": "Wild-type vs <>"
     }
+
+    # ``style`` is optional (defaults to "fill"). It is the bar's second visual
+    # channel: "fill" (solid), "hollow" (outline only), or a matplotlib hatch
+    # pattern such as "///". Set it on the secondary factor of a crossed design
+    # so bars sharing a colour stay distinguishable.
 
     # comparison modes:
     #   {"mode": "pairs",      "pairs": [["WT", "KO"], ...]}
@@ -168,8 +173,9 @@ def _apply_comparisons(builder, comparisons, *, crossed: bool):
 def build_factor_list(spec):
     """Build a single-factor ``conditionList`` from a factor spec.
 
-    The factor spec is ``{"factor", "entries":[{label,short,color}],
-    "comparisons", "explanation"}`` (the non-crossed shape). Used both directly
+    The factor spec is ``{"factor", "entries":[{label,short,color,style}],
+    "comparisons", "explanation"}`` (the non-crossed shape; ``style`` is
+    optional and defaults to ``"fill"``). Used both directly
     and as a sub-list when crossing. Replays through :class:`ConditionBuilder`;
     never pickles condition objects.
     """
@@ -179,6 +185,7 @@ def build_factor_list(spec):
             entry["label"],
             short=entry.get("short") or None,
             color=entry.get("color") or None,
+            style=entry.get("style") or "fill",
         )
     _apply_comparisons(builder, spec.get("comparisons"), crossed=False)
     if spec.get("explanation"):

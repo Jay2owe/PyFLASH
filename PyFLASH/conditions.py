@@ -19,6 +19,29 @@ _AUTO_PALETTE = [
     '#000000',  # black
 ]
 
+# A condition's *style* is its second visual channel, alongside ``color``.
+# ``"fill"`` is the default solid bar; ``"hollow"`` draws an outline only; any
+# other token is treated as a matplotlib hatch pattern (e.g. ``"///"``). Colour
+# is the *primary* factor's channel; style lets the *secondary* factor of a
+# crossed design read distinctly even when two bars share a colour.
+DEFAULT_STYLE = "fill"
+
+
+def _derive_multi_style(conditions_list):
+    """Style for a crossed condition: the first non-default component style.
+
+    Colour comes from the primary (first) component, so style mirrors that by
+    taking the first component that *declares* a non-default style. This lets a
+    style authored on the **secondary** factor (e.g. ``Female="hollow"``) flow
+    through to every cross that contains it, while a fully default design stays
+    ``"fill"`` and is differentiated later by collision detection at plot time.
+    """
+    for cond in conditions_list:
+        style = getattr(cond, "style", DEFAULT_STYLE)
+        if style and style != DEFAULT_STYLE:
+            return style
+    return DEFAULT_STYLE
+
 
 def _resolve_color(color, index=0):
     """Resolve a color name, hex string, or None to a hex color.
@@ -50,10 +73,12 @@ def _resolve_color(color, index=0):
 class condition:
     """A single experimental condition (e.g. one genotype or treatment)."""
 
-    def __init__(self, label, name, color, factor, explanation=None):
+    def __init__(self, label, name, color, factor, explanation=None,
+                 style=DEFAULT_STYLE):
         self.label = label
         self.name = name
         self.color = color
+        self.style = style or DEFAULT_STYLE
         self.factor = factor
         self.factor_explanation = (
             explanation.replace("<>", self.label) if explanation is not None else None
@@ -63,7 +88,8 @@ class condition:
 class multiCondition:
     """A compound condition formed by crossing two or more single conditions."""
 
-    def __init__(self, conditionsList, name=None, label=None, color=None):
+    def __init__(self, conditionsList, name=None, label=None, color=None,
+                 style=None):
         self.conditionsList = conditionsList
         self.name = (
             reduce(lambda a, b: a.name + b.name, conditionsList)
@@ -74,6 +100,10 @@ class multiCondition:
             if label is None else label
         )
         self.color = conditionsList[0].color if color is None else color
+        # Colour is inherited from the primary (first) component; style mirrors
+        # that by deriving from the first component with a non-default style, so
+        # the secondary factor can carry the second visual channel.
+        self.style = _derive_multi_style(conditionsList) if style is None else style
         self.factor = [c.factor for c in conditionsList]
         self.factor_explanation = [c.factor_explanation for c in conditionsList]
 
@@ -163,7 +193,7 @@ class ConditionBuilder:
 
     # ── adding conditions ──────────────────────────────────────────
 
-    def add(self, label, short=None, color=None):
+    def add(self, label, short=None, color=None, style=DEFAULT_STYLE):
         """Append a condition.
 
         Parameters
@@ -177,10 +207,18 @@ class ConditionBuilder:
             Hex (``"#ff0000"``), a ``Config.COLORS`` key (``"red"``),
             a matplotlib CSS name (``"steelblue"``), or ``None`` to
             auto-assign from the Okabe-Ito palette.
+        style : str
+            Second visual channel for bars: ``"fill"`` (default solid),
+            ``"hollow"`` (outline only), or any matplotlib hatch pattern
+            (e.g. ``"///"``).  Set this on the *secondary* factor of a
+            crossed design to distinguish bars that share a colour; left
+            at ``"fill"`` it is resolved automatically at plot time.
         """
         if short is None:
             short = label.strip()
-        self._entries.append(dict(label=label, short=short, color=color))
+        self._entries.append(
+            dict(label=label, short=short, color=color, style=style or DEFAULT_STYLE)
+        )
         return self
 
     # ── comparisons ────────────────────────────────────────────────
@@ -223,7 +261,8 @@ class ConditionBuilder:
         for i, entry in enumerate(self._entries):
             color = _resolve_color(entry['color'], i)
             conditions_out.append(
-                condition(entry['label'], entry['short'], color, self._factor)
+                condition(entry['label'], entry['short'], color, self._factor,
+                          style=entry.get('style', DEFAULT_STYLE))
             )
 
         names = [e['short'] for e in self._entries]

@@ -106,6 +106,10 @@ class Context:
         return self.condition_obj.color if self.condition_obj else None
 
     @property
+    def style(self):
+        return getattr(self.condition_obj, 'style', 'fill') if self.condition_obj else 'fill'
+
+    @property
     def label(self):
         return self.condition_obj.label if self.condition_obj else (self.condition or '')
 

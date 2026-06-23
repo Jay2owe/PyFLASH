@@ -55,13 +55,18 @@ def _swatch(hex_color: str) -> str:
 
 
 def _entry_editor(seed_entries, key):
-    """Render the (label, short, color) grid; return a list of entry dicts.
+    """Render the (label, short, color, style) grid; return a list of entry dicts.
 
     Blank rows (no label) are dropped. ``color`` accepts a ``Config.COLORS``
-    key, a CSS name, a ``#hex``, or blank (auto). The color column offers the
-    palette keys as a dropdown but still accepts free text.
+    key, a CSS name, a ``#hex``, or blank (auto). ``style`` is the bar's second
+    visual channel — set it on the *secondary* factor of a crossed design so
+    bars that share a colour stay distinguishable; left as ``fill`` it is
+    resolved automatically at plot time.
     """
-    seed = seed_entries or [{"label": "", "short": "", "color": ""}]
+    seed = seed_entries or [{"label": "", "short": "", "color": "", "style": "fill"}]
+    # Backfill style for specs saved before the channel existed.
+    for row in seed:
+        row.setdefault("style", "fill")
     edited = st.data_editor(
         seed,
         num_rows="dynamic",
@@ -76,6 +81,12 @@ def _entry_editor(seed_entries, key):
                 "Color", help="A palette key (e.g. red), a CSS name "
                               "(e.g. steelblue), a #hex, or blank to auto-assign. "
                               f"Palette keys: {', '.join(Config.COLORS)}."),
+            "style": st.column_config.TextColumn(
+                "Style", help="Bar's second visual channel for crossed designs. "
+                              "Set on the secondary factor so same-colour bars "
+                              "differ. Common values: fill (solid), hollow "
+                              "(outline), or any matplotlib hatch (///, ..., xxx). "
+                              "Blank = fill."),
         },
         key=key,
     )
@@ -88,6 +99,7 @@ def _entry_editor(seed_entries, key):
             "label": label,
             "short": (row.get("short") or "").strip(),
             "color": (row.get("color") or "").strip(),
+            "style": (row.get("style") or "fill").strip() or "fill",
         })
     return entries
 
@@ -185,9 +197,11 @@ def _render_preview(spec):
 
     rows = []
     for i, cond in enumerate(preview["conditions"], start=1):
+        style = cond.get("style", "fill")
+        style_tag = "" if style in (None, "", "fill") else f"  ·  style `{style}`"
         rows.append(
             f"{_swatch(cond['color'])} **{i}. {cond['name']}** — "
-            f"{cond['label']}  `{cond['color']}`"
+            f"{cond['label']}  `{cond['color']}`{style_tag}"
         )
     st.markdown("<br>".join(rows), unsafe_allow_html=True)
 

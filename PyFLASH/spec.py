@@ -21,8 +21,10 @@ from PyFLASH._logging import logger as _log
 # Lazy string references to avoid circular imports
 PLOT_REGISTRY = {
     'mean_bars': 'plot_mean_bars',
+    'condition_key': 'plot_condition_key',
     'histograms': 'plot_histograms',
     'matrices': 'plot_matrices',
+    'matrix_differences': 'plot_matrix_differences',
     'radar': 'plot_radar',
     'volcano': 'plot_volcano',
     'ridgeline': 'plot_ridgeline',
@@ -39,6 +41,7 @@ PLOT_REGISTRY = {
     'power_curve': 'plot_power_curve',
     'marker_pca': 'plot_marker_pca',
     'timecourse': 'plot_timecourse',
+    'correlation_pipeline': 'plot_correlation_pipeline',
 }
 
 # Keys consumed by the spec runner, not passed to plot functions
