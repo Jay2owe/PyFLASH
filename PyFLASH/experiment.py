@@ -39,7 +39,9 @@ ATTRIBUTE_DICT = {
     "Objects": objectMarker,
     "Cells": cellMarker,
     "ROI Intensities": Antibody,
+    "Intensity": Antibody,
     "Attributes": Attribute,
+    "ROIs": Attribute,
 }
 NOT_INCLUDED_SENTINEL = "NOT_INCLUDED_IN_EXPERIMENT"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
@@ -52,10 +54,135 @@ BASE_IMAGE_COLUMNS = [
     "ImagePath",
     "Extension",
 ]
+LEGACY_DATA_DIR = "Data Analysis"
+RESULTS_DIR = "Results"
+RESULTS_TABLES_DIR = os.path.join(RESULTS_DIR, "Tables")
+NEW_RESULTS_TABLE_DIRS = {"Objects", "Intensity", "ROIs"}
+IGNORED_IMPORT_DIRS = {
+    ".settings",
+    "Config",
+    "Project Summary",
+    "Run Records",
+    "QC",
+    "Presentation Images",
+    "Analysis Images",
+}
+IMPORT_METADATA_COLUMNS = {
+    "Atlas Key",
+    "AtlasKey",
+    "Region ID",
+    "RegionID",
+    "Region Acronym",
+    "RegionAcronym",
+    "Region Name",
+    "RegionName",
+    "run_id",
+    "source_run_id",
+}
 
 
 def _empty_image_table() -> pd.DataFrame:
     return pd.DataFrame(columns=[c for c in BASE_IMAGE_COLUMNS if c != "Experiment"])
+
+
+def _unique_paths(paths) -> list[str]:
+    out = []
+    seen = set()
+    for path in paths:
+        if path is None:
+            continue
+        path_s = os.fspath(path)
+        key = os.path.normcase(os.path.abspath(path_s))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path_s)
+    return out
+
+
+def _contains_importable_data(path: str) -> bool:
+    if not os.path.isdir(path):
+        return False
+    try:
+        contents = os.listdir(path)
+    except OSError:
+        return False
+    if any(
+        name in ATTRIBUTE_DICT
+        and name not in IGNORED_IMPORT_DIRS
+        and os.path.isdir(os.path.join(path, name))
+        for name in contents
+    ):
+        return True
+    return any(
+        os.path.isfile(os.path.join(path, name))
+        and name.casefold().endswith(".csv")
+        and name != "Condition Labels.csv"
+        for name in contents
+    )
+
+
+def _infer_experiment_root(data_path: str) -> str:
+    base = os.path.basename(os.path.normpath(data_path)).casefold()
+    parent = os.path.dirname(os.path.normpath(data_path))
+    parent_base = os.path.basename(parent).casefold()
+    if base == "tables" and parent_base == RESULTS_DIR.casefold():
+        return os.path.dirname(parent)
+    if base == LEGACY_DATA_DIR.casefold():
+        return parent
+    return parent
+
+
+def _infer_layout_name(data_path: str) -> str:
+    try:
+        contents = set(os.listdir(data_path))
+    except OSError:
+        contents = set()
+    if contents & NEW_RESULTS_TABLE_DIRS or os.path.basename(os.path.normpath(data_path)).casefold() == "tables":
+        return "imagej-results"
+    return "legacy"
+
+
+def resolve_experiment_paths(path: str) -> dict | None:
+    """Resolve an experiment folder to the importable data folder and root.
+
+    Supported inputs are:
+    - legacy experiment root containing ``Data Analysis/``;
+    - legacy ``Data Analysis/`` directly;
+    - new ImageJ root containing ``Results/Tables/``;
+    - new ``Results/`` or ``Results/Tables/`` directly.
+    """
+    if path is None:
+        return None
+
+    resolved = check_directory(path) or os.fspath(path)
+    candidates = [
+        os.path.join(resolved, LEGACY_DATA_DIR),
+        os.path.join(resolved, RESULTS_TABLES_DIR),
+        os.path.join(resolved, "Tables"),
+        resolved,
+    ]
+    for data_path in _unique_paths(candidates):
+        if not _contains_importable_data(data_path):
+            continue
+        root = _infer_experiment_root(data_path)
+        return {
+            "data_path": data_path,
+            "root_path": root,
+            "layout": _infer_layout_name(data_path),
+        }
+    return None
+
+
+def resolve_experiment_data_path(path: str) -> str | None:
+    paths = resolve_experiment_paths(path)
+    if paths is None:
+        return None
+    return paths["data_path"]
+
+
+def is_experiment_folder(path: str) -> bool:
+    return resolve_experiment_paths(path) is not None
 
 
 def _summarize_name_list(names, limit=3) -> str:
@@ -347,6 +474,29 @@ def _get_image_table(experiment, include_summary=True):
 
     base_cols = [c for c in BASE_IMAGE_COLUMNS if c in image_df.columns]
     return image_df[base_cols].copy()
+
+
+def _candidate_image_folders(experiment) -> list[str]:
+    file_path = getattr(experiment, "filePath", None)
+    source_root = getattr(experiment, "source_root", None)
+    legacy_parent = os.path.dirname(file_path) if isinstance(file_path, str) else None
+    candidates = []
+    if source_root:
+        candidates.extend([
+            os.path.join(source_root, "Images"),
+            os.path.join(source_root, "Results", "Presentation Images", "Images"),
+            os.path.join(source_root, "Results", "Analysis Images", "Segmentation"),
+        ])
+    if legacy_parent:
+        candidates.append(os.path.join(legacy_parent, "Images"))
+    return _unique_paths(candidates)
+
+
+def _resolve_image_folder(experiment) -> str | None:
+    for folder in _candidate_image_folders(experiment):
+        if os.path.isdir(folder):
+            return folder
+    return None
 
 
 def _parse_roi_name_from_zip_key(roi_key: str) -> str:
@@ -762,6 +912,20 @@ def _normalize_region_key_series(values) -> pd.Series:
     out = out.str.replace(r"^(SCN)\.0+$", r"\1", regex=True)
     out = out.str.replace(r"^(SCN\d+)\.0+$", r"\1", regex=True)
     return out
+
+
+def _region_sort_frame(values, index=None) -> pd.DataFrame:
+    region = pd.Series(values, copy=False).fillna("").astype(str).str.strip()
+    match = region.str.extract(r"^(?P<base>.*?)(?P<num>\d+)$")
+    base = match["base"].fillna(region)
+    num = pd.to_numeric(match["num"], errors="coerce")
+    missing_num = num.isna().astype(int)
+    return pd.DataFrame({
+        "__region_base__": base,
+        "__region_num_missing__": missing_num,
+        "__region_num__": num.fillna(np.inf),
+        "__region_text__": region,
+    }, index=index if index is not None else region.index)
 
 
 def _apply_roi_name_map(df: pd.DataFrame, roi_name_map: pd.DataFrame) -> pd.DataFrame:
@@ -1845,7 +2009,7 @@ def _add_marker_scores(summary: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _standardize_csv_columns(df):
+def _standardize_csv_columns_legacy(df):
     """Standardize CSV format: ensure Region/Hemisphere columns exist.
 
     New format: has Hemisphere + Region columns.
@@ -1922,11 +2086,220 @@ def _standardize_csv_columns(df):
     return df
 
 
-def _get_stain_name_and_df(file_path):
+def _get_stain_name_and_df_legacy(file_path):
     """Read a CSV and return (stain_name, DataFrame)."""
     stain_name = os.path.splitext(os.path.basename(file_path))[0]
     df = pd.read_csv(file_path)
-    df = _standardize_csv_columns(df)
+    df = _standardize_csv_columns_legacy(df)
+    return stain_name, df
+
+
+def _strip_excel_numeric_text_markers(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in out.columns:
+        series = out[col]
+        if not (
+            pd.api.types.is_object_dtype(series)
+            or pd.api.types.is_string_dtype(series)
+            or pd.api.types.is_categorical_dtype(series)
+        ):
+            continue
+        out[col] = series.map(
+            lambda value: re.sub(
+                r"^'(?=[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$)",
+                "",
+                str(value).strip(),
+            )
+            if isinstance(value, str)
+            else value
+        )
+    return out
+
+
+def _compact_token(value) -> str:
+    return re.sub(r"[\s_]+", "", str(value).strip())
+
+
+def _region_id_values(values) -> pd.Series:
+    out = pd.Series(values, copy=False).fillna("").astype(str).str.strip()
+    out = out.str.replace(r"\.0+$", "", regex=True)
+    numeric = pd.to_numeric(out, errors="coerce")
+    finite_numeric = numeric.notna() & np.isfinite(numeric)
+    whole_numeric = finite_numeric & np.isclose(numeric, np.round(numeric))
+    out.loc[whole_numeric] = numeric.loc[whole_numeric].round().astype(int).astype(str)
+    return out
+
+
+def _roi_base_from_properties_name(stain_name: str, df: pd.DataFrame) -> str:
+    match = re.match(
+        r"^(?P<base>.+?)\s+ROI\s+Properties$",
+        str(stain_name).strip(),
+        flags=re.IGNORECASE,
+    )
+    if match is not None:
+        return _compact_token(match.group("base")).upper()
+
+    candidates = [
+        str(col).strip()
+        for col in df.columns
+        if str(col).strip() not in {"Animal Name", "AnimalName", "Region"}
+        and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", str(col).strip())
+    ]
+    if candidates:
+        return _compact_token(candidates[0]).upper()
+    return "SCN"
+
+
+def _derive_hemisphere_from_region(values) -> pd.Series:
+    compact = pd.Series(values, copy=False).fillna("").astype(str).map(_compact_token).str.upper()
+    return compact.map(
+        lambda value: "LH" if value.startswith("LH") else "RH" if value.startswith("RH") else ""
+    )
+
+
+def _standardize_roi_property_table(df: pd.DataFrame, stain_name: str) -> pd.DataFrame:
+    out = df.copy()
+    roi_base = _roi_base_from_properties_name(stain_name, out)
+
+    if "Hemisphere" in out.columns:
+        out["Hemisphere"] = out["Hemisphere"].fillna("").apply(normalize_hemisphere)
+    elif "Region" in out.columns:
+        out["Hemisphere"] = _derive_hemisphere_from_region(out["Region"])
+    else:
+        out["Hemisphere"] = ""
+
+    id_col = next(
+        (col for col in out.columns if str(col).strip().casefold() == roi_base.casefold()),
+        None,
+    )
+    if id_col is not None:
+        ids = _region_id_values(out[id_col])
+        nonempty = ids.ne("")
+        region_values = roi_base + ids
+        if "Region" in out.columns:
+            out["ROINameRaw"] = out["Region"]
+        out.loc[nonempty, "Region"] = region_values.loc[nonempty]
+        out.loc[nonempty, "ROI"] = region_values.loc[nonempty]
+        out = out.drop(columns=[id_col])
+    elif "ROI" in out.columns:
+        out["ROI"] = out["ROI"].fillna("").astype(str).str.strip()
+        out["Region"] = out["ROI"].where(out["ROI"] != "", out.get("Region", ""))
+    elif "Region" in out.columns:
+        out["ROI"] = out["Region"].fillna("").astype(str).map(extract_region_base)
+    else:
+        out["Region"] = ""
+        out["ROI"] = roi_base
+
+    return out
+
+
+def _roi_values_are_region_ids(values) -> pd.Series:
+    roi = pd.Series(values, copy=False).fillna("").astype(str).str.strip()
+    return roi.str.fullmatch(r"[A-Za-z][A-Za-z_-]*\d+", na=False)
+
+
+def _standardize_marker_region_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "Hemisphere" in out.columns:
+        out["Hemisphere"] = out["Hemisphere"].fillna("").apply(normalize_hemisphere)
+    else:
+        out["Hemisphere"] = ""
+
+    if "ROI" in out.columns:
+        out["ROI"] = out["ROI"].fillna("").astype(str).str.strip()
+        if "Region" in out.columns:
+            region = out["Region"].fillna("").astype(str).str.strip()
+            roi_has_ids = _roi_values_are_region_ids(out["ROI"])
+            region_has_ids = region.str.fullmatch(r"[A-Za-z][A-Za-z_-]*\d+", na=False)
+            replace_region = roi_has_ids & (~region_has_ids | (region == ""))
+            if replace_region.any():
+                out.loc[replace_region, "Region"] = out.loc[replace_region, "ROI"]
+        else:
+            out["Region"] = out["ROI"]
+    elif "Region" in out.columns:
+        out["ROI"] = out["Region"].fillna("").astype(str).map(extract_region_base)
+    else:
+        out["Region"] = ""
+        out["ROI"] = "SCN"
+
+    return out
+
+
+def _standardize_csv_columns(df, *, table_role=None, stain_name=None):
+    """Standardize legacy and current ImageJ CSV exports."""
+    df = _strip_excel_numeric_text_markers(df)
+    metadata_cols = [c for c in df.columns if str(c).strip() in IMPORT_METADATA_COLUMNS]
+    if metadata_cols:
+        df = df.drop(columns=metadata_cols)
+
+    role_s = "" if table_role is None else str(table_role)
+    is_roi_properties = role_s == "ROIs" and "ROI Properties" in str(stain_name)
+    if is_roi_properties:
+        df = _standardize_roi_property_table(df, str(stain_name))
+
+    cols = set(df.columns)
+    if "Region" in cols:
+        if not is_roi_properties:
+            df = _standardize_marker_region_columns(df)
+
+        def _should_drop_precomputed(colname):
+            col_s = str(colname)
+            if col_s.endswith("_um"):
+                return True
+            if re.match(r"^.+_VolColoc\d+_.+$", col_s):
+                return True
+            if "_DistToClosest_" in col_s or "_ClosestTo_" in col_s or "_NumClosestTo_" in col_s:
+                return True
+            if "_VolNumColoc_" in col_s or "_VolContains_" in col_s:
+                return True
+            if "_NumColoc_" in col_s and "_CPCNumColoc_" not in col_s:
+                return True
+            if "_Contains_" in col_s and "_CPCContains_" not in col_s:
+                return True
+            if "_VolAny_" in col_s or "_CPCAny_" in col_s or "_Any_" in col_s:
+                return True
+            if "_VolCombo_" in col_s or "_VolComboAny_" in col_s:
+                return True
+            if "_CPCCombo_" in col_s or "_CPCComboAny_" in col_s:
+                return True
+            if "_Combo_" in col_s or "_ComboAny_" in col_s:
+                return True
+            if re.match(r"^.+_VolColocCount.+$", col_s):
+                return True
+            if re.match(r"^.+_CPCColocCount.+$", col_s):
+                return True
+            if re.match(r"^.+_ColocCount.+$", col_s):
+                return True
+            if re.match(r"^.+_NonColocCount.+$", col_s):
+                return True
+            return False
+
+        drop_cols = [c for c in df.columns if _should_drop_precomputed(c)]
+        if drop_cols:
+            df = df.drop(columns=drop_cols)
+        if "SCN" in cols:
+            df = df.drop(columns=["SCN"])
+    elif "SCN" in cols:
+        df = df.rename(columns={"SCN": "Region"})
+        df["Region"] = "SCN" + df["Region"].astype(str)
+        df["Hemisphere"] = ""
+        df["ROI"] = "SCN"
+    else:
+        df["Region"] = ""
+        df["Hemisphere"] = ""
+        df["ROI"] = "SCN"
+
+    if "Animal Name" in df.columns:
+        df["Animal Name"] = df["Animal Name"].fillna("").astype(str).map(replace_week_int)
+
+    return df
+
+
+def _get_stain_name_and_df(file_path, *, table_role=None):
+    """Read a CSV and return (stain_name, DataFrame)."""
+    stain_name = os.path.splitext(os.path.basename(file_path))[0]
+    df = pd.read_csv(file_path)
+    df = _standardize_csv_columns(df, table_role=table_role, stain_name=stain_name)
     return stain_name, df
 
 
@@ -1938,7 +2311,15 @@ class Experiment:
 
     def __init__(self, name, filePath, threshold=None):
         self.name = name
-        self.filePath = check_directory(filePath) or filePath
+        resolved_paths = resolve_experiment_paths(filePath)
+        if resolved_paths is None:
+            self.filePath = check_directory(filePath) or filePath
+            self.source_root = _infer_experiment_root(self.filePath)
+            self.data_layout = "unknown"
+        else:
+            self.filePath = resolved_paths["data_path"]
+            self.source_root = resolved_paths["root_path"]
+            self.data_layout = resolved_paths["layout"]
         self.data = {}
         self.markers = set()
         self.threshold = threshold or Config.THRESHOLD
@@ -1965,6 +2346,23 @@ class Experiment:
                 if filename.endswith('.csv') or filename.endswith('.zip'):
                     tasks.append((subfolder_name, class_type, filename, file_path))
 
+        def _import_task_rank(task):
+            subfolder_name, class_type, filename, _ = task
+            filename_s = str(filename)
+            if subfolder_name == "ROIs" and filename_s.endswith(".csv") and "ROI Properties" in filename_s:
+                return (0, filename_s)
+            if class_type == Attribute:
+                return (1, filename_s)
+            if class_type == objectMarker:
+                return (2, filename_s)
+            if class_type == cellMarker:
+                return (3, filename_s)
+            if class_type == Antibody:
+                return (4, filename_s)
+            return (9, filename_s)
+
+        tasks = sorted(tasks, key=_import_task_rank)
+
         tracker = ProgressTracker(
             f"{self.name} importCSVs",
             total=len(tasks),
@@ -1979,7 +2377,10 @@ class Experiment:
             tracker.start_item(filename, detail=subfolder_name)
 
             if filename.endswith('.csv'):
-                stain_name, stain_df = _get_stain_name_and_df(file_path)
+                stain_name, stain_df = _get_stain_name_and_df(
+                    file_path,
+                    table_role=subfolder_name,
+                )
                 self.markers.add(stain_name)
                 csv_count += 1
                 category_counts[subfolder_name] += 1
@@ -2143,12 +2544,20 @@ class Experiment:
                         stain_df[combo_col] = combo_any_indicator_df[combo_col].astype(np.int8)
                         stain.df[combo_col] = combo_any_indicator_df[combo_col].astype(np.int8)
 
-        # Discover all ROI bases across all stain data
+        # Discover ROI bases from marker/intensity data first. ROI property
+        # tables are normalization inputs and should not create marker-empty
+        # summaries by themselves.
         all_roi_bases = set()
+        marker_roi_bases = set()
         for stain in stains:
             if 'ROI' in stain.df.columns:
                 for v in stain.df['ROI'].dropna().astype(str).unique():
-                    all_roi_bases.add(extract_region_base(v))
+                    roi_base = extract_region_base(v)
+                    all_roi_bases.add(roi_base)
+                    if isinstance(stain, (objectMarker, cellMarker, Antibody)):
+                        marker_roi_bases.add(roi_base)
+        if marker_roi_bases:
+            all_roi_bases = marker_roi_bases
         if not all_roi_bases:
             all_roi_bases = {'SCN'}
 
@@ -2294,19 +2703,31 @@ class Experiment:
             else:
                 roi_summary["Condition"] = _condition_from_animal_name(roi_summary.index)
 
-            # numSections: count unique Regions per animal within this ROI base
-            try:
-                roi_props = self.data['ROI Properties'].df
+            # numSections: count unique Regions per animal within this ROI base.
+            # Supports both the legacy single "ROI Properties" table and the
+            # current named files such as "SCN ROI Properties.csv".
+            roi_prop_frames = []
+            for key, value in self.data.items():
+                if "ROI Properties" not in str(key):
+                    continue
+                roi_props = getattr(value, "df", None)
+                if not isinstance(roi_props, pd.DataFrame) or roi_props.empty:
+                    continue
                 if 'ROI' in roi_props.columns:
                     roi_mask = roi_props['ROI'].fillna('').astype(str).apply(
                         lambda v, rb=roi_base: extract_region_base(v) == rb
                     )
-                    roi_props_filtered = roi_props[roi_mask]
-                else:
-                    roi_props_filtered = roi_props
-                sections = (roi_props_filtered
-                            .groupby('AnimalName')['Region'].nunique()
-                            .reset_index(name='numSections'))
+                    roi_props = roi_props[roi_mask]
+                roi_prop_frames.append(roi_props)
+            try:
+                if len(roi_prop_frames) == 0:
+                    raise KeyError("ROI Properties")
+                roi_props_filtered = pd.concat(roi_prop_frames, ignore_index=True)
+                sections = (
+                    roi_props_filtered
+                    .groupby('AnimalName')['Region'].nunique()
+                    .reset_index(name='numSections')
+                )
                 roi_summary = roi_summary.merge(sections, on='AnimalName', how='left')
             except KeyError:
                 roi_summary['numSections'] = 1
@@ -2470,10 +2891,18 @@ class Experiment:
         for f in self.factor:
             names = '|'.join([c.name for c in self.factorDict[f]])
             for roi_base, summary_df in self.summaries.items():
-                summary_df['Condition'] = [
+                animal_conditions = pd.Series([
                     ''.join(filter(str.isalpha, n))
                     for n in summary_df.reset_index()['AnimalName'].tolist()
-                ]
+                ], index=summary_df.index)
+                if 'Condition' not in summary_df.columns:
+                    summary_df['Condition'] = animal_conditions
+                else:
+                    missing_condition = (
+                        summary_df['Condition'].isna()
+                        | summary_df['Condition'].astype(str).str.strip().eq("")
+                    )
+                    summary_df.loc[missing_condition, 'Condition'] = animal_conditions.loc[missing_condition]
                 summary_df[f] = summary_df['Condition'].str.extract(f'({names})', expand=False)
             for key in self.data:
                 df = self.data[key].df
@@ -2517,10 +2946,36 @@ class Experiment:
                 if isinstance(getattr(data, "df", None), pd.DataFrame):
                     data.df = _apply_roi_name_map(data.df.copy(), roi_name_map)
         else:
-            self.master_region = (
+            master_source = (
                 pd.concat(roi_dfs, ignore_index=True)[["AnimalName", "Region"]]
                 .drop_duplicates()
-                .sort_values(["AnimalName", "Region"])
+                .reset_index(drop=True)
+            )
+            master_source = pd.concat(
+                [master_source, _region_sort_frame(master_source["Region"], index=master_source.index)],
+                axis=1,
+            )
+            self.master_region = (
+                master_source
+                .sort_values(
+                    [
+                        "AnimalName",
+                        "__region_base__",
+                        "__region_num_missing__",
+                        "__region_num__",
+                        "__region_text__",
+                    ],
+                    kind="stable",
+                )
+                .drop(
+                    columns=[
+                        "__region_base__",
+                        "__region_num_missing__",
+                        "__region_num__",
+                        "__region_text__",
+                    ],
+                    errors="ignore",
+                )
                 .reset_index(drop=True)
             )
             # Construct ImageROI from Hemisphere + Region if available
@@ -2594,7 +3049,8 @@ class Experiment:
     # ── Path management ────────────────────────────────────────────────
 
     def createSavePaths(self):
-        results = os.path.join(os.path.dirname(self.filePath), "Results")
+        root = getattr(self, "source_root", None) or _infer_experiment_root(self.filePath)
+        results = os.path.join(root, "Results")
         self.fig_path = os.path.join(results, "Python Figures")
         self.image_fig_path = os.path.join(self.fig_path, "Images")
         self.representative_path = os.path.join(results, "Representative Images")
@@ -2624,9 +3080,9 @@ class Experiment:
     # ── Image import ───────────────────────────────────────────────────
 
     def importImages(self, progress=True):
-        image_folder = os.path.join(os.path.dirname(self.filePath), "Images")
+        image_folder = _resolve_image_folder(self)
         self.image_root = image_folder
-        if not os.path.exists(image_folder):
+        if image_folder is None:
             self.images = _empty_image_table()
             self.imagesDict = {}
             self._last_image_import_summary = "No Images folder found"
@@ -2788,7 +3244,7 @@ class Experiment:
         self.image_root = getattr(
             self,
             "image_root",
-            os.path.join(os.path.dirname(self.filePath), "Images") if isinstance(getattr(self, "filePath", None), str) else None,
+            _resolve_image_folder(self) if isinstance(getattr(self, "filePath", None), str) else None,
         )
         self.imagesDict = _build_images_dict(getattr(self, "images", None))
         for obj in self.data.values():
@@ -2802,8 +3258,131 @@ class Experiment:
 class MiniExperiment(Experiment):
     """Lightweight experiment — flat CSV folder, no marker subfolders."""
 
-    def __init__(self, name, filePath):
+    def __init__(self, name, filePath, *, animal_column=None, factor_mappings=None):
+        self.animal_column = animal_column
+        self.factor_mappings = factor_mappings or {}
         super().__init__(name, filePath)
+        self.source_root = self.filePath
+        self.data_layout = "mini"
+
+    @staticmethod
+    def _format_animal_name(value):
+        if pd.isna(value):
+            return np.nan
+        if isinstance(value, str):
+            text = value.strip()
+            if text == "":
+                return np.nan
+            numeric = pd.to_numeric(text, errors="coerce")
+            if pd.notna(numeric) and np.isfinite(numeric) and np.isclose(numeric, round(float(numeric))):
+                return str(int(round(float(numeric))))
+            return text
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)) and np.isfinite(value) and np.isclose(value, round(float(value))):
+            return str(int(round(float(value))))
+        text = str(value).strip()
+        return text if text != "" else np.nan
+
+    def _resolve_animal_column(self, columns):
+        candidates = []
+        if self.animal_column is not None:
+            candidates.append(self.animal_column)
+        candidates.extend(["AnimalName", "Animal Name", "Animal ID", "ID", "Id", "id"])
+        for candidate in candidates:
+            if candidate in columns:
+                return candidate
+        return None
+
+    def _prepare_flat_csv(self, df):
+        out = df.dropna(how="all").copy()
+        animal_column = self._resolve_animal_column(out.columns)
+        if animal_column is None:
+            raise ValueError(
+                "MiniExperiment CSV files must contain an AnimalName column, "
+                "or pass animal_column=... when constructing MiniExperiment."
+            )
+        if "AnimalName" not in out.columns:
+            out = out.rename(columns={animal_column: "AnimalName"})
+        elif animal_column != "AnimalName":
+            out["AnimalName"] = out[animal_column]
+        out["AnimalName"] = out["AnimalName"].map(self._format_animal_name)
+        keep = out["AnimalName"].notna() & out["AnimalName"].astype(str).str.strip().ne("")
+        return out.loc[keep].copy()
+
+    def _map_factor_series(self, series, factor, allowed_names=None):
+        mapping = self.factor_mappings.get(factor, {})
+        if isinstance(mapping, Mapping):
+            mapping_lookup = {
+                str(k).strip().casefold(): v
+                for k, v in mapping.items()
+            }
+        else:
+            mapping_lookup = {}
+        allowed_lookup = {
+            str(name).strip().casefold(): str(name)
+            for name in (allowed_names or [])
+        }
+
+        def _map_value(value):
+            if pd.isna(value):
+                return np.nan
+            text = str(value).strip()
+            if text == "":
+                return np.nan
+            key = text.casefold()
+            if key in mapping_lookup:
+                return mapping_lookup[key]
+            if key in allowed_lookup:
+                return allowed_lookup[key]
+            return text
+
+        return series.map(_map_value)
+
+    @staticmethod
+    def _condition_factor_key(cond, factors):
+        if hasattr(cond, "conditionsList"):
+            values = {c.factor: c.name for c in cond.conditionsList}
+        else:
+            values = {cond.factor: cond.name}
+        return tuple(values.get(factor) for factor in factors)
+
+    def _assign_conditions_from_factor_columns(self, df, condition_list):
+        if not isinstance(df, pd.DataFrame):
+            return df, False
+
+        out = df.copy()
+        factors = list(getattr(condition_list, "factor", []) or [])
+        assigned_factor = False
+        for factor in factors:
+            if factor not in out.columns:
+                continue
+            allowed = [
+                cond.name
+                for cond in getattr(condition_list, "factorDict", {}).get(factor, [])
+            ]
+            out[factor] = self._map_factor_series(out[factor], factor, allowed_names=allowed)
+            assigned_factor = True
+
+        if not assigned_factor:
+            return out, False
+
+        if all(factor in out.columns for factor in factors):
+            condition_lookup = {}
+            for cond in getattr(condition_list, "condition_list", []):
+                key = self._condition_factor_key(cond, factors)
+                if all(value is not None for value in key):
+                    condition_lookup[key] = cond.name
+
+            def _condition_from_row(row):
+                key = tuple(row.get(factor) for factor in factors)
+                if any(pd.isna(value) or str(value).strip() == "" for value in key):
+                    return np.nan
+                return condition_lookup.get(key, "".join(str(value) for value in key))
+
+            out["Condition"] = out.apply(_condition_from_row, axis=1)
+
+        return out, True
 
     def importCSVs(self, progress=True):
         self.createSavePaths()
@@ -2825,7 +3404,7 @@ class MiniExperiment(Experiment):
             if filename.endswith('.csv') and filename != 'Condition Labels.csv':
                 name = os.path.splitext(filename)[0]
                 path = os.path.join(self.filePath, filename)
-                self.data[name] = Attribute(name, pd.read_csv(path), self)
+                self.data[name] = Attribute(name, self._prepare_flat_csv(pd.read_csv(path)), self)
             tracker.finish_item(filename)
         self._last_csv_import_summary = f"{len(files)} tables"
         tracker.close(self._last_csv_import_summary)
@@ -2844,14 +3423,45 @@ class MiniExperiment(Experiment):
             lambda l, r: pd.merge(l, r, left_on='AnimalName', right_on='AnimalName', how='outer'),
             summary_dfs
         )
+        if "AnimalName" not in self.summary.columns and self.summary.index.name == "AnimalName":
+            self.summary = self.summary.reset_index()
         if "AnimalName" in self.summary.columns:
             self.summary["Condition"] = _condition_from_animal_name(self.summary["AnimalName"])
         else:
             self.summary["Condition"] = _condition_from_animal_name(self.summary.index)
         self.summary = _add_marker_scores(self.summary)
         self.summary = _fill_intden_totals_with_zero(self.summary)
+        self.summaries = {"SCN": self.summary}
         self._last_summary_summary = f"{self.summary.shape[0]} animals x {self.summary.shape[1]} columns"
         return self.summary
+
+    def set_condition_list(self, condition_list):
+        self.condition_list = condition_list
+        self.conditions = condition_list.conditions
+        self.factor = condition_list.factor
+        self.factorDict = condition_list.factorDict
+
+        assigned = False
+        if hasattr(self, "summaries"):
+            for roi_base, summary_df in list(self.summaries.items()):
+                mapped, did_assign = self._assign_conditions_from_factor_columns(summary_df, condition_list)
+                self.summaries[roi_base] = mapped
+                assigned = assigned or did_assign
+            if "SCN" in self.summaries:
+                self.summary = self.summaries["SCN"]
+        elif isinstance(getattr(self, "summary", None), pd.DataFrame):
+            self.summary, assigned = self._assign_conditions_from_factor_columns(self.summary, condition_list)
+            self.summaries = {"SCN": self.summary}
+
+        for key in self.data:
+            df = self.data[key].df
+            mapped, did_assign = self._assign_conditions_from_factor_columns(df, condition_list)
+            self.data[key].df = mapped
+            assigned = assigned or did_assign
+
+        if not assigned:
+            return super().set_condition_list(condition_list)
+        return self.condition_list
 
     def processData(self, import_images=True, progress=True):
         tracker = ProgressTracker(

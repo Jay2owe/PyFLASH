@@ -17,6 +17,7 @@ import re
 from PyFLASH._logging import logger
 from PyFLASH.conditions import _resolve_color
 from PyFLASH.config import Config, check_directory
+from PyFLASH.experiment import resolve_experiment_paths
 from PyFLASH.export import format_summary_for_display
 from PyFLASH.factory import create_batch
 from PyFLASH.serialization import load_state, save_state
@@ -171,9 +172,10 @@ def batch_overview(batch) -> dict:
 # processing, just replicate the os.path checks so the UI can give pre-flight
 # feedback before a long run (house rule 1). Keep these in sync with
 # ``PyFLASH/factory.py`` lines 176-184.
-REQUIRED_ANY = ["Objects", "Attributes", "ROI Intensities"]
-LAYOUT_DIRS = ["Objects", "Cells", "ROI Intensities", "Attributes", "ROIs",
-               "Images"]
+REQUIRED_ANY = ["Objects", "Attributes", "ROI Intensities", "Intensity", "ROIs"]
+LAYOUT_DIRS = ["Objects", "Cells", "ROI Intensities", "Intensity", "Attributes",
+               "ROIs", "Images", os.path.join("Results", "Tables"),
+               os.path.join("Results", "Presentation Images", "Images")]
 
 
 def validate_experiment_folder(path: str) -> dict:
@@ -198,28 +200,29 @@ def validate_experiment_folder(path: str) -> dict:
         subdirectory of ``Data Analysis/`` exists.
     """
     resolved = check_directory(path) or path
-    data = os.path.join(resolved, "Data Analysis")
-    ok = os.path.isdir(data)
-    contents = os.listdir(data) if ok else []
-    has_structure = ok and (
-        any(d in contents for d in REQUIRED_ANY)
-        or any(f.endswith(".csv") for f in contents)
-    )
+    resolved_paths = resolve_experiment_paths(resolved)
+    data = resolved_paths["data_path"] if resolved_paths is not None else os.path.join(resolved, "Data Analysis")
+    ok = resolved_paths is not None
+    has_structure = ok
     layout = {
-        d: bool(ok and os.path.isdir(os.path.join(data, d)))
+        d: bool(os.path.isdir(os.path.join(data, d)) or os.path.isdir(os.path.join(resolved, d)))
         for d in LAYOUT_DIRS
     }
     if has_structure:
         reason = "ok"
-    elif not ok:
+    elif not os.path.isdir(resolved):
+        reason = "not a folder"
+    elif os.path.isdir(os.path.join(resolved, "Data Analysis")):
+        reason = "no Objects/Attributes/ROI Intensities or CSVs"
+    elif not os.path.isdir(os.path.join(resolved, "Results", "Tables")):
         reason = "missing 'Data Analysis/'"
     else:
-        reason = "no Objects/Attributes/ROI Intensities or CSVs"
+        reason = "no legacy Data Analysis or Results/Tables import layout"
     return {
         "path": resolved,
         "valid": bool(has_structure),
         "reason": reason,
-        "has_images": layout["Images"],
+        "has_images": layout["Images"] or layout[os.path.join("Results", "Presentation Images", "Images")],
         "layout": layout,
     }
 
@@ -288,7 +291,7 @@ def preview_conditions(cl) -> dict:
     Returns
     -------
     dict
-        ``{"factor", "conditions": [{"name","label","color","factor",
+        ``{"factor", "conditions": [{"name","label","color","style","factor",
         "explanation"}], "comparisons": [...], "labelled_comparisons": [...]}``.
         ``comparisons`` are the resolved ``'1-2'`` index strings exactly as the
         builder produced them; ``labelled_comparisons`` map those back to
@@ -303,6 +306,7 @@ def preview_conditions(cl) -> dict:
             "name": getattr(c, "name", None),
             "label": getattr(c, "label", None),
             "color": getattr(c, "color", None),
+            "style": getattr(c, "style", "fill"),
             "factor": getattr(c, "factor", None),
             "explanation": getattr(c, "factor_explanation", None),
         }

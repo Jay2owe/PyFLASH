@@ -277,6 +277,22 @@ def test_validate_folder_has_images_reflects_images_subdir(tmp_path):
     assert res["layout"]["Images"] is False
 
 
+def test_validate_folder_accepts_new_results_tables_layout(tmp_path):
+    exp = os.path.join(str(tmp_path), "FLASH")
+    os.makedirs(os.path.join(exp, "Results", "Tables", "Objects"), exist_ok=True)
+    os.makedirs(os.path.join(exp, "Results", "Presentation Images", "Images"), exist_ok=True)
+    with open(os.path.join(exp, "Results", "Tables", "Objects", "GFAP.csv"),
+              "w", encoding="utf-8") as f:
+        f.write("Region,ROI,Animal Name\nSCN,SCN1,A1\n")
+
+    result = services.validate_experiment_folder(exp)
+
+    assert result["valid"] is True
+    assert result["reason"] == "ok"
+    assert result["layout"][os.path.join("Results", "Tables")] is True
+    assert result["has_images"] is True
+
+
 def test_discover_experiments_classifies_each_subfolder(tmp_path):
     root = tmp_path / "root"
     root.mkdir()

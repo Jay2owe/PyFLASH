@@ -251,16 +251,35 @@ class Antibody(Attribute):
         self.df[f'{name}_RawXM'] = self.df[f'{name}_XM'] / Config.PIXEL_SIZE
         try:
             _log.status(f"Adjusting coordinates for {name} points...")
-            area = self.experiment.data['ROI Properties'].df
-            self.df = self.df.merge(area, left_on='Region', right_on='Region')
-            self.df = self.df.drop(columns=["AnimalName_y"]).rename(
+            roi_props = self.experiment.data.get('ROI Properties')
+            if roi_props is not None:
+                area = roi_props.df
+            else:
+                frames = [
+                    value.df
+                    for key, value in self.experiment.data.items()
+                    if 'ROI Properties' in str(key)
+                    and isinstance(getattr(value, 'df', None), pd.DataFrame)
+                ]
+                if len(frames) == 0:
+                    raise KeyError('ROI Properties')
+                area = pd.concat(frames, ignore_index=True)
+            merge_cols = ['Region']
+            if 'AnimalName' in self.df.columns and 'AnimalName' in area.columns:
+                merge_cols = ['AnimalName', 'Region']
+            area = area[merge_cols].drop_duplicates()
+            self.df = self.df.merge(area, on=merge_cols, how='left')
+            self.df = self.df.drop(columns=["AnimalName_y"], errors='ignore').rename(
                 columns={"AnimalName_x": "AnimalName"}
             )
             self.df['X_factor'] = 500 / 1024
             self.df['Y_factor'] = -800 / 1024
             self.df[f'{name}_XM'] = self.df[f'{name}_XM'] * self.df['X_factor']
             self.df[f'{name}_YM'] = self.df[f'{name}_YM'] * self.df['Y_factor']
-            self.df = self.df.drop(columns=['Height', 'Width', 'X_factor', 'Y_factor', 'Area'])
+            self.df = self.df.drop(
+                columns=['X_factor', 'Y_factor'],
+                errors='ignore',
+            )
             _log.confirm(f'{name} adjusted coordinates added!')
         except KeyError as k:
             import warnings

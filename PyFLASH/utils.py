@@ -845,7 +845,9 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
     ext = ".svg"
     full_path = os.path.join(save_path, f"{image_name}{ext}")
 
-    # Warn if path approaches Windows MAX_PATH limit
+    save_full_path = full_path
+    # Warn if path approaches Windows MAX_PATH limit, then save through the
+    # extended-length path prefix so long metric names still write correctly.
     if os.name == "nt" and len(full_path) > 245:
         import warnings
         warnings.warn(
@@ -854,6 +856,13 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             f"Path: {full_path}",
             stacklevel=2,
         )
+        abs_path = os.path.abspath(full_path)
+        if abs_path.startswith("\\\\?\\"):
+            save_full_path = abs_path
+        elif abs_path.startswith("\\\\"):
+            save_full_path = "\\\\?\\UNC\\" + abs_path.lstrip("\\")
+        else:
+            save_full_path = "\\\\?\\" + abs_path
 
     use_skip = skip_existing if skip_existing is not None else Config.SKIP_EXISTING
 
@@ -867,7 +876,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             rasterize_data_artists(figure)
 
         with plt.rc_context({'svg.fonttype': 'none'}):
-            figure.savefig(full_path, bbox_inches='tight',
+            figure.savefig(save_full_path, bbox_inches='tight',
                            bbox_extra_artists=extra_artist,
                            dpi=600, transparent=True, pad_inches=pad_inches)
 

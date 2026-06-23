@@ -5,7 +5,7 @@ Factory function for creating batches with minimal boilerplate.
 import os
 
 from PyFLASH.config import Config, check_directory
-from PyFLASH.experiment import Experiment
+from PyFLASH.experiment import Experiment, resolve_experiment_paths
 from PyFLASH.batch import Batch
 from PyFLASH.serialization import save_state, load_state
 from PyFLASH.utils import ProgressTracker, generate_aliases
@@ -169,19 +169,17 @@ def create_batch(name, conditions, batch_path, experiments=None,
     elif isinstance(experiments, str):
         exp_root = check_directory(experiments) or experiments
         exp_list = []
-        for subfolder in sorted(os.listdir(exp_root)):
-            sub_path = os.path.join(exp_root, subfolder)
-            if not os.path.isdir(sub_path):
-                continue
-            data_path = os.path.join(sub_path, 'Data Analysis')
-            if not os.path.isdir(data_path):
-                continue
-            contents = os.listdir(data_path)
-            has_structure = any(
-                d in contents for d in ['Objects', 'Attributes', 'ROI Intensities']
-            ) or any(f.endswith('.csv') for f in contents)
-            if has_structure:
-                exp_list.append(Experiment(subfolder, data_path, threshold))
+        root_layout = resolve_experiment_paths(exp_root)
+        if root_layout is not None:
+            exp_name = os.path.basename(os.path.normpath(root_layout["root_path"])) or os.path.basename(os.path.normpath(exp_root))
+            exp_list.append(Experiment(exp_name, exp_root, threshold))
+        else:
+            for subfolder in sorted(os.listdir(exp_root)):
+                sub_path = os.path.join(exp_root, subfolder)
+                if not os.path.isdir(sub_path):
+                    continue
+                if resolve_experiment_paths(sub_path) is not None:
+                    exp_list.append(Experiment(subfolder, sub_path, threshold))
         if not exp_list:
             raise ValueError(f"No experiment folders found in {exp_root}")
     elif isinstance(experiments, list):

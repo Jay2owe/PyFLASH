@@ -411,6 +411,10 @@ def _name_of(item):
     return item.name if hasattr(item, "name") else str(item)
 
 
+STATS_ANNOTATION_X = 1.08
+STATS_ANNOTATION_Y = 1.0
+
+
 def _annotate_stats_summary(ax, test, post_hoc, overall, comparisons, pairwise_pvalues, condition_list, factor_list=None, effect_strings=None):
     """Draw a compact statistics summary to the right of the plot."""
     lines = [f"Test: {test}", f"Post-hoc: {post_hoc}"]
@@ -443,7 +447,7 @@ def _annotate_stats_summary(ax, test, post_hoc, overall, comparisons, pairwise_p
         lines.extend(str(s) for s in effect_strings)
 
     ax.text(
-        1.02, 1.0, "\n".join(lines),
+        STATS_ANNOTATION_X, STATS_ANNOTATION_Y, "\n".join(lines),
         transform=ax.transAxes,
         ha="left", va="top",
         fontsize=10,
@@ -458,7 +462,7 @@ def _annotate_stats_error(ax, error_message):
     if len(msg) > 140:
         msg = msg[:137] + "..."
     ax.text(
-        1.02, 1.0, f"Stats error:\n{msg}",
+        STATS_ANNOTATION_X, STATS_ANNOTATION_Y, f"Stats error:\n{msg}",
         transform=ax.transAxes,
         ha="left", va="top",
         fontsize=10,
