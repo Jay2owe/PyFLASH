@@ -8,6 +8,7 @@ iterative feature-subset search using linear regression (statsmodels OLS).
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import re
 import time
@@ -116,7 +117,7 @@ def _drop_unused_categorical_levels(df: pd.DataFrame) -> pd.DataFrame:
     """Remove unused categories so filtered-out levels do not linger."""
     out = df.copy()
     for col in out.columns:
-        if pd.api.types.is_categorical_dtype(out[col]):
+        if isinstance(out[col].dtype, pd.CategoricalDtype):
             try:
                 out[col] = out[col].cat.remove_unused_categories()
             except Exception:
@@ -442,6 +443,598 @@ def _build_formula(dependent_variable: str, predictors: Iterable[str], available
     if len(terms) == 0:
         raise ValueError("At least one predictor is required.")
     return f"{dep} ~ " + " + ".join(terms)
+
+
+def _as_string_list(value, *, name="value") -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set, pd.Index, np.ndarray, pd.Series)):
+        return [str(v) for v in list(value) if str(v).strip() != ""]
+    raise TypeError(f"{name} must be a string or iterable of strings.")
+
+
+def _normalize_interactions(interactions) -> list:
+    if interactions is None:
+        return []
+    if isinstance(interactions, str):
+        return [interactions]
+    if (
+        isinstance(interactions, tuple)
+        and len(interactions) >= 2
+        and not any(isinstance(v, (list, tuple)) for v in interactions)
+    ):
+        return [interactions]
+    if isinstance(interactions, (list, tuple)):
+        return list(interactions)
+    raise TypeError("interactions must be a string, pair tuple, or iterable.")
+
+
+def _resolve_summary_column(df: pd.DataFrame, key, *, required=True):
+    """Resolve a user-facing column key against a processed summary table."""
+    if key in df.columns:
+        return key
+    resolved = _resolve_column_key(df, key)
+    if resolved is not None:
+        return resolved
+
+    target = re.sub(r"[^A-Za-z0-9]+", "", str(key)).casefold()
+    if target != "":
+        for col in df.columns:
+            col_key = re.sub(r"[^A-Za-z0-9]+", "", str(col)).casefold()
+            if col_key == target:
+                return col
+
+    if required:
+        raise ValueError(f"Column '{key}' was not found in batch.summary.")
+    return None
+
+
+def _resolve_summary_columns(df: pd.DataFrame, columns, *, kind="columns") -> list[str]:
+    resolved = []
+    for col in _as_string_list(columns, name=kind):
+        resolved.append(str(_resolve_summary_column(df, col, required=True)))
+    return _unique_preserve_order(resolved)
+
+
+_EMPTY_MEDICATION_VALUES = {
+    "", "0", "0.0", "nan", "na", "n/a", "none", "no", "nil", "not applicable",
+    "not recorded", "unknown",
+}
+
+
+def _split_medication_tokens(value) -> list[str]:
+    """Split a free-text medication cell into normalized tokens."""
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if text.casefold() in _EMPTY_MEDICATION_VALUES:
+        return []
+    text = re.sub(r"\([^)]*\)", " ", text)
+    parts = re.split(r"[,;/|+]|\band\b|&", text, flags=re.IGNORECASE)
+    tokens = []
+    for part in parts:
+        token = re.sub(r"\s+", " ", str(part)).strip(" .:-_\t\r\n").casefold()
+        if token == "" or token in _EMPTY_MEDICATION_VALUES:
+            continue
+        tokens.append(token)
+    return _unique_preserve_order(tokens)
+
+
+def _safe_generated_column(existing: set[str], prefix: str, token: str) -> str:
+    base = f"{prefix}_{token}"
+    safe = re.sub(r"[^A-Za-z0-9_]+", "_", base).strip("_")
+    if safe == "" or re.match(r"^\d", safe):
+        safe = f"flag_{safe}"
+    candidate = safe
+    idx = 2
+    while candidate in existing:
+        candidate = f"{safe}_{idx}"
+        idx += 1
+    existing.add(candidate)
+    return candidate
+
+
+def _add_medication_flags(
+    df: pd.DataFrame,
+    medication_columns,
+    *,
+    mode="any",
+    min_count=2,
+) -> tuple[pd.DataFrame, list[str], dict]:
+    """Add any/token medication flags and return generated predictor columns."""
+    med_cols = _resolve_summary_columns(
+        df, medication_columns, kind="medication_columns")
+    mode_key = str(mode).strip().lower()
+    if mode_key not in {"any", "tokens", "both"}:
+        raise ValueError("medication_mode must be 'any', 'tokens', or 'both'.")
+    min_count_i = max(1, int(min_count))
+
+    out = df.copy()
+    existing = set([str(c) for c in out.columns])
+    generated = []
+    metadata = {"columns": {}, "mode": mode_key, "min_count": min_count_i}
+
+    for col in med_cols:
+        series_tokens = out[col].map(_split_medication_tokens)
+        col_meta = {"any": None, "tokens": {}}
+        prefix = re.sub(r"[^A-Za-z0-9_]+", "_", str(col)).strip("_") or "meds"
+
+        if mode_key in {"any", "both"}:
+            any_col = _safe_generated_column(existing, prefix, "any")
+            out[any_col] = series_tokens.map(lambda vals: int(len(vals) > 0))
+            generated.append(any_col)
+            col_meta["any"] = any_col
+
+        if mode_key in {"tokens", "both"}:
+            counts = {}
+            for vals in series_tokens:
+                for token in vals:
+                    counts[token] = counts.get(token, 0) + 1
+            for token in sorted(counts):
+                if counts[token] < min_count_i:
+                    continue
+                flag_col = _safe_generated_column(existing, prefix, token)
+                out[flag_col] = series_tokens.map(
+                    lambda vals, t=token: int(t in vals)
+                )
+                generated.append(flag_col)
+                col_meta["tokens"][token] = {
+                    "column": flag_col,
+                    "count": int(counts[token]),
+                }
+
+        metadata["columns"][col] = col_meta
+
+    return out, generated, metadata
+
+
+def _linear_model_reference_value(series: pd.Series, requested):
+    levels = list(pd.Series(series).dropna().unique())
+    for level in levels:
+        if level == requested:
+            return level
+    requested_s = str(requested)
+    for level in levels:
+        if str(level) == requested_s:
+            return level
+    raise ValueError(
+        f"Reference level {requested!r} was not found in column "
+        f"'{getattr(series, 'name', '')}'. Available levels: {levels}"
+    )
+
+
+def _linear_model_term(name: str, *, categorical: set[str], reference_levels: dict) -> str:
+    quoted = _quote_formula_name(name)
+    if str(name) not in categorical:
+        return quoted
+    if str(name) in reference_levels:
+        ref = reference_levels[str(name)]
+        return f"C({quoted}, Treatment(reference={repr(ref)}))"
+    return f"C({quoted})"
+
+
+def _linear_model_interaction_term(
+    interaction,
+    *,
+    categorical: set[str],
+    reference_levels: dict,
+    available_columns: set[str],
+) -> str:
+    if isinstance(interaction, (list, tuple)) and len(interaction) >= 2:
+        parts = [str(_resolve_summary_column(pd.DataFrame(columns=list(available_columns)), p, required=False) or p)
+                 for p in interaction]
+        return ":".join([
+            _linear_model_term(p, categorical=categorical, reference_levels=reference_levels)
+            for p in parts
+        ])
+    return str(interaction)
+
+
+def _linear_model_run_dir(base_dir: str, run_label: str, if_exists: str) -> tuple[str, str]:
+    policy = str(if_exists).strip().lower()
+    if policy not in {"overwrite", "version", "error"}:
+        raise ValueError("if_exists must be 'overwrite', 'version', or 'error'.")
+    label = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(run_label).strip()).strip("_")
+    if label == "":
+        label = "linear_models"
+
+    root = os.path.join(str(base_dir), "Modelling", "Linear Models")
+
+    def _path(lab):
+        return os.path.join(root, lab)
+
+    out = _path(label)
+    if os.path.exists(out):
+        if policy == "error":
+            raise RuntimeError(f"Linear model run already exists: {out}")
+        if policy == "version":
+            idx = 2
+            while os.path.exists(_path(f"{label}_v{idx}")):
+                idx += 1
+            label = f"{label}_v{idx}"
+            out = _path(label)
+    os.makedirs(out, exist_ok=True)
+    return out, label
+
+
+def run_linear_model_pipeline(
+    batch,
+    dependent_variables,
+    predictors,
+    *,
+    categorical="auto",
+    reference_levels=None,
+    interactions=None,
+    medication_columns=None,
+    medication_mode="any",
+    medication_min_count=2,
+    specificity=None,
+    exclude=None,
+    cov_type=None,
+    cov_kwds=None,
+    alpha=0.05,
+    fdr_method="fdr_bh",
+    fdr_family="all",
+    save=True,
+    output_dir=None,
+    run_label="linear_models",
+    if_exists="version",
+    return_fits=False,
+    verbose=True,
+):
+    """Fit adjusted OLS models for one or more dependent variables.
+
+    This is the modelling-side companion for analyses such as:
+    diagnosis + sex + sleep treatment + age + medication flags. It returns
+    coefficient and model-summary tables, and optionally saves those tables
+    under ``Data and Stats/Modelling/Linear Models/<run_label>``.
+    """
+    if not hasattr(batch, "summary"):
+        raise ValueError("First argument must expose a .summary DataFrame.")
+    df = getattr(batch, "summary", None)
+    if not isinstance(df, pd.DataFrame) or len(df) == 0:
+        raise ValueError("batch.summary must be a non-empty pandas DataFrame.")
+
+    if _is_specificity_queue(specificity):
+        return {
+            spec: run_linear_model_pipeline(
+                batch,
+                dependent_variables=dependent_variables,
+                predictors=predictors,
+                categorical=categorical,
+                reference_levels=reference_levels,
+                interactions=interactions,
+                medication_columns=medication_columns,
+                medication_mode=medication_mode,
+                medication_min_count=medication_min_count,
+                specificity=spec,
+                exclude=exclude,
+                cov_type=cov_type,
+                cov_kwds=cov_kwds,
+                alpha=alpha,
+                fdr_method=fdr_method,
+                fdr_family=fdr_family,
+                save=save,
+                output_dir=output_dir,
+                run_label=run_label,
+                if_exists=if_exists,
+                return_fits=return_fits,
+                verbose=verbose,
+            )
+            for spec in _iter_specificities(specificity)
+        }
+
+    dep_vars = _resolve_summary_columns(
+        df, dependent_variables, kind="dependent_variables")
+    predictor_terms = []
+    predictor_columns = []
+    for pred in _as_string_list(predictors, name="predictors"):
+        col = _resolve_summary_column(df, pred, required=False)
+        if col is not None:
+            predictor_columns.append(str(col))
+            predictor_terms.append(str(col))
+        else:
+            predictor_terms.append(str(pred))
+    predictor_terms = _unique_preserve_order(predictor_terms)
+    predictor_columns = _unique_preserve_order(predictor_columns)
+    if len(predictor_terms) == 0:
+        raise ValueError("At least one predictor is required.")
+
+    work_df = _filter_df_by_specificity(df, specificity).copy()
+    pre_exclude_n = len(work_df)
+    work_df = _exclude_df_by_rules(work_df, exclude).copy()
+    work_df = _drop_unused_categorical_levels(work_df)
+    if verbose and exclude is not None:
+        _log.hint(
+            f"[run_linear_model_pipeline] Exclude filter removed "
+            f"{pre_exclude_n - len(work_df)} rows."
+        )
+    if len(work_df) == 0:
+        raise ValueError("No rows remain after specificity/exclude filtering.")
+
+    generated_medication_predictors = []
+    medication_metadata = {}
+    if medication_columns is not None:
+        work_df, generated_medication_predictors, medication_metadata = (
+            _add_medication_flags(
+                work_df,
+                medication_columns,
+                mode=medication_mode,
+                min_count=medication_min_count,
+            )
+        )
+        predictor_terms.extend(generated_medication_predictors)
+        predictor_columns.extend(generated_medication_predictors)
+        predictor_terms = _unique_preserve_order(predictor_terms)
+        predictor_columns = _unique_preserve_order(predictor_columns)
+
+    reference_levels = dict(reference_levels or {})
+    resolved_reference_levels = {}
+    for key, value in reference_levels.items():
+        col = _resolve_summary_column(work_df, key, required=True)
+        resolved_reference_levels[str(col)] = value
+
+    if categorical is None:
+        categorical_set = set()
+    elif isinstance(categorical, str) and categorical.strip().lower() == "auto":
+        categorical_set = {
+            str(col)
+            for col in predictor_columns
+            if (
+                pd.api.types.is_object_dtype(work_df[col])
+                or isinstance(work_df[col].dtype, pd.CategoricalDtype)
+                or pd.api.types.is_bool_dtype(work_df[col])
+            )
+        }
+        categorical_set.update(resolved_reference_levels.keys())
+    else:
+        categorical_set = set(
+            _resolve_summary_columns(work_df, categorical, kind="categorical")
+        )
+
+    # Validate and normalize categorical references after filtering, before
+    # those values are written into formula terms.
+    for col in list(categorical_set):
+        if col in resolved_reference_levels:
+            resolved_reference_levels[col] = _linear_model_reference_value(
+                work_df[col], resolved_reference_levels[col])
+
+    available_columns = set([str(c) for c in work_df.columns])
+    formula_terms = [
+        _linear_model_term(
+            str(term),
+            categorical=categorical_set,
+            reference_levels=resolved_reference_levels,
+        )
+        if str(term) in available_columns else str(term)
+        for term in predictor_terms
+    ]
+    for interaction in _normalize_interactions(interactions):
+        if isinstance(interaction, (list, tuple)):
+            formula_terms.append(
+                _linear_model_interaction_term(
+                    interaction,
+                    categorical=categorical_set,
+                    reference_levels=resolved_reference_levels,
+                    available_columns=available_columns,
+                )
+            )
+        else:
+            formula_terms.append(str(interaction))
+    formula_terms = _unique_preserve_order(formula_terms)
+
+    coeff_rows = []
+    model_rows = []
+    fits = {}
+    metadata_rows = []
+
+    for dep in dep_vars:
+        dep_term = _quote_formula_name(dep)
+        formula = f"{dep_term} ~ " + " + ".join(formula_terms)
+
+        ref_columns = [dep]
+        ref_columns.extend([c for c in predictor_columns if c in work_df.columns])
+        for expr in predictor_terms:
+            if str(expr) in work_df.columns:
+                continue
+            ref_columns.extend(
+                _predictor_referenced_columns(str(expr), set(work_df.columns))
+            )
+        ref_columns = _unique_preserve_order(ref_columns)
+
+        model_df, sentinel_cols, sentinel_rows = _drop_rows_with_sentinel_across_columns(
+            work_df,
+            ref_columns,
+            sentinel=NOT_INCLUDED_SENTINEL,
+        )
+        model_df = model_df.copy()
+        model_df[dep] = _to_numeric_excluding_not_included(model_df[dep])
+
+        numeric_predictor_columns = [
+            col for col in predictor_columns
+            if col in model_df.columns and col not in categorical_set
+        ]
+        for col in numeric_predictor_columns:
+            model_df[col] = _to_numeric_excluding_not_included(model_df[col])
+        for col in categorical_set:
+            if col in model_df.columns:
+                model_df[col] = model_df[col].where(model_df[col].notna(), np.nan)
+
+        drop_cols = _unique_preserve_order(
+            [dep] + [c for c in predictor_columns if c in model_df.columns]
+        )
+        n_before_drop = len(model_df)
+        model_df = model_df.dropna(subset=drop_cols)
+        model_df = _drop_unused_categorical_levels(model_df)
+        if len(model_df) < 3:
+            raise ValueError(
+                f"Need at least 3 complete rows to fit '{dep}'. "
+                f"Only {len(model_df)} rows remain."
+            )
+
+        model = sm.OLS.from_formula(formula, data=model_df)
+        if cov_type is None or str(cov_type).strip().lower() in {"", "nonrobust"}:
+            fit = model.fit()
+            fit_cov_type = "nonrobust"
+        else:
+            fit = model.fit(cov_type=str(cov_type), cov_kwds=dict(cov_kwds or {}))
+            fit_cov_type = str(cov_type)
+        fits[dep] = fit
+
+        ci = fit.conf_int(alpha=float(alpha))
+        for term in fit.params.index:
+            low, high = ci.loc[term].tolist()
+            coeff_rows.append({
+                "dependent_variable": dep,
+                "term": str(term),
+                "estimate": float(fit.params.loc[term]),
+                "std_error": float(fit.bse.loc[term]),
+                "t_value": float(fit.tvalues.loc[term]),
+                "p_value": float(fit.pvalues.loc[term]),
+                "ci_low": float(low),
+                "ci_high": float(high),
+                "alpha": float(alpha),
+                "formula": formula,
+                "nobs": float(fit.nobs),
+                "cov_type": fit_cov_type,
+            })
+
+        model_rows.append({
+            "dependent_variable": dep,
+            "formula": formula,
+            "n_input": int(len(work_df)),
+            "n_after_sentinel_filter": int(n_before_drop),
+            "nobs": float(fit.nobs),
+            "n_dropped": int(len(work_df) - int(fit.nobs)),
+            "removed_rows_sentinel": int(sentinel_rows),
+            "removed_columns_sentinel": "; ".join(sentinel_cols),
+            "df_model": float(fit.df_model),
+            "df_resid": float(fit.df_resid),
+            "r_squared": float(getattr(fit, "rsquared", np.nan)),
+            "adj_r_squared": float(getattr(fit, "rsquared_adj", np.nan)),
+            "f_statistic": float(getattr(fit, "fvalue", np.nan)),
+            "f_pvalue": float(getattr(fit, "f_pvalue", np.nan)),
+            "aic": float(getattr(fit, "aic", np.nan)),
+            "bic": float(getattr(fit, "bic", np.nan)),
+            "cov_type": fit_cov_type,
+        })
+
+        metadata_rows.append({
+            "dependent_variable": dep,
+            "model_rows": int(fit.nobs),
+            "complete_case_rows_removed": int(n_before_drop - int(fit.nobs)),
+            "sentinel_rows_removed": int(sentinel_rows),
+        })
+
+    coefficients = pd.DataFrame(coeff_rows)
+    model_summaries = pd.DataFrame(model_rows)
+    metadata = pd.DataFrame(metadata_rows)
+
+    coefficients["q_value"] = np.nan
+    coefficients["reject_fdr"] = False
+    fdr_scope = str(fdr_family).strip().lower()
+    if fdr_scope not in {"none", "no", "false"} and len(coefficients) > 0:
+        mask = (
+            coefficients["term"].astype(str).ne("Intercept")
+            & np.isfinite(coefficients["p_value"].astype(float))
+        )
+        if mask.any():
+            labels = coefficients.index[mask].tolist()
+            if fdr_scope in {"dependent_variable", "by_dependent_variable", "by_endpoint", "endpoint"}:
+                families = coefficients.loc[mask, "dependent_variable"].tolist()
+            else:
+                families = ["all"] * len(labels)
+            from PyFLASH.stats_extra import apply_fdr
+            adjusted = apply_fdr(
+                coefficients.loc[mask, "p_value"].tolist(),
+                labels=labels,
+                families=families,
+                method=fdr_method,
+                alpha=float(alpha),
+            )
+            for _, row in adjusted.iterrows():
+                idx = row["label"]
+                coefficients.loc[idx, "q_value"] = float(row["p_adjusted"])
+                coefficients.loc[idx, "reject_fdr"] = bool(row["reject"])
+
+    save_dir = None
+    resolved_run_label = str(run_label)
+    if save:
+        base_dir = output_dir or getattr(batch, "data_path", None)
+        if base_dir is None:
+            if verbose:
+                _log.warn(
+                    "[run_linear_model_pipeline] batch.data_path not found. "
+                    "Skipping save."
+                )
+        else:
+            save_dir, resolved_run_label = _linear_model_run_dir(
+                str(base_dir), run_label, if_exists)
+            coefficients.to_csv(
+                os.path.join(save_dir, "linear_model_coefficients.csv"),
+                index=False,
+            )
+            model_summaries.to_csv(
+                os.path.join(save_dir, "linear_model_summaries.csv"),
+                index=False,
+            )
+            metadata.to_csv(
+                os.path.join(save_dir, "linear_model_metadata.csv"),
+                index=False,
+            )
+            manifest = {
+                "run_label": resolved_run_label,
+                "dependent_variables": dep_vars,
+                "predictors": predictor_terms,
+                "categorical": sorted(categorical_set),
+                "reference_levels": {
+                    str(k): str(v) for k, v in resolved_reference_levels.items()
+                },
+                "interactions": [
+                    str(item) for item in _normalize_interactions(interactions)
+                ],
+                "medication_predictors": generated_medication_predictors,
+                "medication_metadata": medication_metadata,
+                "alpha": float(alpha),
+                "fdr_method": str(fdr_method),
+                "fdr_family": str(fdr_family),
+                "cov_type": str(cov_type or "nonrobust"),
+                "specificity": str(specificity),
+                "exclude": str(exclude),
+            }
+            with open(os.path.join(save_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh, indent=2, default=str)
+
+    if verbose:
+        _log.confirm(
+            "[run_linear_model_pipeline] Fitted "
+            f"{len(dep_vars)} endpoint model(s); "
+            f"{len(coefficients)} coefficient rows."
+        )
+        if save_dir is not None:
+            _log.confirm(f"[run_linear_model_pipeline] Saved tables to {save_dir}")
+
+    result = {
+        "coefficients": coefficients,
+        "model_summaries": model_summaries,
+        "metadata": metadata,
+        "formulas": {
+            row["dependent_variable"]: row["formula"]
+            for _, row in model_summaries.iterrows()
+        },
+        "predictors": predictor_terms,
+        "categorical": sorted(categorical_set),
+        "reference_levels": resolved_reference_levels,
+        "medication_predictors": generated_medication_predictors,
+        "medication_metadata": medication_metadata,
+        "run_label": resolved_run_label,
+        "output_dir": save_dir,
+    }
+    if return_fits:
+        result["fits"] = fits
+    return result
 
 
 def _subset_key(subset: Iterable[str]) -> tuple[str, ...]:

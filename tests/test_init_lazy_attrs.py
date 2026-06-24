@@ -14,7 +14,7 @@ import pytest
 import PyFLASH
 
 
-@pytest.mark.parametrize("name", ["plotting", "modelling", "stats"])
+@pytest.mark.parametrize("name", ["plotting", "pipeline", "modelling", "stats"])
 def test_heavy_submodules_resolve_as_attributes(name):
     mod = getattr(PyFLASH, name)
     assert mod is importlib.import_module(f"PyFLASH.{name}")
@@ -25,6 +25,14 @@ def test_plotting_attribute_exposes_plot_functions():
     assert callable(PyFLASH.cheat_sheet)
 
 
+def test_modelling_attribute_exposes_linear_model_pipeline():
+    assert callable(PyFLASH.run_linear_model_pipeline)
+
+
+def test_pipeline_attribute_exposes_adjusted_correlation():
+    assert callable(PyFLASH.adjusted_correlation)
+
+
 def test_unknown_attribute_still_raises_attributeerror():
     with pytest.raises(AttributeError):
         PyFLASH.definitely_not_a_real_attribute
@@ -32,7 +40,7 @@ def test_unknown_attribute_still_raises_attributeerror():
 
 def test_dir_advertises_lazy_submodules():
     listed = dir(PyFLASH)
-    for name in ("plotting", "modelling", "stats"):
+    for name in ("plotting", "pipeline", "modelling", "stats"):
         assert name in listed
 
 

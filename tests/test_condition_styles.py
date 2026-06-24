@@ -274,6 +274,22 @@ def test_plot_mean_bars_auto_style_off_keeps_every_bar_solid(tmp_path, monkeypat
 # ── follow-up #2: the style channel reaches radar / pie / regression ───────
 
 
+def test_plot_mean_bars_save_false_does_not_write_svg(tmp_path):
+    batch = _crossed_human_batch(tmp_path)
+
+    plotting.plot_mean_bars(
+        batch, filtered_columns=["Period(h)"], points=False, save=False,
+    )
+
+    written_svgs = [
+        filename
+        for _root, _dirs, files in os.walk(batch.fig_path)
+        for filename in files
+        if filename.endswith(".svg")
+    ]
+    assert written_svgs == []
+
+
 class _Exp:
     """Minimal stand-in carrying a condition_list (+ fig_path for the key)."""
 
@@ -542,3 +558,45 @@ def test_plot_condition_key_saves_a_swatch_figure(tmp_path):
     path = plot_condition_key(exp, save=True)
     assert os.path.exists(path)
     assert path.endswith("condition_key.png")
+
+
+def test_plot_mean_bars_can_fill_points_with_group_colour(tmp_path, monkeypatch):
+    batch = _crossed_human_batch(tmp_path)
+
+    calls = []
+    original = plotting.sns.swarmplot
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(plotting.sns, "swarmplot", spy)
+    plotting.plot_mean_bars(
+        batch, filtered_columns=["Period(h)"], points=True, save=False,
+        point_fill="group", point_edge="none", point_size=4,
+        point_linewidth=0,
+    )
+
+    assert calls
+    assert {call["color"] for call in calls}.issubset({"#9f1c1f", "#787a7c"})
+    assert {call["edgecolor"] for call in calls} == {"none"}
+    assert {call["size"] for call in calls} == {4}
+    assert {call["linewidth"] for call in calls} == {0}
+
+
+def test_plot_mean_bars_factor_mode_uses_condition_labels(tmp_path, monkeypatch):
+    batch = _crossed_human_batch(tmp_path)
+
+    tick_labels = []
+
+    def spy_save(fig, *args, **kwargs):
+        tick_labels.append([tick.get_text() for tick in fig.axes[0].get_xticklabels()])
+
+    monkeypatch.setattr(plotting, "save_fig", spy_save)
+    plotting.plot_mean_bars(
+        batch, filtered_columns=["Period(h)"], factor="Diagnosis",
+        points=False, bottom_ticks=True, bottom_tick_labels=True,
+    )
+
+    assert tick_labels
+    assert tick_labels[-1] == ["AD", "Control"]

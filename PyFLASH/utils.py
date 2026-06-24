@@ -837,10 +837,20 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
     from PyFLASH.config import Config, apply_matplotlib_fast_path
     apply_matplotlib_fast_path()
 
+    def _windows_extended_path(path):
+        if os.name != "nt":
+            return path
+        abs_path = os.path.abspath(path)
+        if abs_path.startswith("\\\\?\\"):
+            return abs_path
+        if abs_path.startswith("\\\\"):
+            return "\\\\?\\UNC\\" + abs_path.lstrip("\\")
+        return "\\\\?\\" + abs_path
+
     image_name = strip_name(image_name)
     if subfolder is not None:
         save_path = os.path.join(save_path, subfolder)
-        os.makedirs(save_path, exist_ok=True)
+        os.makedirs(_windows_extended_path(save_path), exist_ok=True)
 
     ext = ".svg"
     full_path = os.path.join(save_path, f"{image_name}{ext}")
@@ -856,18 +866,12 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             f"Path: {full_path}",
             stacklevel=2,
         )
-        abs_path = os.path.abspath(full_path)
-        if abs_path.startswith("\\\\?\\"):
-            save_full_path = abs_path
-        elif abs_path.startswith("\\\\"):
-            save_full_path = "\\\\?\\UNC\\" + abs_path.lstrip("\\")
-        else:
-            save_full_path = "\\\\?\\" + abs_path
+        save_full_path = _windows_extended_path(full_path)
 
     use_skip = skip_existing if skip_existing is not None else Config.SKIP_EXISTING
 
     if Config.SAVE_MODE:
-        if use_skip and os.path.isfile(full_path):
+        if use_skip and os.path.isfile(save_full_path):
             if verbose:
                 _log.hint(f"Skipped (exists): {full_path}")
             return full_path

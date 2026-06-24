@@ -1,20 +1,26 @@
 """Tests for the correlation pipeline (matrix -> FDR/p gate -> regressions)."""
+import inspect
 import os
 from types import SimpleNamespace
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
 
+from PyFLASH import pipeline
 from PyFLASH.batch import Batch
 from PyFLASH.conditions import condition, conditionList
 from PyFLASH.experiment import MiniExperiment
 from PyFLASH.plotting import (
+    _corr_difference_use_fdr,
     _corr_pipeline_compute,
+    _corr_pipeline_heatmap,
     _corr_pipeline_run_dirs,
     _corr_pipeline_slug,
+    _corr_pipeline_use_fdr,
     plot_correlation_pipeline,
     plot_matrix_differences,
 )
@@ -28,9 +34,13 @@ def _pairs_of(frame):
     return set(zip(frame["x"], frame["y"]))
 
 
+def test_plotting_pipeline_wrapper_keeps_new_entrypoint_signature():
+    assert inspect.signature(plot_correlation_pipeline) == inspect.signature(pipeline.correlation)
+
+
 def _expected_selected(long_df, gate, require, alpha):
     """Re-derive the surviving pairs straight from the reported p/q values."""
-    use_q = gate in ("fdr", "q")
+    use_q = _corr_pipeline_use_fdr(gate)
     col = "q" if use_q else "p"
     out = set()
     for (x, y), grp in long_df.groupby(["x", "y"]):
@@ -39,6 +49,15 @@ def _expected_selected(long_df, gate, require, alpha):
         if passed:
             out.add((x, y))
     return out
+
+
+def test_gate_aliases_match_fdr_semantics():
+    for gate in ("fdr", "q", "qvalue", "q_value", "q-value", "fdr_bh", "bh"):
+        assert _corr_pipeline_use_fdr(gate)
+        assert _corr_difference_use_fdr(gate)
+    for gate in ("p", "pvalue", "raw"):
+        assert not _corr_pipeline_use_fdr(gate)
+        assert not _corr_difference_use_fdr(gate)
 
 
 def _logic_frame():
@@ -58,7 +77,7 @@ def _logic_frame():
 
 # ── Gating logic: AND/OR x p/FDR ─────────────────────────────────────────
 
-@pytest.mark.parametrize("gate", ["p", "fdr"])
+@pytest.mark.parametrize("gate", ["p", "fdr", "q-value"])
 @pytest.mark.parametrize("require", ["and", "or"])
 def test_selection_matches_reported_stats(gate, require):
     df = _logic_frame()
@@ -137,6 +156,42 @@ def test_rectangular_mode_shapes():
     assert list(coef.columns) == ["d", "e", "f"]
 
 
+def test_pipeline_heatmap_large_matrix_layout_is_readable():
+    cols = [
+        "Age",
+        "Sleep treatment",
+        "Volume anterior-inferior HT",
+        "Days included in the analysis",
+        "Period (h)",
+        "Alpha counts (day)",
+        "Rho counts (night)",
+        "Total counts",
+        "Amplitude",
+        "RA",
+        "Avg activity rest (L5)",
+        "Start time resting phase (h)",
+        "Avg activity active phase (M10)",
+        "Start time active phase (h)",
+        "Intraday variability",
+        "IS",
+    ]
+    matrix = pd.DataFrame(np.eye(len(cols)), index=cols, columns=cols)
+    sig = pd.DataFrame(False, index=cols, columns=cols)
+
+    fig = _corr_pipeline_heatmap(
+        matrix, sig, "Pairs passing gate", 14,
+        cmap="Reds", vmin=0, vmax=1, colorbar_label="passes gate",
+    )
+    try:
+        ax = fig.axes[0]
+        pos = ax.get_position()
+        assert pos.width > 0.45
+        assert pos.height > 0.40
+        assert max(tick.get_fontsize() for tick in ax.get_xticklabels()) <= 12
+    finally:
+        plt.close(fig)
+
+
 # ── Run naming + collision policy ────────────────────────────────────────
 
 def test_slug_is_deterministic_and_config_sensitive():
@@ -161,14 +216,25 @@ def test_if_exists_policies(tmp_path):
                           data_path=str(tmp_path / "data"))
 
     # No existing folder -> use the name as-is.
-    fig_dir, _data_dir, label, reuse = _corr_pipeline_run_dirs(exp, "run", "overwrite")
+    fig_dir, data_dir, label, reuse = _corr_pipeline_run_dirs(exp, "run", "overwrite")
     assert label == "run" and reuse is False
 
     os.makedirs(fig_dir)  # simulate a previous run on disk
+    os.makedirs(data_dir)
+    stale_fig = os.path.join(fig_dir, "stale.svg")
+    stale_data = os.path.join(data_dir, "stale.csv")
+    with open(stale_fig, "w", encoding="utf-8") as fh:
+        fh.write("old")
+    with open(stale_data, "w", encoding="utf-8") as fh:
+        fh.write("old")
 
-    # overwrite reuses the same folder in place.
+    # overwrite reuses the same label but clears stale generated artifacts.
     _f, _d, label_ow, reuse_ow = _corr_pipeline_run_dirs(exp, "run", "overwrite")
     assert label_ow == "run" and reuse_ow is False
+    assert not os.path.exists(stale_fig)
+    assert not os.path.exists(stale_data)
+
+    os.makedirs(fig_dir)  # recreate a prior run for the non-overwrite policies
 
     # version picks the next free suffix, preserving the prior run.
     _f, _d, label_v, _ = _corr_pipeline_run_dirs(exp, "run", "version")
@@ -221,7 +287,7 @@ def test_pipeline_end_to_end_outputs(tmp_path):
     cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
     assert len(cols) == 4, f"expected metric columns, got {list(batch.summary.columns)}"
 
-    res = plot_correlation_pipeline(
+    res = pipeline.correlation(
         batch, filtered_columns=cols, by="all",
         tests=("pearsonr", "spearmanr", "kendalltau"),
         require="and", gate="fdr", alpha=0.05,
@@ -267,7 +333,7 @@ def test_pipeline_can_skip_plotted_pq_matrices(tmp_path):
     batch = _human_batch(tmp_path)
     cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
 
-    res = plot_correlation_pipeline(
+    res = pipeline.correlation(
         batch, filtered_columns=cols, by="all",
         tests=("pearsonr", "spearmanr"), require="and", gate="fdr",
         max_regressions=0, run_label="no_pq_heatmaps", save=True,
@@ -284,6 +350,39 @@ def test_pipeline_can_skip_plotted_pq_matrices(tmp_path):
     # The tables are still part of the run even when the heatmaps are skipped.
     assert os.path.isfile(os.path.join(res["data_dir"], "pvalues_Pearson.csv"))
     assert os.path.isfile(os.path.join(res["data_dir"], "qvalues_Pearson.csv"))
+
+
+def test_pipeline_save_false_does_not_clear_existing_run(tmp_path):
+    batch = _human_batch(tmp_path)
+    cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
+
+    fig_run = os.path.join(batch.fig_path, "Correlation Pipeline", "dry")
+    data_run = os.path.join(batch.data_path, "Correlation Pipeline", "dry")
+    os.makedirs(fig_run, exist_ok=True)
+    os.makedirs(data_run, exist_ok=True)
+    stale_fig = os.path.join(fig_run, "stale.svg")
+    stale_data = os.path.join(data_run, "stale.csv")
+    with open(stale_fig, "w", encoding="utf-8") as fh:
+        fh.write("old figure")
+    with open(stale_data, "w", encoding="utf-8") as fh:
+        fh.write("old data")
+
+    res = pipeline.correlation(
+        batch,
+        filtered_columns=cols,
+        tests=("pearsonr",),
+        require="or",
+        gate="p",
+        max_regressions=0,
+        run_label="dry",
+        save=False,
+    )
+
+    assert res["run_label"] == "dry"
+    with open(stale_fig, encoding="utf-8") as fh:
+        assert fh.read() == "old figure"
+    with open(stale_data, encoding="utf-8") as fh:
+        assert fh.read() == "old data"
 
 
 def test_plot_matrix_differences_outputs_and_values(tmp_path):
@@ -335,13 +434,16 @@ def test_plot_matrix_differences_outputs_and_values(tmp_path):
     assert any("Pearson Absolute Difference Matrix" in f for f in matrix_svgs)
     assert any("Pearson Difference PValue Matrix" in f for f in matrix_svgs)
     assert not any("Spearman Difference PValue Matrix" in f for f in matrix_svgs)
+    assert not os.path.exists(os.path.join(comp_dirs[0], "pvalues_difference_Spearman.csv"))
+    assert not os.path.exists(os.path.join(comp_dirs[0], "qvalues_difference_Spearman.csv"))
+    assert not os.path.exists(os.path.join(comp_dirs[0], "gate_difference_Spearman.csv"))
 
 
 def test_pipeline_writes_difference_matrices(tmp_path):
     batch = _human_batch(tmp_path)
     cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
 
-    res = plot_correlation_pipeline(
+    res = pipeline.correlation(
         batch,
         filtered_columns=cols,
         factor="Diagnosis",
@@ -375,32 +477,32 @@ def test_pipeline_auto_naming_and_versioning(tmp_path):
     batch = _human_batch(tmp_path)
     cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
 
-    auto = plot_correlation_pipeline(
+    auto = pipeline.correlation(
         batch, filtered_columns=cols, tests=("pearsonr", "spearmanr", "kendalltau"),
         gate="fdr", require="and", max_regressions=0, save=True,
     )
     assert auto["run_label"].startswith("4cols_PSK_fdr_")
 
     # Same settings -> same auto folder (idempotent overwrite).
-    again = plot_correlation_pipeline(
+    again = pipeline.correlation(
         batch, filtered_columns=cols, tests=("pearsonr", "spearmanr", "kendalltau"),
         gate="fdr", require="and", max_regressions=0, save=True,
     )
     assert again["run_label"] == auto["run_label"]
 
     # A different column set -> a different folder.
-    fewer = plot_correlation_pipeline(
+    fewer = pipeline.correlation(
         batch, filtered_columns=cols[:3], tests=("pearsonr", "spearmanr", "kendalltau"),
         gate="fdr", require="and", max_regressions=0, save=True,
     )
     assert fewer["run_label"] != auto["run_label"]
 
     # Explicit label + version policy preserves the earlier run.
-    first = plot_correlation_pipeline(
+    first = pipeline.correlation(
         batch, filtered_columns=cols, run_label="keep", if_exists="version",
         max_regressions=0, save=True,
     )
-    second = plot_correlation_pipeline(
+    second = pipeline.correlation(
         batch, filtered_columns=cols, run_label="keep", if_exists="version",
         max_regressions=0, save=True,
     )

@@ -41,7 +41,7 @@ def test_available_plots_matches_registry():
     assert plots == sorted(PLOT_REGISTRY)
     # Spot-check a few expected keys are present.
     for key in ("mean_bars", "matrices", "radar", "regressions", "volcano",
-                "histograms"):
+                "histograms", "adjusted_correlation_pipeline"):
         assert key in plots
 
 
@@ -49,8 +49,10 @@ def test_available_plots_does_not_eagerly_import_plotting():
     # Calling available_plots() only touches PLOT_REGISTRY's string refs; it
     # must not drag in the heavy plotting module.
     sys.modules.pop("PyFLASH.plotting", None)
+    sys.modules.pop("PyFLASH.pipeline", None)
     services.available_plots()
     assert "PyFLASH.plotting" not in sys.modules
+    assert "PyFLASH.pipeline" not in sys.modules
 
 
 # ── _build_plot_kwargs (no plot call) ───────────────────────────────────────
@@ -64,6 +66,24 @@ def test_build_plot_kwargs_maps_columns_to_filtered_columns():
     assert "filtered_columns" in kwargs
     assert kwargs["filtered_columns"] == ["A", "B"]
     assert "columns" not in kwargs
+
+
+def test_resolve_func_supports_pipeline_module_targets():
+    func = _resolve_func(PLOT_REGISTRY["correlation_pipeline"])
+    assert func.__module__ == "PyFLASH.pipeline"
+    assert func.__name__ == "correlation"
+    adjusted = _resolve_func(PLOT_REGISTRY["adjusted_correlation_pipeline"])
+    assert adjusted.__module__ == "PyFLASH.pipeline"
+    assert adjusted.__name__ == "adjusted_correlation"
+
+
+def test_cheat_sheet_accepts_pipeline_module_targets(capsys):
+    from PyFLASH.plotting import cheat_sheet
+
+    cheat_sheet(PLOT_REGISTRY["correlation_pipeline"])
+    out = capsys.readouterr().out
+    assert "PyFLASH.pipeline.correlation" in out
+    assert "max_regressions" in out
 
 
 def test_build_plot_kwargs_converts_specificity_to_tuple():

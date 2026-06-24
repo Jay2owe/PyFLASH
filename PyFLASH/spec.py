@@ -14,6 +14,7 @@ Usage:
 import os
 import json
 import inspect
+import importlib
 
 from PyFLASH._logging import logger as _log
 
@@ -41,7 +42,8 @@ PLOT_REGISTRY = {
     'power_curve': 'plot_power_curve',
     'marker_pca': 'plot_marker_pca',
     'timecourse': 'plot_timecourse',
-    'correlation_pipeline': 'plot_correlation_pipeline',
+    'correlation_pipeline': 'PyFLASH.pipeline.correlation',
+    'adjusted_correlation_pipeline': 'PyFLASH.pipeline.adjusted_correlation',
 }
 
 # Keys consumed by the spec runner, not passed to plot functions
@@ -50,6 +52,11 @@ _SPEC_KEYS = {'type', 'batch'}
 
 def _resolve_func(name):
     """Resolve a plot function by name from the plotting module."""
+    if "." in name:
+        module_name, attr = name.rsplit(".", 1)
+        module = importlib.import_module(module_name)
+        return getattr(module, attr)
+
     import PyFLASH.plotting as plotting
     return getattr(plotting, name)
 

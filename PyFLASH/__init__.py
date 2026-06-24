@@ -38,7 +38,7 @@ __all__ = [
     # Factory & IO
     "create_batch", "save_state", "load_state", "normalize_paths",
     # Modelling
-    "iterative_best_fit",
+    "iterative_best_fit", "run_linear_model_pipeline", "adjusted_correlation",
     # Config & output control
     "Config", "stainColors",
     "set_verbosity", "silent", "verbose", "Verbosity",
@@ -49,7 +49,7 @@ __all__ = [
     "set_axis_limits", "clear_axis_limits", "lock_axis_limits",
     "format_summary_for_display",
     # Heavy submodules (lazily imported on first access)
-    "plotting", "modelling", "stats",
+    "plotting", "pipeline", "modelling", "stats",
 ]
 
 
@@ -69,6 +69,8 @@ __all__ = [
 # each ``__all__`` entry).
 _LAZY_ATTRS = {
     "iterative_best_fit": ("PyFLASH.modelling", "iterative_best_fit"),
+    "run_linear_model_pipeline": ("PyFLASH.modelling", "run_linear_model_pipeline"),
+    "adjusted_correlation": ("PyFLASH.pipeline", "adjusted_correlation"),
     "cheat_sheet": ("PyFLASH.plotting", "cheat_sheet"),
     "set_axis_limits": ("PyFLASH.plotting", "set_axis_limits"),
     "clear_axis_limits": ("PyFLASH.plotting", "clear_axis_limits"),
@@ -77,7 +79,7 @@ _LAZY_ATTRS = {
 
 # Heavy submodules exposed as lazy attributes of the package.  Accessing
 # ``PyFLASH.plotting`` (etc.) imports the submodule on first use and caches it.
-_LAZY_SUBMODULES = ("plotting", "modelling", "stats")
+_LAZY_SUBMODULES = ("plotting", "pipeline", "modelling", "stats")
 
 
 def __getattr__(name):

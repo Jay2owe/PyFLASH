@@ -21,6 +21,7 @@ import csv
 import time
 import re
 import shutil
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Mapping
 import numpy as np
@@ -9618,6 +9619,19 @@ def _apply_bar_style(patches, style, color, line_width=2.5):
             patch.set_linewidth(0.0)
 
 
+def _resolve_bar_point_color(value, group_color, default):
+    """Resolve point fill/edge color shorthands for mean-bar overlays."""
+    if value is None:
+        value = default
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in {"group", "condition", "color", "colour"}:
+            return group_color
+        if key in {"none", "transparent"}:
+            return "none"
+    return value
+
+
 def _style_render(style) -> dict:
     """Translate a style token into per-primitive rendering hints.
 
@@ -9787,7 +9801,9 @@ def _apply_pie_wedge_style(wedges, style, color):
 
 
 def bar_chart_action(ctx: Context, state: dict,
-                     points=True, normalize=False, **kwargs):
+                     points=True, normalize=False,
+                     point_fill="white", point_edge="group",
+                     point_size=9, point_linewidth=3, **kwargs):
     """
     Plot a single bar + scatter points for one condition within one column.
 
@@ -9836,9 +9852,12 @@ def bar_chart_action(ctx: Context, state: dict,
         animal_means = tmp.groupby('AnimalName')[col].mean().dropna()
         if len(animal_means) == 0:
             animal_means = pd.Series(dtype=float)
+        point_face = _resolve_bar_point_color(point_fill, color, "white")
+        point_edge = _resolve_bar_point_color(point_edge, color, "group")
         scatter = sns.swarmplot(
             x=[idx] * len(animal_means), y=animal_means.values,
-            size=9, color='white', edgecolor=color, linewidth=3,
+            size=point_size, color=point_face, edgecolor=point_edge,
+            linewidth=point_linewidth,
             label=(ctx.label if ctx.label else str(group_key)), clip_on=False, zorder=3, ax=ax,
         )
 
@@ -11003,8 +11022,10 @@ def matrix_action(ctx: Context, state: dict,
 
     corr = df.corr(method=_correlation_pandas_method(correlation))
     n_cols = max(1, len(corr.columns))
-    # Adaptive sizing: treat tick_label_size as an upper bound.
-    tick_fs = min(max(14, int(tick_label_size * 2.0)), max(14, int(640 / n_cols)))
+    # Adaptive sizing: treat tick_label_size as an upper bound. Large matrices
+    # with long labels otherwise allocate most of the canvas to tick text and
+    # visually crush the heatmap.
+    tick_fs = max(7, min(int(tick_label_size), int(130 / n_cols)))
     star_fs = min(25, max(8, int(220 / n_cols)))
     coeff_label = f"{_correlation_display_name(correlation)} coefficient"
 
@@ -11043,7 +11064,10 @@ def matrix_action(ctx: Context, state: dict,
     tick_pos = np.arange(len(corr.columns), dtype=float) + 0.5
     ax.set_xticks(tick_pos)
     ax.set_yticks(tick_pos)
-    ax.set_xticklabels(labels, rotation=60, ha='right', fontsize=tick_fs)
+    ax.set_xticklabels(
+        labels, rotation=60, ha='right', va='top',
+        rotation_mode='anchor', fontsize=tick_fs,
+    )
     ax.set_yticklabels(labels, rotation=0, ha='right', fontsize=tick_fs)
 
     return {'heatmap': heatmap, 'correlations': results}
@@ -11069,6 +11093,8 @@ def _get_annotation(p, ns='ns'):
 
 def plot_mean_bars(experiment, filtered_columns=None,
                    points=True, normalize=False,
+                   point_fill="white", point_edge="group",
+                   point_size=9, point_linewidth=3,
                    specificity=None, roi=None, comparisons=None,
                    force_nonparametric=False, ns='ns',
                    multiple_comparison='One-Way',
@@ -11095,6 +11121,10 @@ def plot_mean_bars(experiment, filtered_columns=None,
 
     When *dry_run* is True, compute stats for every column but skip
     figure creation/saving.  Returns a pandas DataFrame of results.
+
+    The overlaid points keep the historical white-fill/group-outline look by
+    default. Set ``point_fill="group"``, ``point_edge="none"``, and tune
+    ``point_size``/``point_linewidth`` for filled condition-coloured dots.
     """
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
@@ -11106,6 +11136,10 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 filtered_columns=filtered_columns,
                 points=points,
                 normalize=normalize,
+                point_fill=point_fill,
+                point_edge=point_edge,
+                point_size=point_size,
+                point_linewidth=point_linewidth,
                 specificity=specificity,
                 roi=_rb,
                 comparisons=comparisons,
@@ -11139,6 +11173,10 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 filtered_columns=filtered_columns,
                 points=points,
                 normalize=normalize,
+                point_fill=point_fill,
+                point_edge=point_edge,
+                point_size=point_size,
+                point_linewidth=point_linewidth,
                 specificity=spec_tuple,
                 roi=roi,
                 comparisons=comparisons,
@@ -11187,12 +11225,17 @@ def plot_mean_bars(experiment, filtered_columns=None,
             n_conds = len(group_order)
             group_color_map = {}
             explicit_styles = {}
+            group_label_map = {}
             factor_dict = getattr(ctx.experiment.condition_list, "factorDict", {})
             if isinstance(factor_dict, dict) and factor in factor_dict:
                 for c in factor_dict[factor]:
                     if hasattr(c, "name") and hasattr(c, "color"):
-                        group_color_map[str(c.name)] = c.color
-                        explicit_styles[str(c.name)] = getattr(c, "style", "fill")
+                        group_name = str(c.name)
+                        group_color_map[group_name] = c.color
+                        explicit_styles[group_name] = getattr(c, "style", "fill")
+                        group_label_map[group_name] = str(
+                            getattr(c, "label", getattr(c, "name", group_name))
+                        )
             for gv in group_order:
                 if str(gv) in group_color_map:
                     continue
@@ -11202,6 +11245,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 )
                 if match is not None:
                     group_color_map[str(gv)] = match
+                group_label_map.setdefault(str(gv), str(gv))
         else:
             present = set(ctx.summary['Condition'].dropna().unique().tolist())
             group_order = [
@@ -11216,6 +11260,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 cond.name: getattr(cond, 'style', 'fill')
                 for cond in ctx.experiment.condition_list
             }
+            group_label_map = _condition_label_map(ctx.experiment)
         # Second visual channel: vary style only where conditions collide on
         # (colour, style). No-collision designs keep every bar solid.
         if auto_style:
@@ -11245,6 +11290,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
         state['group_index_map'] = {name: i for i, name in enumerate(group_order)}
         state['group_color_map'] = group_color_map
         state['group_style_map'] = group_style_map
+        state['group_label_map'] = group_label_map
         # Start full per-column timing (setup + actions + stats + save)
 
     def teardown(ctx, state, results):
@@ -11302,6 +11348,14 @@ def plot_mean_bars(experiment, filtered_columns=None,
             ax.legend().set_visible(False)
         sns.despine(trim=False, ax=ax)
 
+        group_order = state.get('group_order', [])
+        group_label_map = state.get('group_label_map', {})
+        if len(group_order) > 0:
+            ax.set_xticks(range(len(group_order)))
+            ax.set_xticklabels(
+                [group_label_map.get(str(name), str(name)) for name in group_order],
+                rotation=60, ha='right',
+            )
         ax.tick_params(
             axis='x',
             which='both',
@@ -11440,7 +11494,8 @@ def plot_mean_bars(experiment, filtered_columns=None,
             aliases=getattr(experiment, 'aliases', None),
             roi_base=_roi_base, multi_roi=_multi_roi,
         )
-        save_fig(fig, experiment.fig_path, _artifact_name(col) + suffix, subfolder=subfolder, verbose=False)
+        if save:
+            save_fig(fig, experiment.fig_path, _artifact_name(col) + suffix, subfolder=subfolder, verbose=False)
         saved_columns_log.append(col)
         _progress_finish_item(state, col)
 
@@ -11546,6 +11601,8 @@ def plot_mean_bars(experiment, filtered_columns=None,
             specificity=specificity,
             setup=setup, teardown=teardown,
             points=points, normalize=normalize,
+            point_fill=point_fill, point_edge=point_edge,
+            point_size=point_size, point_linewidth=point_linewidth,
             roi_base=_roi_base,
         )
     finally:
@@ -11561,11 +11618,12 @@ def plot_mean_bars(experiment, filtered_columns=None,
     except Exception:
         pass
     saved = saved_columns_log
-    _log.confirm(f"[plot_mean_bars] Saved columns ({len(saved)}): {', '.join(saved)}")
+    verb = "Saved" if save else "Processed"
+    _log.confirm(f"[plot_mean_bars] {verb} columns ({len(saved)}): {', '.join(saved)}")
     if len(skipped_columns_log) > 0:
         _log.hint(f"[plot_mean_bars] Skipped columns ({len(skipped_columns_log)}): {', '.join(skipped_columns_log)}")
     try:
-        if Config.EXPORT_HTML:
+        if save and Config.EXPORT_HTML:
             subfolder_html, _ = build_subfolder(
                 plot_type='Bars', factor=factor, specificity=specificity,
                 aliases=getattr(experiment, 'aliases', None),
@@ -14851,7 +14909,67 @@ _CORR_METHOD_SHORT = {"pearsonr": "P", "spearmanr": "S", "kendalltau": "K"}
 
 def _corr_pipeline_use_fdr(gate):
     """True when the gate selects on FDR q-values rather than raw p-values."""
-    return str(gate).strip().lower() in ("fdr", "q", "qvalue", "q_value", "fdr_bh", "bh")
+    return str(gate).strip().lower() in (
+        "fdr", "q", "qvalue", "q_value", "q-value", "fdr_bh", "bh"
+    )
+
+
+def _corr_windows_extended_path(path):
+    """Return a Windows extended-length path; no-op on other platforms."""
+    if os.name != "nt":
+        return path
+    abs_path = os.path.abspath(path)
+    if abs_path.startswith("\\\\?\\"):
+        return abs_path
+    if abs_path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + abs_path.lstrip("\\")
+    return "\\\\?\\" + abs_path
+
+
+def _corr_makedirs(path):
+    if path:
+        os.makedirs(_corr_windows_extended_path(path), exist_ok=True)
+
+
+def _corr_isfile(path):
+    return os.path.isfile(_corr_windows_extended_path(path))
+
+
+def _corr_isdir(path):
+    return os.path.isdir(_corr_windows_extended_path(path))
+
+
+def _corr_clear_run_dir(path, base):
+    """Remove one generated run directory, guarding against broad deletes."""
+    if not path or not _corr_isdir(path):
+        return
+    path_abs = os.path.abspath(path)
+    base_abs = os.path.abspath(base)
+    try:
+        common = os.path.commonpath([path_abs, base_abs])
+    except ValueError as exc:
+        raise RuntimeError(f"Refusing to clear run folder outside {base_abs!r}: {path_abs!r}") from exc
+    if common != base_abs or path_abs == base_abs:
+        raise RuntimeError(f"Refusing to clear run folder outside {base_abs!r}: {path_abs!r}")
+    shutil.rmtree(_corr_windows_extended_path(path))
+
+
+def _corr_to_csv(frame, path, **kwargs):
+    _corr_makedirs(os.path.dirname(path) or ".")
+    frame.to_csv(_corr_windows_extended_path(path), **kwargs)
+
+
+def _corr_write_json(payload, path):
+    import json as _json
+    _corr_makedirs(os.path.dirname(path) or ".")
+    with open(_corr_windows_extended_path(path), "w", encoding="utf-8") as fh:
+        _json.dump(payload, fh, indent=2, default=str)
+
+
+def _corr_read_json(path):
+    import json as _json
+    with open(_corr_windows_extended_path(path), "r", encoding="utf-8") as fh:
+        return _json.load(fh)
 
 
 def _corr_pipeline_data_root(experiment):
@@ -14892,13 +15010,14 @@ def _corr_pipeline_slug(columns, against_columns, methods, require, gate, alpha,
     return f"{len(columns)}cols_{short}_{str(gate).lower()}_{digest}"
 
 
-def _corr_pipeline_run_dirs(experiment, run_label, if_exists):
+def _corr_pipeline_run_dirs(experiment, run_label, if_exists, *, clear_overwrite=True):
     """Return (fig_dir, data_dir, resolved_label, reuse_existing).
 
-    Honors the ``if_exists`` policy: 'overwrite' (default) reuses the folder in
-    place, 'version' picks the next free ``_vN`` so prior output is kept,
-    'error' raises, 'skip' returns reuse_existing=True so the caller can return
-    the cached manifest without recomputing.
+    Honors the ``if_exists`` policy: 'overwrite' (default) clears the existing
+    run folders when ``clear_overwrite`` is true, 'version' picks the next free
+    ``_vN`` so prior output is kept, 'error' raises, 'skip' returns
+    reuse_existing=True so the caller can return the cached manifest without
+    recomputing.
     """
     base_fig = os.path.join(experiment.fig_path, "Correlation Pipeline")
     base_data = os.path.join(_corr_pipeline_data_root(experiment), "Correlation Pipeline")
@@ -14906,11 +15025,19 @@ def _corr_pipeline_run_dirs(experiment, run_label, if_exists):
 
     def _dirs(lbl):
         safe = strip_name(str(lbl))
+        if not safe:
+            raise ValueError("run_label must resolve to a non-empty folder name.")
         return os.path.join(base_fig, safe), os.path.join(base_data, safe)
 
     fig_dir, data_dir = _dirs(run_label)
-    exists = os.path.isdir(fig_dir) or os.path.isdir(data_dir)
-    if not exists or policy == "overwrite":
+    exists = _corr_isdir(fig_dir) or _corr_isdir(data_dir)
+    if not exists:
+        return fig_dir, data_dir, run_label, False
+    if policy == "overwrite":
+        if not clear_overwrite:
+            return fig_dir, data_dir, run_label, False
+        _corr_clear_run_dir(fig_dir, base_fig)
+        _corr_clear_run_dir(data_dir, base_data)
         return fig_dir, data_dir, run_label, False
     if policy == "skip":
         return fig_dir, data_dir, run_label, True
@@ -14928,7 +15055,7 @@ def _corr_pipeline_run_dirs(experiment, run_label, if_exists):
     while True:
         cand = f"{run_label}_v{n}"
         fig_dir, data_dir = _dirs(cand)
-        if not (os.path.isdir(fig_dir) or os.path.isdir(data_dir)):
+        if not (_corr_isdir(fig_dir) or _corr_isdir(data_dir)):
             return fig_dir, data_dir, cand, False
         n += 1
 
@@ -15108,7 +15235,7 @@ def _corr_pipeline_sig_from_values(value_df, alpha):
 
 
 def _corr_difference_use_fdr(gate):
-    return str(gate).strip().lower() in ("fdr", "q", "qvalue", "q-value")
+    return str(gate).strip().lower() in ("fdr", "q", "qvalue", "q_value", "q-value", "fdr_bh", "bh")
 
 
 def _normal_sf(x):
@@ -15369,8 +15496,40 @@ def _corr_render_matrix_differences(
 ):
     """Render/save pairwise matrix differences from already-computed groups."""
     def _write_csv(frame, path, **kwargs):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        frame.to_csv(path, **kwargs)
+        _corr_to_csv(frame, path, **kwargs)
+
+    def _csv_path(directory, preferred_name, compact_name):
+        path = os.path.join(directory, preferred_name)
+        if os.name == "nt" and len(path) >= 248:
+            return os.path.join(directory, compact_name)
+        return path
+
+    def _comparison_folder(label, data_root=None, fig_root=None):
+        preferred = strip_name(label) or "comparison"
+        if os.name != "nt":
+            return preferred
+        digest = hashlib.sha1(str(label).encode("utf-8")).hexdigest()[:10]
+        compact = f"cmp_{digest}"
+        checks = []
+        if data_root:
+            checks.append(os.path.join(data_root, preferred, "p_Pearson.csv"))
+        if fig_root:
+            checks.append(os.path.join(
+                fig_root, preferred, "Matrices",
+                f"{strip_name('Pearson Q Matrix')}.svg",
+            ))
+        return compact if any(len(path) >= 248 for path in checks) else preferred
+
+    def _fig_target(root, comp_safe, preferred_name, compact_name):
+        subfolder = os.path.join(comp_safe, "Matrices")
+        name = preferred_name
+        path = os.path.join(root, subfolder, f"{strip_name(name)}.svg")
+        if os.name == "nt" and len(path) >= 248:
+            name = compact_name
+            path = os.path.join(root, subfolder, f"{strip_name(name)}.svg")
+        if os.name == "nt" and len(path) >= 248:
+            subfolder = os.path.join(comp_safe, "M")
+        return name, subfolder
 
     methods = [_normalize_correlation_method(m)
                for m in ([methods] if isinstance(methods, str) else list(methods))]
@@ -15399,11 +15558,8 @@ def _corr_render_matrix_differences(
             left_res, right_res, methods,
             alpha=alpha, gate=gate, test=test,
         )
-        comp_safe = strip_name(comp_label) or "comparison"
+        comp_safe = _comparison_folder(comp_label, data_dir, fig_dir)
         comp_data_dir = os.path.join(data_dir, comp_safe) if data_dir else None
-        comp_fig_sub = os.path.join(comp_safe, "Matrices")
-        if save and comp_data_dir:
-            os.makedirs(comp_data_dir, exist_ok=True)
 
         long_df = payload["long"].copy()
         if not long_df.empty:
@@ -15412,7 +15568,11 @@ def _corr_render_matrix_differences(
             long_df.insert(2, "right_group", right_label)
             all_long.append(long_df)
             if save and comp_data_dir:
-                _write_csv(long_df, os.path.join(comp_data_dir, "matrix_differences.csv"), index=False)
+                _write_csv(
+                    long_df,
+                    _csv_path(comp_data_dir, "matrix_differences.csv", "diffs.csv"),
+                    index=False,
+                )
 
         comp_summary = {
             "comparison": comp_label,
@@ -15432,11 +15592,12 @@ def _corr_render_matrix_differences(
                 "n_significant": n_sig,
             })
             if save and comp_data_dir:
-                _write_csv(mres["signed"], os.path.join(comp_data_dir, f"signed_delta_{disp}.csv"))
-                _write_csv(mres["absolute"], os.path.join(comp_data_dir, f"absolute_delta_{disp}.csv"))
-                _write_csv(mres["p"], os.path.join(comp_data_dir, f"pvalues_difference_{disp}.csv"))
-                _write_csv(mres["q"], os.path.join(comp_data_dir, f"qvalues_difference_{disp}.csv"))
-                _write_csv(mres["sig"].astype(int), os.path.join(comp_data_dir, f"gate_difference_{disp}.csv"))
+                _write_csv(mres["signed"], _csv_path(comp_data_dir, f"signed_delta_{disp}.csv", f"signed_{disp}.csv"))
+                _write_csv(mres["absolute"], _csv_path(comp_data_dir, f"absolute_delta_{disp}.csv", f"abs_{disp}.csv"))
+                if inferential:
+                    _write_csv(mres["p"], _csv_path(comp_data_dir, f"pvalues_difference_{disp}.csv", f"p_{disp}.csv"))
+                    _write_csv(mres["q"], _csv_path(comp_data_dir, f"qvalues_difference_{disp}.csv", f"q_{disp}.csv"))
+                    _write_csv(mres["sig"].astype(int), _csv_path(comp_data_dir, f"gate_difference_{disp}.csv", f"gate_{disp}.csv"))
 
             if save and fig_dir:
                 if plot_signed:
@@ -15445,7 +15606,12 @@ def _corr_render_matrix_differences(
                         tick_label_size, kind="signed",
                         sig_df=mres["sig"] if inferential else None, alpha=alpha,
                     )
-                    save_fig(sfig, fig_dir, f"{disp} Signed Difference Matrix", subfolder=comp_fig_sub)
+                    fig_name, fig_sub = _fig_target(
+                        fig_dir, comp_safe,
+                        f"{disp} Signed Difference Matrix",
+                        f"{disp} Signed Delta",
+                    )
+                    save_fig(sfig, fig_dir, fig_name, subfolder=fig_sub)
                     plt.close(sfig)
                 if plot_absolute:
                     afig = _corr_difference_matrix_fig(
@@ -15453,28 +15619,48 @@ def _corr_render_matrix_differences(
                         tick_label_size, kind="absolute",
                         sig_df=mres["sig"] if inferential else None, alpha=alpha,
                     )
-                    save_fig(afig, fig_dir, f"{disp} Absolute Difference Matrix", subfolder=comp_fig_sub)
+                    fig_name, fig_sub = _fig_target(
+                        fig_dir, comp_safe,
+                        f"{disp} Absolute Difference Matrix",
+                        f"{disp} Abs Delta",
+                    )
+                    save_fig(afig, fig_dir, fig_name, subfolder=fig_sub)
                     plt.close(afig)
                 if inferential and plot_pvalue_matrices:
                     pfig = _corr_difference_matrix_fig(
                         mres["p"], f"{disp} correlation-difference P-Value Matrix\n{comp_label} (* p<{alpha:g})",
                         tick_label_size, kind="p", alpha=alpha,
                     )
-                    save_fig(pfig, fig_dir, f"{disp} Difference P-Value Matrix", subfolder=comp_fig_sub)
+                    fig_name, fig_sub = _fig_target(
+                        fig_dir, comp_safe,
+                        f"{disp} Difference P-Value Matrix",
+                        f"{disp} P Matrix",
+                    )
+                    save_fig(pfig, fig_dir, fig_name, subfolder=fig_sub)
                     plt.close(pfig)
                 if inferential and plot_qvalue_matrices:
                     qfig = _corr_difference_matrix_fig(
                         mres["q"], f"{disp} correlation-difference FDR Q-Value Matrix\n{comp_label} (* q<{alpha:g})",
                         tick_label_size, kind="q", alpha=alpha,
                     )
-                    save_fig(qfig, fig_dir, f"{disp} Difference FDR Q-Value Matrix", subfolder=comp_fig_sub)
+                    fig_name, fig_sub = _fig_target(
+                        fig_dir, comp_safe,
+                        f"{disp} Difference FDR Q-Value Matrix",
+                        f"{disp} Q Matrix",
+                    )
+                    save_fig(qfig, fig_dir, fig_name, subfolder=fig_sub)
                     plt.close(qfig)
                 if inferential and plot_gate_matrix:
                     gfig = _corr_difference_matrix_fig(
                         mres["sig"], f"{disp} correlation-difference gate\n{comp_label} @ {'q' if _corr_difference_use_fdr(gate) else 'p'}<{alpha:g}",
                         tick_label_size, kind="gate", alpha=alpha,
                     )
-                    save_fig(gfig, fig_dir, f"{disp} Difference Gate Matrix", subfolder=comp_fig_sub)
+                    fig_name, fig_sub = _fig_target(
+                        fig_dir, comp_safe,
+                        f"{disp} Difference Gate Matrix",
+                        f"{disp} Gate Matrix",
+                    )
+                    save_fig(gfig, fig_dir, fig_name, subfolder=fig_sub)
                     plt.close(gfig)
         summaries.append(comp_summary)
 
@@ -15501,13 +15687,12 @@ def _corr_pipeline_heatmap(value_df, sig_df, title, tick_label_size, *,
     xcols = list(value_df.columns)
     ny, nx = len(ycols), len(xcols)
     n = max(nx, ny, 1)
-    fig_w = min(max(6.0, nx * 0.35), 30.0)
-    fig_h = min(max(5.4, ny * 0.315), 27.0)
+    fig_w = min(max(7.0, nx * 0.42), 30.0)
+    fig_h = min(max(6.2, ny * 0.38), 27.0)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
     matrix = value_df.apply(lambda s: pd.to_numeric(s, errors="coerce"))
-    tick_fs = min(max(14, int(tick_label_size * 2.0)),
-                  max(14, int(640 / n)))
+    tick_fs = max(7, min(int(tick_label_size), int(130 / n)))
     star_fs = min(25, max(8, int(220 / n)))
 
     heatmap = sns.heatmap(
@@ -15516,9 +15701,9 @@ def _corr_pipeline_heatmap(value_df, sig_df, title, tick_label_size, *,
     )
     try:
         cbar = heatmap.collections[0].colorbar
-        cbar_tick_fs = max(16, int(tick_fs * 1.2))
-        cbar_label_fs = max(18, int(tick_fs * 1.35))
-        cbar.ax.tick_params(labelsize=cbar_tick_fs, width=2.0, length=8)
+        cbar_tick_fs = max(8, min(12, int(tick_fs * 1.1)))
+        cbar_label_fs = max(9, min(13, int(tick_fs * 1.15)))
+        cbar.ax.tick_params(labelsize=cbar_tick_fs, width=1.2, length=5)
         if colorbar_label:
             cbar.ax.text(
                 1.02, 1.05, colorbar_label,
@@ -15544,17 +15729,24 @@ def _corr_pipeline_heatmap(value_df, sig_df, title, tick_label_size, *,
     tick_pos_y = np.arange(ny, dtype=float) + 0.5
     ax.set_xticks(tick_pos_x)
     ax.set_yticks(tick_pos_y)
-    ax.set_xticklabels(labels_x, rotation=60, ha="right", fontsize=tick_fs)
+    ax.set_xticklabels(
+        labels_x, rotation=60, ha="right", va="top",
+        rotation_mode="anchor", fontsize=tick_fs,
+    )
     ax.set_yticklabels(labels_y, rotation=0, ha="right", fontsize=tick_fs)
     ax.set_title(title, fontsize=int(tick_label_size))
-    fig.tight_layout()
+    max_x_len = max([len(str(label)) for label in labels_x] or [1])
+    max_y_len = max([len(str(label)) for label in labels_y] or [1])
+    left = min(0.42, max(0.20, 0.08 + max_y_len * 0.0065))
+    bottom = min(0.42, max(0.22, 0.08 + max_x_len * 0.008))
+    fig.subplots_adjust(left=left, bottom=bottom, right=0.86, top=0.88)
     return fig
 
 
 def _corr_pipeline_append_runs_index(experiment, manifest):
     """Append one summary row per run to a shared index CSV (overwrite by label)."""
     base_data = os.path.join(_corr_pipeline_data_root(experiment), "Correlation Pipeline")
-    os.makedirs(base_data, exist_ok=True)
+    _corr_makedirs(base_data)
     index_path = os.path.join(base_data, "_runs_index.csv")
     row = {
         "run_label": manifest["run_label"],
@@ -15576,13 +15768,13 @@ def _corr_pipeline_append_runs_index(experiment, manifest):
         "fig_dir": manifest["fig_dir"],
     }
     try:
-        if os.path.isfile(index_path):
-            existing = pd.read_csv(index_path)
+        if _corr_isfile(index_path):
+            existing = pd.read_csv(_corr_windows_extended_path(index_path))
             existing = existing[existing["run_label"].astype(str) != str(row["run_label"])]
             out = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
         else:
             out = pd.DataFrame([row])
-        out.to_csv(index_path, index=False)
+        _corr_to_csv(out, index_path, index=False)
     except Exception as exc:
         _log.warn(f"[correlation_pipeline] Could not update runs index: {exc}")
 
@@ -15751,10 +15943,7 @@ def plot_matrix_differences(
         ],
     }
     if save:
-        import json as _json
-        os.makedirs(data_dir, exist_ok=True)
-        with open(os.path.join(data_dir, "manifest.json"), "w", encoding="utf-8") as fh:
-            _json.dump(manifest, fh, indent=2, default=str)
+        _corr_write_json(manifest, os.path.join(data_dir, "manifest.json"))
     result = dict(manifest)
     result["differences"] = diff["long"]
     return result
@@ -15803,353 +15992,12 @@ def plot_correlation_pipeline(
     if_exists="overwrite",
     write_manifest=True,
 ):
-    """Correlation discovery -> significance gate -> regression plots, in one run.
+    """Compatibility wrapper for :func:`PyFLASH.pipeline.correlation`."""
+    kwargs = dict(locals())
+    experiment = kwargs.pop("experiment")
+    from PyFLASH.pipeline import correlation as _correlation_pipeline
 
-    Phase 1 builds one full correlation matrix per method in ``tests`` over the
-    chosen columns. Phase 2 corrects p-values (Benjamini-Hochberg) and keeps the
-    metric pairs that pass the gate, combining the methods with ``require``
-    ('and' / 'or') on either raw p-values (``gate='p'``) or FDR q-values
-    (``gate='fdr'``). Phase 3 draws a regression plot for each surviving pair
-    (strongest by median |r| first, capped at ``max_regressions``).
-
-    Columns
-    -------
-    ``filtered_columns`` (or ``column_strings`` / ``regex_string`` / ``exclude``)
-    selects the metric set for a square all-vs-all matrix. Supplying
-    ``against_columns`` (or its discovery variants) switches to a rectangular
-    ``filtered_columns`` x ``against_columns`` analysis instead.
-
-    Matrix figures
-    --------------
-    Coefficient matrices use the same seaborn heatmap styling as
-    :func:`plot_matrices`. By default the pipeline also saves visual raw
-    p-value and FDR q-value matrices for each correlation method, alongside
-    the coefficient matrices and the combined gate matrix. Set
-    ``plot_pvalue_matrices=False`` or ``plot_qvalue_matrices=False`` to skip
-    those extra heatmaps while still writing the CSV tables.
-
-    Difference matrices
-    -------------------
-    Set ``plot_difference_matrices=True`` to compare the grouped matrices
-    pairwise. The pipeline writes signed deltas (left - right), absolute deltas,
-    and, for Pearson correlations, Fisher r-to-z p/q/gate matrices for each
-    requested comparison. ``difference_comparisons`` accepts PyFLASH comparison
-    strings (``"1-2"``) or explicit pairs (``("AD", "MCI")``).
-
-    Run management
-    --------------
-
-    Every call writes into its own run folder so previous runs are never
-    silently lost and you can try several column sets side by side:
-
-    - ``Python Figures/Correlation Pipeline/<run>/`` — the matrices and
-      regression plots.
-    - ``Data and Stats/Correlation Pipeline/<run>/`` —
-      ``pairwise_correlations.csv`` (r/p/q/significance per method),
-      ``selected_pairs.csv``, per-method matrix CSVs, and ``manifest.json``.
-    - ``Data and Stats/Correlation Pipeline/_runs_index.csv`` — one row per run
-      for quick comparison.
-
-    ``run_label`` names the folder; when omitted it is auto-derived from the
-    column set and settings, so a different column list lands in a different
-    folder automatically while identical settings reuse one. ``if_exists``
-    controls collisions: ``'overwrite'`` (default, replace in place),
-    ``'version'`` (next free ``_vN``), ``'error'`` (raise), or ``'skip'``
-    (return the cached manifest without recomputing).
-
-    Grouping
-    --------
-    ``by='all'`` (default) computes one pooled matrix. ``factor='Diagnosis'`` or
-    ``by='conditions'`` panel the matrices/gate/regressions per group.
-    ``regression_factor`` colors/groups the regression scatter (e.g. one pooled
-    matrix with AD/MCI/Control regression points), independent of the matrix
-    paneling.
-
-    Returns a dict with the resolved run label, output directories, per-group
-    counts, and the pairwise / selected-pair DataFrames.
-    """
-    methods = [_normalize_correlation_method(t)
-               for t in ([tests] if isinstance(tests, str) else list(tests))]
-    if not methods:
-        raise ValueError("tests must name at least one correlation method.")
-    if str(require).strip().lower() not in ("and", "or"):
-        raise ValueError(f"require must be 'and' or 'or'; got {require!r}.")
-    use_fdr = _corr_pipeline_use_fdr(gate)
-
-    _roi_base = _resolve_roi_bases(roi, experiment)[0]
-
-    # Resolve the analysis dataset (specificity/ROI scope) and columns.
-    scope_df = _filtered_summary_for_specificity(experiment, specificity, roi_base=_roi_base)
-    resolved_columns = _resolve_filtered_columns(
-        experiment, filtered_columns=filtered_columns,
-        column_strings=column_strings, regex_string=regex_string,
-        exclude=exclude, source_df=scope_df,
-    )
-    use_against = (against_columns is not None or against_column_strings
-                   or against_regex_string or against_exclude)
-    against_resolved = []
-    if use_against:
-        against_resolved = _resolve_filtered_columns(
-            experiment, filtered_columns=against_columns,
-            column_strings=against_column_strings, regex_string=against_regex_string,
-            exclude=against_exclude, source_df=scope_df,
-        )
-
-    union = list(dict.fromkeys(list(resolved_columns) + list(against_resolved)))
-    num_df, valid_all, _dropped = _prepare_matrix_numeric_df(
-        scope_df, union, drop_duplicate_columns=False, require_complete_numeric=False,
-    )
-    valid_set = set(valid_all)
-    square = not use_against
-    if square:
-        row_valid = [c for c in resolved_columns if c in valid_set]
-        col_valid = row_valid
-        if len(row_valid) < 2:
-            raise ValueError(
-                "plot_correlation_pipeline needs at least 2 numeric columns with "
-                f"data; got {len(row_valid)} after filtering."
-            )
-        slug_cols = row_valid
-    else:
-        row_valid = [c for c in resolved_columns if c in valid_set]
-        col_valid = [c for c in against_resolved if c in valid_set]
-        if len(row_valid) < 1 or len(col_valid) < 1:
-            raise ValueError(
-                "plot_correlation_pipeline rectangular mode needs at least one "
-                f"numeric column on each side; got {len(row_valid)} × {len(col_valid)}."
-            )
-        slug_cols = list(dict.fromkeys(row_valid + col_valid))
-
-    # ── Run folder resolution ──
-    label = run_label or _corr_pipeline_slug(
-        slug_cols, against_resolved, methods, require, gate, alpha,
-        by, factor, specificity, _roi_base,
-    )
-    fig_dir, data_dir, resolved_label, reuse_existing = _corr_pipeline_run_dirs(
-        experiment, label, if_exists,
-    )
-    manifest_path = os.path.join(data_dir, "manifest.json")
-    if reuse_existing and os.path.isfile(manifest_path):
-        import json as _json
-        with open(manifest_path, "r", encoding="utf-8") as fh:
-            cached = _json.load(fh)
-        _log.hint(f"[correlation_pipeline] Reusing run {resolved_label!r} (if_exists='skip').")
-        cached["reused"] = True
-        return cached
-
-    groups = _corr_pipeline_groups(experiment, scope_df, num_df, by, factor, specificity)
-    single = len(groups) == 1
-    reg_factor = regression_factor
-    reg_by = by if reg_factor is not None else "conditions"
-
-    combined_long, combined_selected, group_summaries, plotted_pairs = [], [], [], []
-    groups_results = []
-    first_long = first_selected = None
-
-    for gi, (glabel, gidx, greg_spec) in enumerate(groups):
-        gnum = num_df.loc[num_df.index.intersection(gidx)]
-        res = _corr_pipeline_compute(
-            gnum, row_valid, col_valid, methods, gate, alpha, require, min_n, square,
-        )
-        groups_results.append({
-            "group": str(glabel),
-            "n_rows": int(len(gnum)),
-            "result": res,
-        })
-        if gi == 0:
-            first_long, first_selected = res["long"], res["selected"]
-
-        g_long = res["long"] if single else res["long"].assign(group=str(glabel))
-        g_sel = res["selected"] if single else res["selected"].assign(group=str(glabel))
-        combined_long.append(g_long)
-        combined_selected.append(g_sel)
-
-        grp_sub = "" if single else strip_name(str(glabel))
-        g_data_dir = os.path.join(data_dir, grp_sub) if grp_sub else data_dir
-        g_fig_sub = os.path.join(grp_sub, "Matrices") if grp_sub else "Matrices"
-
-        if save:
-            os.makedirs(g_data_dir, exist_ok=True)
-            res["long"].to_csv(os.path.join(g_data_dir, "pairwise_correlations.csv"), index=False)
-            res["selected"].to_csv(os.path.join(g_data_dir, "selected_pairs.csv"), index=False)
-            for m in methods:
-                disp = _correlation_display_name(m)
-                res["coef"][m].to_csv(os.path.join(g_data_dir, f"coef_{disp}.csv"))
-                res["p"][m].to_csv(os.path.join(g_data_dir, f"pvalues_{disp}.csv"))
-                res["q"][m].to_csv(os.path.join(g_data_dir, f"qvalues_{disp}.csv"))
-            res["gate"].astype(int).to_csv(os.path.join(g_data_dir, "gate_matrix.csv"))
-
-            star = ("q<%g" % alpha) if use_fdr else ("p<%g" % alpha)
-            suffix = "" if single else f" - {glabel}"
-            for m in methods:
-                disp = _correlation_display_name(m)
-                fig = _corr_pipeline_heatmap(
-                    res["coef"][m], res["sig"][m],
-                    f"{disp} Correlation Matrix{suffix}  (* {star})",
-                    tick_label_size,
-                    cmap="coolwarm", vmin=-1.0, vmax=1.0,
-                    colorbar_label=f"{disp} coefficient",
-                )
-                save_fig(fig, fig_dir, f"{disp} Correlation Matrix", subfolder=g_fig_sub)
-                plt.close(fig)
-                if plot_pvalue_matrices:
-                    pfig = _corr_pipeline_heatmap(
-                        res["p"][m], _corr_pipeline_sig_from_values(res["p"][m], alpha),
-                        f"{disp} P-Value Matrix{suffix}  (* p<{alpha:g})",
-                        tick_label_size,
-                        cmap="viridis_r", vmin=0.0, vmax=1.0,
-                        colorbar_label="raw p value",
-                    )
-                    save_fig(pfig, fig_dir, f"{disp} P-Value Matrix", subfolder=g_fig_sub)
-                    plt.close(pfig)
-                if plot_qvalue_matrices:
-                    qfig = _corr_pipeline_heatmap(
-                        res["q"][m], _corr_pipeline_sig_from_values(res["q"][m], alpha),
-                        f"{disp} FDR Q-Value Matrix{suffix}  (* q<{alpha:g})",
-                        tick_label_size,
-                        cmap="viridis_r", vmin=0.0, vmax=1.0,
-                        colorbar_label="FDR q value",
-                    )
-                    save_fig(qfig, fig_dir, f"{disp} FDR Q-Value Matrix", subfolder=g_fig_sub)
-                    plt.close(qfig)
-            gate_ttl = (f"Pairs passing gate{suffix}\n{require.upper()} of "
-                        + "/".join(_correlation_display_name(m) for m in methods)
-                        + f" @ {'q' if use_fdr else 'p'}<{alpha}")
-            gfig = _corr_pipeline_heatmap(
-                res["gate"].astype(float), res["gate"], gate_ttl, tick_label_size,
-                cmap="Reds", vmin=0.0, vmax=1.0,
-                colorbar_label="passes gate",
-            )
-            save_fig(gfig, fig_dir, "Gate Passing Matrix", subfolder=g_fig_sub)
-            plt.close(gfig)
-
-        # Regressions for surviving pairs (redirect output into the run folder).
-        sel = res["selected"]
-        plot_sel = sel if max_regressions is None else sel.head(int(max_regressions))
-        reg_fig_root = os.path.join(fig_dir, grp_sub) if grp_sub else fig_dir
-        orig_fig_path = getattr(experiment, "fig_path", None)
-        g_plotted = []
-        for _, prow in plot_sel.iterrows():
-            x, y = prow["x"], prow["y"]
-            try:
-                experiment.fig_path = reg_fig_root
-                plot_regressions(
-                    experiment, x=x, y=y, by=reg_by, factor=reg_factor,
-                    test=regression_test, normalize_x=normalize_x, normalize_y=normalize_y,
-                    specificity=greg_spec, roi=_roi_base, save=save, combine=regression_combine,
-                )
-                g_plotted.append({
-                    "x": x, "y": y,
-                    "group": (None if single else str(glabel)),
-                    "median_abs_r": float(prow.get("median_abs_r", np.nan)),
-                })
-            except Exception as exc:
-                _log.warn(f"[correlation_pipeline] Regression {x} vs {y} failed: {exc}")
-            finally:
-                if orig_fig_path is not None:
-                    experiment.fig_path = orig_fig_path
-
-        plotted_pairs.extend(g_plotted)
-        group_summaries.append({
-            "group": str(glabel), "n_rows": int(len(gnum)),
-            "n_pairs": int(len(res["pairs"])), "n_selected": int(len(sel)),
-            "n_regressions": len(g_plotted),
-        })
-
-    long_all = pd.concat(combined_long, ignore_index=True) if combined_long else pd.DataFrame()
-    selected_all = pd.concat(combined_selected, ignore_index=True) if combined_selected else pd.DataFrame()
-    if save and not single:
-        long_all.to_csv(os.path.join(data_dir, "pairwise_correlations.csv"), index=False)
-        selected_all.to_csv(os.path.join(data_dir, "selected_pairs.csv"), index=False)
-
-    total_pairs = int(sum(g["n_pairs"] for g in group_summaries))
-    total_selected = int(sum(g["n_selected"] for g in group_summaries))
-    difference_summary = {
-        "enabled": bool(plot_difference_matrices),
-        "comparisons": [],
-        "n_comparisons": 0,
-        "n_difference_tests": 0,
-        "n_difference_significant": 0,
-    }
-    if plot_difference_matrices and len(groups_results) >= 2:
-        d_alpha = alpha if difference_alpha is None else float(difference_alpha)
-        d_gate = gate if difference_gate is None else difference_gate
-        prefer_condition = factor is None and str(by).strip().lower() == "conditions"
-        diff = _corr_render_matrix_differences(
-            experiment,
-            groups_results,
-            methods,
-            comparisons=difference_comparisons,
-            prefer_condition_comparisons=prefer_condition,
-            fig_dir=os.path.join(fig_dir, "Matrix Differences"),
-            data_dir=os.path.join(data_dir, "Matrix Differences"),
-            save=save,
-            tick_label_size=tick_label_size,
-            alpha=d_alpha,
-            gate=d_gate,
-            test=difference_test,
-            plot_signed=plot_difference_signed,
-            plot_absolute=plot_difference_absolute,
-            plot_pvalue_matrices=plot_difference_pvalue_matrices,
-            plot_qvalue_matrices=plot_difference_qvalue_matrices,
-            plot_gate_matrix=plot_difference_gate_matrix,
-        )
-        difference_summary = {
-            "enabled": True,
-            "comparisons": diff["comparisons"],
-            "n_comparisons": diff["n_comparisons"],
-            "n_difference_tests": diff["n_difference_tests"],
-            "n_difference_significant": diff["n_difference_significant"],
-            "alpha": float(d_alpha),
-            "gate": str(d_gate).lower(),
-            "test": str(difference_test),
-        }
-    manifest = {
-        "run_label": resolved_label,
-        "fig_dir": fig_dir,
-        "data_dir": data_dir,
-        "mode": "rectangular" if not square else "square",
-        "n_rows": int(len(num_df)),
-        "columns": list(row_valid),
-        "against_columns": list(col_valid) if not square else None,
-        "tests": [_correlation_display_name(m) for m in methods],
-        "require": str(require).lower(),
-        "gate": str(gate).lower(),
-        "alpha": float(alpha),
-        "min_n": int(min_n),
-        "plot_pvalue_matrices": bool(plot_pvalue_matrices),
-        "plot_qvalue_matrices": bool(plot_qvalue_matrices),
-        "difference_matrices": difference_summary,
-        "by": str(by),
-        "factor": factor,
-        "specificity": str(specificity) if specificity is not None else None,
-        "roi": str(_roi_base) if _roi_base is not None else None,
-        "n_pairs": total_pairs,
-        "n_selected": total_selected,
-        "n_regressions": len(plotted_pairs),
-        "regression_factor": reg_factor,
-        "regression_test": _correlation_display_name(_normalize_correlation_method(regression_test)),
-        "groups": group_summaries,
-        "selected_pairs": selected_all.to_dict(orient="records"),
-        "plotted_pairs": plotted_pairs,
-        "reused": False,
-    }
-    if save and write_manifest:
-        import json as _json
-        os.makedirs(data_dir, exist_ok=True)
-        with open(manifest_path, "w", encoding="utf-8") as fh:
-            _json.dump(manifest, fh, indent=2, default=str)
-        _corr_pipeline_append_runs_index(experiment, manifest)
-
-    _log.confirm(
-        f"[correlation_pipeline] {resolved_label}: {total_pairs} pairs, "
-        f"{total_selected} passed ({str(require).lower()}/{str(gate).lower()}), "
-        f"{len(plotted_pairs)} regressions."
-    )
-    result_obj = dict(manifest)
-    result_obj["pairwise"] = long_all
-    result_obj["selected"] = selected_all
-    return result_obj
+    return _correlation_pipeline(experiment, **kwargs)
 
 
 def plot_rect_matrices(
@@ -17956,6 +17804,9 @@ _PARAM_DESCRIPTIONS = {
     'order':                'Custom ordering. For pie charts, sets slice/stack order clockwise from the top; for Sankey, use "auto" or a list of markers.',
     # ── Shared ───────────────────────────────────────────────────────
     'points':               'Overlay individual data points on bar charts.',
+    'point_fill':           'Mean bars: data-point fill color; use "group" to fill points with each group color.',
+    'point_edge':           'Mean bars: data-point edge color; use "group" for each group color or "none" for no edge.',
+    'point_linewidth':      'Mean bars: linewidth for overlaid data-point edges.',
     'enforce_shared_columns': 'Force all panels to use the same column set.',
     'shared_columns':       'Explicit list of columns to share across panels.',
 }
@@ -17974,6 +17825,7 @@ def cheat_sheet(func_name=None):
     >>> cheat_sheet('histograms')        # shorthand without plot_ prefix
     """
     import inspect as _inspect
+    import importlib as _importlib
     import sys as _sys
 
     _this = _sys.modules[__name__]
@@ -18001,11 +17853,20 @@ def cheat_sheet(func_name=None):
         print("=" * 70)
         return
 
-    # Resolve name (supports shorthand without 'plot_' prefix)
+    # Resolve name (supports shorthand without 'plot_' prefix, plus dotted
+    # module targets used by pipeline registry entries).
     key = func_name
-    if key not in plot_funcs:
+    func = None
+    if isinstance(key, str) and "." in key:
+        try:
+            module_name, attr = key.rsplit(".", 1)
+            module = _importlib.import_module(module_name)
+            func = getattr(module, attr)
+        except Exception:
+            func = None
+    if func is None and key not in plot_funcs:
         key = f"plot_{func_name}"
-    if key not in plot_funcs:
+    if func is None and key not in plot_funcs:
         matches = [n for n in plot_funcs if func_name in n]
         if len(matches) == 1:
             key = matches[0]
@@ -18015,7 +17876,8 @@ def cheat_sheet(func_name=None):
                 print(f"  {n}")
             return
 
-    func = plot_funcs[key]
+    if func is None:
+        func = plot_funcs[key]
     sig = _inspect.signature(func)
     doc = (func.__doc__ or '').strip()
     first_line = doc.split('\n')[0] if doc else ''
