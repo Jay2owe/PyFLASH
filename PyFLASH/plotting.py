@@ -9787,7 +9787,7 @@ def _apply_pie_wedge_style(wedges, style, color):
 
     Pies are inherently filled, so ``hollow`` is rendered as a default hatch
     rather than an empty wedge. That hatch (``"oo"``) is deliberately distinct
-    from every hatch token in the default cycle (``/// ... xxx \\\``) so a third
+    from every hatch token in the default cycle (``/// ... xxx \\\\``) so a third
     same-colour level (which resolves to ``"///"``) never collides with the
     second (``hollow``); explicit hatch tokens pass straight through.
     """

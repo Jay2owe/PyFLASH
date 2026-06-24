@@ -15,6 +15,9 @@ doesn't exist yet. Five layers:
    (`submit`/`run`/`inspect`/`discover`/`script`/`status`/`shutdown`). Dispatches to any
    `plot_*` in `PyFLASH.plotting` by name; keeps the 288 MB `batch1.pkl` cached in a
    resident worker. Always returns the `equivalent_script`.
+   Registry aliases may also point to module-qualified pipeline callables such as
+   `PyFLASH.pipeline.adjusted_correlation`; the runner resolves those through
+   `PyFLASH.spec.PLOT_REGISTRY`.
 3. **Control skill** — `.claude/skills/pyflash/` (`SKILL.md` + `reference/*.md`): the
    loop that turns a request into a call, runs it, shows the PNG preview, prints the code.
    Drive it with **`/pyflash`**.
@@ -27,6 +30,7 @@ doesn't exist yet. Five layers:
 `discover` is the source of truth for "what plots exist" — the docs self-heal against it.
 Keep the registry in the package and the runner dumb; new `plot_*` functions are usable the
 moment they exist, no runner edit.
+Registered pipeline callables are supported the same way through `PLOT_REGISTRY`.
 
 ## Before Broad Search: Query The Knowledge Graph
 
