@@ -17,11 +17,13 @@ without launching Streamlit.
 """
 
 import ast
+import importlib.util
 import json
 import os
 import sys
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -75,6 +77,27 @@ def test_resolve_func_supports_pipeline_module_targets():
     adjusted = _resolve_func(PLOT_REGISTRY["adjusted_correlation_pipeline"])
     assert adjusted.__module__ == "PyFLASH.pipeline"
     assert adjusted.__name__ == "adjusted_correlation"
+
+
+def test_pyflash_runner_resolves_pipeline_registry_aliases():
+    runner_path = (
+        Path(__file__).resolve().parents[1]
+        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
+    )
+    if not runner_path.exists():
+        pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
+    spec = importlib.util.spec_from_file_location("pyflash_runner_test", runner_path)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+
+    req = {
+        "batch": "human",
+        "func": "adjusted_correlation_pipeline",
+        "kwargs": {"endpoints": ["A", "B"], "save": False},
+    }
+    script = runner.build_equivalent_script(req, "human.pkl")
+    assert "from PyFLASH.pipeline import adjusted_correlation as _pyflash_func" in script
+    assert "_pyflash_func(batch, endpoints=['A', 'B'], save=False)" in script
 
 
 def test_cheat_sheet_accepts_pipeline_module_targets(capsys):
