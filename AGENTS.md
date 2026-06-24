@@ -4,6 +4,30 @@ PyFLASH is a Python package for processing and analyzing immunofluorescence
 confocal microscopy data exported from FLASH/ImageJ workflows. The PyPI
 distribution is `PyFLASH-analysis`; the import package is `PyFLASH`.
 
+## AI Control Layer (drive PyFLASH in plain English)
+
+PyFLASH has an agentify-pattern control layer so an agent can make any plot from a
+natural-language request, and extend the package when a request needs a plot that
+doesn't exist yet. Five layers:
+
+1. **Registry** — `PyFLASH/spec.py::PLOT_REGISTRY` (YAML short-name → `plot_*`).
+2. **Runner** — `.claude/skills/pyflash/scripts/pyflash_runner.py`: a thin JSON CLI
+   (`submit`/`run`/`inspect`/`discover`/`script`/`status`/`shutdown`). Dispatches to any
+   `plot_*` in `PyFLASH.plotting` by name; keeps the 288 MB `batch1.pkl` cached in a
+   resident worker. Always returns the `equivalent_script`.
+3. **Control skill** — `.claude/skills/pyflash/` (`SKILL.md` + `reference/*.md`): the
+   loop that turns a request into a call, runs it, shows the PNG preview, prints the code.
+   Drive it with **`/pyflash`**.
+4. **Self-extension skill** — `.claude/skills/pyflash-extend/`: how to add a capability
+   when `/pyflash` can't (register/document an existing function, or add a new `plot_*`).
+   Use **`/pyflash-extend`**. The detailed plot-implementation contract lives in the global
+   `pyflash-add-plot` skill.
+5. **Orientation** — this section.
+
+`discover` is the source of truth for "what plots exist" — the docs self-heal against it.
+Keep the registry in the package and the runner dumb; new `plot_*` functions are usable the
+moment they exist, no runner edit.
+
 ## Before Broad Search: Query The Knowledge Graph
 
 A local graphify knowledge graph of the Python package and tests lives at
