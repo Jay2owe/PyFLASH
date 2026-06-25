@@ -40,11 +40,12 @@ from PyFLASH.utils import save_fig, strip_name
 _stats_cache: dict = {}
 
 
-def stats_cache_key(column_name, condition_names, specificity):
+def stats_cache_key(column_name, condition_names, specificity, stats_options=None):
     """Build a hashable cache key for a stats computation."""
     conds = frozenset(condition_names) if condition_names else frozenset()
     spec = tuple(specificity) if specificity else ()
-    return (str(column_name), conds, spec)
+    opts = tuple(sorted((stats_options or {}).items()))
+    return (str(column_name), conds, spec, opts)
 
 
 def clear_stats_cache():
@@ -212,8 +213,34 @@ def runOWA(df_list, comparisons, results_dict, ns="ns"):
     return pvalues, annotations, (float(f_stat), float(pvalue)), results_dict, "Tukey"
 
 
-def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns"):
+def _normalize_kw_posthoc(posthoc):
+    name = str(posthoc or "Conover").strip().lower().replace("'", "")
+    if name in {"dunn", "dunns", "dunns test", "dunn test"}:
+        return "Dunn"
+    if name in {"conover", "conover test"}:
+        return "Conover"
+    raise ValueError("posthoc must be 'Conover' or 'Dunn'")
+
+
+def _normalize_kw_correction(posthoc_correction, n_tests):
+    if posthoc_correction is None or str(posthoc_correction).lower() == "auto":
+        corrected = n_tests > 3
+    elif isinstance(posthoc_correction, bool):
+        corrected = posthoc_correction
+    else:
+        value = str(posthoc_correction).strip().lower()
+        if value in {"bonferroni", "bonf", "corrected", "correction", "true", "yes"}:
+            corrected = True
+        elif value in {"uncorrected", "none", "false", "no"}:
+            corrected = False
+        else:
+            raise ValueError("posthoc_correction must be 'auto', 'Bonferroni', or 'Uncorrected'")
+    return corrected, "Bonferroni" if corrected else "Uncorrected"
+
+
+def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", posthoc_correction="auto"):
     groups = _coerce_groups(df_list)
+    posthoc = _normalize_kw_posthoc(posthoc)
     if len(groups) < 2:
         return [], [], (float("nan"), float("nan")), results_dict, posthoc
     try:
@@ -223,7 +250,8 @@ def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns"):
         results_dict["KW_error"] = [msg, np.nan]
         return [], [], (float("nan"), float("nan")), results_dict, f"{posthoc} (error: {msg})"
     results_dict["KW"] = [float(kw_statistic), float(kw_pvalue)]
-    correction = "Bonferroni" if len(comparisons) > 3 else "Uncorrected"
+    n_tests = len(comparisons)
+    use_corrected, correction = _normalize_kw_correction(posthoc_correction, n_tests)
 
     try:
         dunn_df = sp.posthoc_dunn(groups)
@@ -232,7 +260,6 @@ def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns"):
         msg = str(e)
         results_dict["Posthoc_error"] = [msg, np.nan]
         return [], [], (float(kw_statistic), float(kw_pvalue)), results_dict, f"{posthoc} (error: {msg})"
-    n_tests = len(comparisons)
     dunn_uncorrected = []
     conover_uncorrected = []
     dunn_bonferroni = []
@@ -252,7 +279,6 @@ def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns"):
     results_dict["Dunn-Bonferroni"] = [1, dunn_bonferroni]
     results_dict["Dunn-Uncorrected"] = [1, dunn_uncorrected]
 
-    use_corrected = len(comparisons) > 3
     conover = conover_bonferroni if use_corrected else conover_uncorrected
     dunn = dunn_bonferroni if use_corrected else dunn_uncorrected
     posthoc_result = conover if posthoc == "Conover" else dunn
@@ -685,6 +711,72 @@ def _format_effect_strings(effects, condition_list):
     return (["Effect sizes:"] + out) if out else []
 
 
+def _emit_comparison_record(
+    valid_groups, group_labels, cond_list, test, post_hoc,
+    overall, comparisons, results, effect_strings, results_dict, normal,
+    fallback_metric=None, valid_indices=None, factor_list=None,
+):
+    """Push a structured comparison record to the report collector, if armed.
+
+    Captures the descriptive + inferential numbers ``multipleComparisons`` already
+    computed (per-group n/mean/sd, test, p-values, effect sizes) so an agent can
+    read them instead of OCR-ing the figure. Fully guarded — never raises into the
+    plotting path, and a no-op unless a caller has armed ``PyFLASH.report``.
+
+    ``valid_indices`` aligns the (full-length) ``group_labels``/``cond_list`` to the
+    ``valid_groups`` actually tested — ``multipleComparisons`` drops empty groups, so
+    without this the labels would pair positionally with the wrong groups' values.
+    """
+    try:
+        import PyFLASH.report as report
+    except Exception:
+        return
+    if not report.is_active():
+        return
+    try:
+        # _name_of unwraps Condition objects to their .name (str() would give an
+        # object repr); it passes plain strings through unchanged.
+        label_source = group_labels if group_labels is not None else cond_list
+        try:
+            names = [_name_of(c) for c in label_source]
+        except Exception:
+            names = []
+        if valid_indices is not None:
+            try:
+                names = [names[i] for i in valid_indices if 0 <= i < len(names)]
+            except Exception:
+                pass
+        metric = fallback_metric
+        for g in valid_groups:
+            nm = getattr(g, "name", None)
+            if nm is not None and str(nm) != "":
+                metric = nm
+                break
+        # For Two-Way ANOVA the overall p is a list [Factor1, Factor2, Interaction,
+        # Residual]; extend the factor names so the trailing terms aren't anonymous
+        # "term3"/"term4". Mirrors PyFLASH's own annotation label convention.
+        if isinstance(factor_list, (list, tuple)):
+            term_labels = list(factor_list) + ["Interaction", "Residual"]
+        else:
+            term_labels = None
+        report.emit(report.build_comparison_record(
+            metric=metric,
+            group_names=names,
+            group_values=valid_groups,
+            test=test,
+            post_hoc=post_hoc,
+            overall=overall,
+            comparisons=comparisons,
+            pairwise_pvalues=results,
+            effect_strings=effect_strings,
+            raw_stats=results_dict,
+            normal=normal,
+            factor_terms=term_labels,
+        ))
+    except Exception:
+        pass
+
+
 def multipleComparisons(
     experiment,
     dfs,
@@ -696,6 +788,8 @@ def multipleComparisons(
     save_name=None,
     comparisons=None,
     force_nonparametric=False,
+    posthoc="Conover",
+    posthoc_correction="auto",
     max_override=None,
     ns="ns",
     annotate_summary=True,
@@ -722,6 +816,9 @@ def multipleComparisons(
         return "N/A", "N/A", None, {}
     clean_dfs = [pd.to_numeric(pd.Series(g), errors="coerce").dropna() for g in dfs]
     valid_groups = [g for g in clean_dfs if len(g) > 0]
+    # Original-order indices of the surviving groups, so the report layer can map
+    # full-length group labels back onto the (possibly shorter) valid_groups.
+    valid_indices = [i for i, g in enumerate(clean_dfs) if len(g) > 0]
     if len(valid_groups) < 2:
         return "N/A", "N/A", None, {}
 
@@ -762,6 +859,13 @@ def multipleComparisons(
                     factor_list=experiment.factor if hasattr(experiment, "factor") else None,
                     effect_strings=effect_strings,
                 )
+        _emit_comparison_record(
+            valid_groups, group_labels, cond_list, test, post_hoc,
+            overall, comparisons, results, effect_strings, results_dict,
+            cached.get('normal'),
+            fallback_metric=save_name, valid_indices=valid_indices,
+            factor_list=getattr(experiment, "factor", None),
+        )
         return test, post_hoc, annotation_objects, results_dict
 
     if comparisons is None:
@@ -800,7 +904,14 @@ def multipleComparisons(
                 comparisons = ["1-2"]
         else:
             if (not normal) or any(len(g) <= 1 for g in valid_groups):
-                results, annotations, overall, results_dict, post_hoc = runKW(valid_groups, comparisons, results_dict, ns=ns)
+                results, annotations, overall, results_dict, post_hoc = runKW(
+                    valid_groups,
+                    comparisons,
+                    results_dict,
+                    posthoc=posthoc,
+                    posthoc_correction=posthoc_correction,
+                    ns=ns,
+                )
                 test = "Kruskal-Wallis"
             elif multiple_comparison == "One-Way":
                 results, annotations, overall, results_dict, post_hoc = runOWA(valid_groups, comparisons, results_dict, ns)
@@ -909,6 +1020,13 @@ def multipleComparisons(
             'comparisons': comparisons,
             'results_strings': results_strings,
             'effect_strings': effect_strings,
+            'normal': normal,
         }
 
+    _emit_comparison_record(
+        valid_groups, group_labels, cond_list, test, post_hoc,
+        overall, comparisons, results, effect_strings, results_dict, normal,
+        fallback_metric=save_name, valid_indices=valid_indices,
+        factor_list=getattr(experiment, "factor", None),
+    )
     return test, post_hoc, annotation_objects, results_dict

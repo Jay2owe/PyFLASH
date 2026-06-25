@@ -54,7 +54,7 @@ from PyFLASH.utils import (
     flatten_specificity_values, is_specificity_queue,
     iter_specificities, filter_df_by_specificity,
     specificity_path_parts, resolve_column_key, raw_coloc_column_aliases,
-    build_subfolder, resolve_roi_bases,
+    build_subfolder, resolve_roi_bases, is_excluded_outlier_mask,
 )
 
 
@@ -587,7 +587,8 @@ def _prepare_matrix_numeric_df(
             dropped_cols.append(col)
             continue
         raw = df[col].copy()
-        sentinel_mask = raw.astype(str).str.contains(str(sentinel), na=False)
+        sentinel_mask = (raw.astype(str).str.contains(str(sentinel), na=False)
+                         | is_excluded_outlier_mask(raw))
         raw = raw.where(~sentinel_mask, np.nan)
         coerced = pd.to_numeric(raw, errors='coerce')
         if bool(require_complete_numeric):
@@ -623,18 +624,19 @@ def _coerce_series_for_corr(raw_series, sentinel="NOT_INCLUDED_IN_EXPERIMENT", a
       encoding is explicitly allowed.
     """
     s = raw_series.copy()
-    # Match plot_matrices semantics:
-    # sentinel values are removable and should not invalidate the whole column.
-    non_sentinel = s[s.astype(str) != sentinel]
+    # Match plot_matrices semantics: sentinel and EXCLUDED_OUTLIER values are
+    # removable and should not invalidate the whole column.
+    drop_mask = (s.astype(str) == sentinel) | is_excluded_outlier_mask(s)
+    non_sentinel = s[~drop_mask]
     numeric_non_sentinel = pd.to_numeric(non_sentinel, errors='coerce')
     if len(numeric_non_sentinel) > 0 and not numeric_non_sentinel.isna().any():
-        out = s.where(s.astype(str) != sentinel, np.nan)
+        out = s.where(~drop_mask, np.nan)
         out = pd.to_numeric(out, errors='coerce')
         return out, False
     if not allow_categorical:
         return None, False
     # Categorical fallback for factor-like x columns.
-    cat_source = s.where(s.astype(str) != sentinel, np.nan)
+    cat_source = s.where(~drop_mask, np.nan)
     cat = pd.Categorical(cat_source)
     codes = pd.Series(cat.codes, index=s.index, dtype=float).replace(-1, np.nan)
     # For categorical X, keep plot_matrices-like strictness on true missing:
@@ -10543,6 +10545,15 @@ def regression_action(ctx: Context, state: dict,
 
     set_display_name(ax, y, x, compact_per=True, fontdict={'weight': 'normal'}, size=25)
     sns.despine(trim=False, ax=ax)
+    try:
+        import PyFLASH.report as _report
+        if _report.is_active():
+            _report.emit(_report.build_correlation_record(
+                x=x, y=y, group=group_name, n=int(len(df)),
+                r=corr, p=pval, method=test,
+            ))
+    except Exception:
+        pass
     return {
         'regression': reg,
         'r': corr,
@@ -11097,6 +11108,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                    point_size=9, point_linewidth=3,
                    specificity=None, roi=None, comparisons=None,
                    force_nonparametric=False, ns='ns',
+                   posthoc='Conover', posthoc_correction='auto',
                    multiple_comparison='One-Way',
                    bottom_ticks=False, bottom_tick_labels=False,
                    factor=None, save=True,
@@ -11145,6 +11157,8 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 comparisons=comparisons,
                 force_nonparametric=force_nonparametric,
                 ns=ns,
+                posthoc=posthoc,
+                posthoc_correction=posthoc_correction,
                 multiple_comparison=multiple_comparison,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
@@ -11182,6 +11196,8 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 comparisons=comparisons,
                 force_nonparametric=force_nonparametric,
                 ns=ns,
+                posthoc=posthoc,
+                posthoc_correction=posthoc_correction,
                 multiple_comparison=multiple_comparison,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
@@ -11434,7 +11450,20 @@ def plot_mean_bars(experiment, filtered_columns=None,
             else:
                 group_colors = None
             stats_error = None
-            _sc_key = stats_cache_key(col, ordered_keys, specificity) if ordered_keys else None
+            _sc_key = (
+                stats_cache_key(
+                    col,
+                    ordered_keys,
+                    specificity,
+                    {
+                        "force_nonparametric": bool(force_nonparametric),
+                        "multiple_comparison": multiple_comparison,
+                        "posthoc": posthoc,
+                        "posthoc_correction": posthoc_correction,
+                    },
+                )
+                if ordered_keys else None
+            )
             try:
                 test_used, posthoc_used, _, _stats_result = multipleComparisons(
                     experiment,
@@ -11446,6 +11475,8 @@ def plot_mean_bars(experiment, filtered_columns=None,
                     save_name=stats_name,
                     comparisons=comparisons,
                     force_nonparametric=force_nonparametric,
+                    posthoc=posthoc,
+                    posthoc_correction=posthoc_correction,
                     multiple_comparison=multiple_comparison,
                     ns=ns,
                     max_override=ymax if len(all_vals) > 0 else None,
@@ -14914,83 +14945,27 @@ def _corr_pipeline_use_fdr(gate):
     )
 
 
-def _corr_windows_extended_path(path):
-    """Return a Windows extended-length path; no-op on other platforms."""
-    if os.name != "nt":
-        return path
-    abs_path = os.path.abspath(path)
-    if abs_path.startswith("\\\\?\\"):
-        return abs_path
-    if abs_path.startswith("\\\\"):
-        return "\\\\?\\UNC\\" + abs_path.lstrip("\\")
-    return "\\\\?\\" + abs_path
+# ── Pipeline run-folder / manifest I/O ───────────────────────────────────────
+# Canonical implementation lives in PyFLASH.pipeline_io; these thin wrappers keep
+# the historical _corr_* names while delegating to that single shared version, so
+# the correlation / adjusted / overview pipelines resolve run folders, slugs, and
+# the runs index identically (and Windows long-path safely).
+from PyFLASH import pipeline_io as _pio
 
-
-def _corr_makedirs(path):
-    if path:
-        os.makedirs(_corr_windows_extended_path(path), exist_ok=True)
-
-
-def _corr_isfile(path):
-    return os.path.isfile(_corr_windows_extended_path(path))
-
-
-def _corr_isdir(path):
-    return os.path.isdir(_corr_windows_extended_path(path))
-
-
-def _corr_clear_run_dir(path, base):
-    """Remove one generated run directory, guarding against broad deletes."""
-    if not path or not _corr_isdir(path):
-        return
-    path_abs = os.path.abspath(path)
-    base_abs = os.path.abspath(base)
-    try:
-        common = os.path.commonpath([path_abs, base_abs])
-    except ValueError as exc:
-        raise RuntimeError(f"Refusing to clear run folder outside {base_abs!r}: {path_abs!r}") from exc
-    if common != base_abs or path_abs == base_abs:
-        raise RuntimeError(f"Refusing to clear run folder outside {base_abs!r}: {path_abs!r}")
-    shutil.rmtree(_corr_windows_extended_path(path))
-
-
-def _corr_to_csv(frame, path, **kwargs):
-    _corr_makedirs(os.path.dirname(path) or ".")
-    frame.to_csv(_corr_windows_extended_path(path), **kwargs)
-
-
-def _corr_write_json(payload, path):
-    import json as _json
-    _corr_makedirs(os.path.dirname(path) or ".")
-    with open(_corr_windows_extended_path(path), "w", encoding="utf-8") as fh:
-        _json.dump(payload, fh, indent=2, default=str)
-
-
-def _corr_read_json(path):
-    import json as _json
-    with open(_corr_windows_extended_path(path), "r", encoding="utf-8") as fh:
-        return _json.load(fh)
-
-
-def _corr_pipeline_data_root(experiment):
-    """Resolve the 'Data and Stats' root for pipeline tables."""
-    data_path = getattr(experiment, "data_path", None)
-    if data_path:
-        return data_path
-    return os.path.join(os.path.dirname(experiment.fig_path), "Data and Stats")
+_corr_windows_extended_path = _pio.windows_extended_path
+_corr_makedirs = _pio.makedirs
+_corr_isfile = _pio.isfile
+_corr_isdir = _pio.isdir
+_corr_clear_run_dir = _pio.clear_run_dir
+_corr_to_csv = _pio.to_csv
+_corr_write_json = _pio.write_json
+_corr_read_json = _pio.read_json
+_corr_pipeline_data_root = _pio.data_root
 
 
 def _corr_pipeline_slug(columns, against_columns, methods, require, gate, alpha,
                         by, factor, specificity, roi):
-    """Deterministic short run name derived from the configuration.
-
-    A different column set or different settings hash to a different folder, so
-    trying a new combination never collides with a previous run; identical
-    settings reuse the same folder.
-    """
-    import hashlib
-    import json as _json
-
+    """Deterministic short run name derived from the configuration."""
     payload = {
         "cols": sorted(str(c) for c in columns),
         "against": sorted(str(c) for c in (against_columns or [])),
@@ -15003,61 +14978,14 @@ def _corr_pipeline_slug(columns, against_columns, methods, require, gate, alpha,
         "specificity": str(specificity),
         "roi": str(roi),
     }
-    digest = hashlib.sha1(
-        _json.dumps(payload, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:6]
     short = "".join(_CORR_METHOD_SHORT.get(m, "?") for m in methods)
-    return f"{len(columns)}cols_{short}_{str(gate).lower()}_{digest}"
+    return _pio.slug(f"{len(columns)}cols_{short}_{str(gate).lower()}", payload)
 
 
 def _corr_pipeline_run_dirs(experiment, run_label, if_exists, *, clear_overwrite=True):
-    """Return (fig_dir, data_dir, resolved_label, reuse_existing).
-
-    Honors the ``if_exists`` policy: 'overwrite' (default) clears the existing
-    run folders when ``clear_overwrite`` is true, 'version' picks the next free
-    ``_vN`` so prior output is kept, 'error' raises, 'skip' returns
-    reuse_existing=True so the caller can return the cached manifest without
-    recomputing.
-    """
-    base_fig = os.path.join(experiment.fig_path, "Correlation Pipeline")
-    base_data = os.path.join(_corr_pipeline_data_root(experiment), "Correlation Pipeline")
-    policy = str(if_exists).strip().lower()
-
-    def _dirs(lbl):
-        safe = strip_name(str(lbl))
-        if not safe:
-            raise ValueError("run_label must resolve to a non-empty folder name.")
-        return os.path.join(base_fig, safe), os.path.join(base_data, safe)
-
-    fig_dir, data_dir = _dirs(run_label)
-    exists = _corr_isdir(fig_dir) or _corr_isdir(data_dir)
-    if not exists:
-        return fig_dir, data_dir, run_label, False
-    if policy == "overwrite":
-        if not clear_overwrite:
-            return fig_dir, data_dir, run_label, False
-        _corr_clear_run_dir(fig_dir, base_fig)
-        _corr_clear_run_dir(data_dir, base_data)
-        return fig_dir, data_dir, run_label, False
-    if policy == "skip":
-        return fig_dir, data_dir, run_label, True
-    if policy == "error":
-        raise RuntimeError(
-            f"Correlation pipeline run {run_label!r} already exists. Pass "
-            f"if_exists='overwrite'/'version'/'skip' or a different run_label."
-        )
-    if policy != "version":
-        raise ValueError(
-            "if_exists must be 'overwrite', 'version', 'error', or 'skip'; "
-            f"got {if_exists!r}."
-        )
-    n = 2
-    while True:
-        cand = f"{run_label}_v{n}"
-        fig_dir, data_dir = _dirs(cand)
-        if not (_corr_isdir(fig_dir) or _corr_isdir(data_dir)):
-            return fig_dir, data_dir, cand, False
-        n += 1
+    """Return (fig_dir, data_dir, resolved_label, reuse_existing) for a correlation run."""
+    return _pio.run_dirs(experiment, "Correlation Pipeline", run_label, if_exists,
+                         clear_overwrite=clear_overwrite)
 
 
 def _corr_pipeline_groups(experiment, scope_df, num_df, by, factor, specificity):
@@ -15745,9 +15673,6 @@ def _corr_pipeline_heatmap(value_df, sig_df, title, tick_label_size, *,
 
 def _corr_pipeline_append_runs_index(experiment, manifest):
     """Append one summary row per run to a shared index CSV (overwrite by label)."""
-    base_data = os.path.join(_corr_pipeline_data_root(experiment), "Correlation Pipeline")
-    _corr_makedirs(base_data)
-    index_path = os.path.join(base_data, "_runs_index.csv")
     row = {
         "run_label": manifest["run_label"],
         "n_rows": manifest["n_rows"],
@@ -15767,16 +15692,7 @@ def _corr_pipeline_append_runs_index(experiment, manifest):
         "n_difference_significant": (manifest.get("difference_matrices") or {}).get("n_difference_significant", 0),
         "fig_dir": manifest["fig_dir"],
     }
-    try:
-        if _corr_isfile(index_path):
-            existing = pd.read_csv(_corr_windows_extended_path(index_path))
-            existing = existing[existing["run_label"].astype(str) != str(row["run_label"])]
-            out = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
-        else:
-            out = pd.DataFrame([row])
-        _corr_to_csv(out, index_path, index=False)
-    except Exception as exc:
-        _log.warn(f"[correlation_pipeline] Could not update runs index: {exc}")
+    _pio.append_runs_index(experiment, "Correlation Pipeline", row)
 
 
 def plot_matrix_differences(
@@ -17614,7 +17530,8 @@ _PARAM_DESCRIPTIONS = {
     'regex_string':         'Regex filter — include columns whose names match this pattern.',
     'exclude':              'Exclude columns whose names contain this substring.',
     'specificity':          'Filter data by a factor value. Tuple: ("Time", "WeekEight"). '
-                            'Queue: [("Time","WeekEight"), ("Time","WeekFour")].',
+                            'Queue: [("Time","WeekEight"), ("Time","WeekFour")]; '
+                            'pipelines run each queued filter as an independent child run.',
     'save':                 'Whether to save figures to disk (default True).',
     'factor':               'Group by a factor column instead of Condition (e.g. "Genotype").',
     'by':                   'Grouping mode: "conditions" (default) or a factor column name.',
@@ -17623,6 +17540,8 @@ _PARAM_DESCRIPTIONS = {
     'ns':                   'Label for non-significant results (default "ns").',
     'multiple_comparison':  'Stats test type: "One-Way" (ANOVA/Kruskal) or "Two-Way".',
     'force_nonparametric':  'Force non-parametric tests regardless of normality.',
+    'posthoc':              'Non-parametric post-hoc test for Kruskal-Wallis: "Conover" or "Dunn".',
+    'posthoc_correction':   'Post-hoc p-value correction: "auto", "Bonferroni", or "Uncorrected".',
     'bottom_ticks':         'Show tick marks on the bottom axis.',
     'bottom_tick_labels':   'Show tick labels on the bottom axis.',
     'save_normality':       'Save normality test Q-Q plots as PNG.',

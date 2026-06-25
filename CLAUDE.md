@@ -8,7 +8,7 @@ distribution is `PyFLASH-analysis`; the import package is `PyFLASH`.
 
 PyFLASH has an agentify-pattern control layer so an agent can make any plot from a
 natural-language request, and extend the package when a request needs a plot that
-doesn't exist yet. Five layers:
+doesn't exist yet. Six layers:
 
 1. **Registry** — `PyFLASH/spec.py::PLOT_REGISTRY` (YAML short-name → `plot_*`).
 2. **Runner** — `.claude/skills/pyflash/scripts/pyflash_runner.py`: a thin JSON CLI
@@ -26,6 +26,23 @@ doesn't exist yet. Five layers:
    Use **`/pyflash-extend`**. The detailed plot-implementation contract lives in the global
    `pyflash-add-plot` skill.
 5. **Orientation** — this section.
+6. **Describe layer** — `PyFLASH/report.py`: a guarded, opt-in collector that captures the
+   descriptive + inferential numbers a plot already computes (per-group n/mean/SD by animal,
+   test, p-values, effect sizes, correlation r/p) instead of discarding them. `stats.py`
+   (`multipleComparisons`) and `plotting.py` (`regression_action`) emit into it when armed;
+   pipeline callables are captured via their return manifest. The runner arms it per run and
+   persists a per-run JSON manifest (Tier 1) + deterministic markdown digest (Tier 2) +
+   append-only `index.jsonl` ledger to `.runtime/results_store/`, plus a `lab_notebook.md`
+   for agent interpretations (Tier 3). This lets an agent answer questions and build
+   cross-run storytelling from structured facts rather than re-reading PNGs. Drive the
+   rundown via the runner's `runs`/`result`/`note` subcommands (see the `/pyflash` skill).
+   The collector is inert unless armed, so core plotting is unchanged.
+   **Coverage is enforced, not hoped for:** every `PLOT_REGISTRY` entry must be classified
+   in `spec.py` as `DESCRIBE_COVERED` / `DESCRIBE_EXEMPT` / `DESCRIBE_UNREVIEWED`
+   (`tests/test_describe_coverage.py` fails until it is), `discover` reports
+   `describe_coverage`, and a 0-record non-exempt run returns a `describe_note`. When you
+   add a plot that computes statistics, emit them (shared engine or `report.emit`) and mark
+   it `DESCRIBE_COVERED` — see the `pyflash-add-plot` skill's describe-layer contract.
 
 `discover` is the source of truth for "what plots exist" — the docs self-heal against it.
 Keep the registry in the package and the runner dumb; new `plot_*` functions are usable the
@@ -98,6 +115,18 @@ page-specific UI test file.
 - High-level batch factory and pickle caching: `PyFLASH/factory.py`.
 - Conditions DSL and crossed designs: `PyFLASH/conditions.py`.
 - Plotting wrappers and action functions: `PyFLASH/plotting.py`.
+- High-level analysis pipelines (`correlation` / `adjusted_correlation` /
+  `data_overview`): `PyFLASH/pipeline.py`.
+- Shared pipeline run-folder / manifest IO (one `run_dirs`/`slug`/
+  `append_runs_index` for every pipeline): `PyFLASH/pipeline_io.py`.
+- Outlier detection (`flag_outliers`, `iqr_bounds`, `mad_modified_z`), effect
+  sizes, FDR, ICC: `PyFLASH/stats_extra.py`.
+- Outlier exclusion / marking for downstream analysis (`exclude_outliers`,
+  `mark_outliers`, `apply_exclusions`): `PyFLASH/exclusions.py`. Returns a
+  non-destructive cleaned shallow copy of the experiment whose flagged cells hold
+  the reason-coded `EXCLUDED_OUTLIER` sentinel (treated as analysis-missing by
+  every coercion path, counted separately from NaN in QC), plus an audit
+  `.exclusions` ledger. The original is never mutated.
 - Plot spec parsing: `PyFLASH/spec.py`.
 - Streamlit-free UI adapter layer: `PyFLASH/ui/services.py`.
 - UI project JSON schema and condition rebuild: `PyFLASH/ui/project_io.py`.

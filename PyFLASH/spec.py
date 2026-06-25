@@ -44,7 +44,61 @@ PLOT_REGISTRY = {
     'timecourse': 'plot_timecourse',
     'correlation_pipeline': 'PyFLASH.pipeline.correlation',
     'adjusted_correlation_pipeline': 'PyFLASH.pipeline.adjusted_correlation',
+    'data_overview_pipeline': 'PyFLASH.pipeline.data_overview',
 }
+
+# ── Describe-layer coverage (the structured-results / "describe" feature) ────
+# Every plot in PLOT_REGISTRY MUST be classified into exactly one set below, so a
+# newly-added plot cannot silently ship without a structured-results decision.
+# This is the forcing function that keeps the describe layer (PyFLASH.report)
+# maintained as plots are added — enforced by tests/test_describe_coverage.py and
+# surfaced by the runner's `discover` command.
+#
+#   DESCRIBE_COVERED    — emits structured records into PyFLASH.report: via the
+#                         shared stats engine (multipleComparisons / regression_action),
+#                         a direct report.emit(...), or a pipeline return manifest.
+#   DESCRIBE_EXEMPT     — a pure visualisation / purely descriptive plot with no
+#                         inferential result to capture (raw images, proportions,
+#                         distributions, ordination glyphs, method curves).
+#   DESCRIBE_UNREVIEWED — computes a quantitative/inferential result (p-values,
+#                         correlations, fold-changes, variance explained) that is
+#                         NOT yet captured. A tracked backlog: wire it into
+#                         PyFLASH.report and move it to COVERED, or justify EXEMPT.
+#
+# When you add a plot: route its stats through the shared engine or call
+# report.emit, then add its short-name to COVERED; or add it to EXEMPT/UNREVIEWED
+# with intent. See CLAUDE.md and the pyflash-add-plot skill.
+DESCRIBE_COVERED = {
+    'mean_bars',
+    'regressions',
+    'correlation_pipeline',
+    'adjusted_correlation_pipeline',
+}
+DESCRIBE_EXEMPT = {
+    'condition_key', 'images', 'representative_images', 'locations',
+    'coloc_upset', 'coloc_sankey', 'pie_charts', 'combo_pies',
+    'histograms', 'ridgeline', 'ecdf', 'radar', 'power_curve',
+}
+DESCRIBE_UNREVIEWED = {
+    'matrices', 'rect_matrices', 'matrix_differences',
+    'volcano', 'marker_pca', 'timecourse', 'data_overview_pipeline',
+}
+
+
+def describe_status(short_name):
+    """Return the describe-layer status of a registry short-name.
+
+    One of: 'covered', 'exempt', 'unreviewed', or 'unclassified' (registered but
+    not assigned to any set — a maintenance gap the coverage test fails on).
+    """
+    if short_name in DESCRIBE_COVERED:
+        return 'covered'
+    if short_name in DESCRIBE_EXEMPT:
+        return 'exempt'
+    if short_name in DESCRIBE_UNREVIEWED:
+        return 'unreviewed'
+    return 'unclassified'
+
 
 # Keys consumed by the spec runner, not passed to plot functions
 _SPEC_KEYS = {'type', 'batch'}
