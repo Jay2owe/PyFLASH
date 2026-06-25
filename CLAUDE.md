@@ -121,12 +121,17 @@ page-specific UI test file.
   `append_runs_index` for every pipeline): `PyFLASH/pipeline_io.py`.
 - Outlier detection (`flag_outliers`, `iqr_bounds`, `mad_modified_z`), effect
   sizes, FDR, ICC: `PyFLASH/stats_extra.py`.
-- Outlier exclusion / marking for downstream analysis (`exclude_outliers`,
-  `mark_outliers`, `apply_exclusions`): `PyFLASH/exclusions.py`. Returns a
-  non-destructive cleaned shallow copy of the experiment whose flagged cells hold
-  the reason-coded `EXCLUDED_OUTLIER` sentinel (treated as analysis-missing by
-  every coercion path, counted separately from NaN in QC), plus an audit
-  `.exclusions` ledger. The original is never mutated.
+- Outlier / manual exclusion for downstream analysis (`exclude_outliers`,
+  `mark_outliers`, `exclude_animals`, `mark_animals`, `apply_exclusions`,
+  `mark_exclusions`): `PyFLASH/exclusions.py`. Returns a non-destructive cleaned
+  shallow copy of the experiment whose flagged cells/rows hold a reason-coded
+  `EXCLUDED_` sentinel — `EXCLUDED_OUTLIER:<rule>` (auto) or
+  `EXCLUDED_MANUAL:<reason>` (user-supplied via `exclude_animals(..., reason=)`).
+  Both are treated as analysis-missing by every coercion path (the `EXCLUDED_`
+  family + `NOT_INCLUDED_IN_EXPERIMENT` are matched in `utils.is_excluded_mask`
+  and `modelling._sentinel_like_mask`), counted separately from NaN in QC, plus an
+  audit `.exclusions` ledger (animal, column, original value, kind, reason). The
+  original is never mutated.
 - Plot spec parsing: `PyFLASH/spec.py`.
 - Streamlit-free UI adapter layer: `PyFLASH/ui/services.py`.
 - UI project JSON schema and condition rebuild: `PyFLASH/ui/project_io.py`.

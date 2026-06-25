@@ -40,6 +40,7 @@ import pandas as pd
 
 from PyFLASH._logging import logger as _log
 from PyFLASH.utils import (
+    excluded_manual_token,
     excluded_outlier_token,
     resolve_roi_bases,
     strip_name,
@@ -48,8 +49,10 @@ from PyFLASH.utils import (
 __all__ = [
     "apply_exclusions",
     "exclude_outliers",
+    "exclude_animals",
     "mark_exclusions",
     "mark_outliers",
+    "mark_animals",
     "clear_exclusions",
 ]
 
@@ -61,8 +64,18 @@ _ID_COLS = {
 }
 
 _LEDGER_COLS = [
-    "AnimalName", "column", "group", "original_value", "rule", "scope", "fill",
+    "AnimalName", "column", "group", "original_value", "kind", "reason",
+    "scope", "fill",
 ]
+
+
+def _token_for(rec, fill):
+    """The sentinel to write for a record: explicit ``fill``, else kind-coded."""
+    if fill is not None:
+        return fill
+    if rec.get("kind") == "manual":
+        return excluded_manual_token(rec.get("reason"))
+    return excluded_outlier_token(rec.get("reason"))
 
 
 # ── internals ────────────────────────────────────────────────────────────────
@@ -139,7 +152,8 @@ def _cells_from_outliers(outliers, scope, columns, animals_table, animal_min_fla
                 "column": str(col),
                 "group": str(row.get("group", "")),
                 "original_value": row.get("value", np.nan),
-                "rule": _rule(row),
+                "kind": "outlier",
+                "reason": _rule(row),
             })
         return records
 
@@ -159,7 +173,8 @@ def _cells_from_outliers(outliers, scope, columns, animals_table, animal_min_fla
                 "column": str(col),
                 "group": "",
                 "original_value": np.nan,
-                "rule": f"animal(min_flags>={int(animal_min_flags)})",
+                "kind": "outlier",
+                "reason": f"animal(min_flags>={int(animal_min_flags)})",
             })
     return records
 
@@ -187,8 +202,7 @@ def _write_cells(df, records, fill):
         if original is None or (isinstance(original, float) and np.isnan(original)):
             vals = df.loc[mask, col].tolist()
             original = vals[0] if vals else np.nan
-        token = (excluded_outlier_token(rec.get("rule"))
-                 if fill is None else fill)
+        token = _token_for(rec, fill)
         # Writing a string sentinel into a numeric column needs an object dtype,
         # else pandas warns (and will eventually raise) on the dtype mismatch.
         if isinstance(token, str) and not pd.api.types.is_object_dtype(df[col].dtype):
@@ -197,8 +211,8 @@ def _write_cells(df, records, fill):
         ledger.append({
             "AnimalName": rec["AnimalName"], "column": col,
             "group": rec.get("group", ""), "original_value": original,
-            "rule": rec.get("rule", ""), "scope": rec.get("scope", ""),
-            "fill": token,
+            "kind": rec.get("kind", ""), "reason": rec.get("reason", ""),
+            "scope": rec.get("scope", ""), "fill": token,
         })
     return pd.DataFrame(ledger, columns=_LEDGER_COLS)
 
@@ -212,27 +226,99 @@ def _attach_ledger(exp, new_ledger, prior):
 
 
 # ── public API ───────────────────────────────────────────────────────────────
-def apply_exclusions(experiment, *, cells=None, animals=None, columns=None,
-                     fill=None, roi=None, scope_tag="manual"):
-    """Return a cleaned copy with the given cells/animals blanked for analysis.
+def _manual_records(df, cells, animals, columns, reason, kind):
+    """Build manual cell/animal exclusion records (kind/reason coded).
 
-    ``cells`` is an iterable of ``(animal_name, column)``; ``animals`` is an
-    iterable of animal names blanked across ``columns`` (or every metric column).
-    With neither, a previously recorded ``experiment.exclusions`` ledger (from
-    :func:`mark_outliers`) is realised instead. ``fill`` defaults to the
-    ``EXCLUDED_OUTLIER`` sentinel; pass ``np.nan`` for a plain blank.
-
-    The original ``experiment`` is never modified.
+    ``animals`` may be a list (sharing ``reason``) or a ``{animal: reason}`` dict
+    for per-animal reasons.
     """
+    records = []
+    for animal, col in (cells or []):
+        records.append({"AnimalName": str(animal), "column": str(col),
+                        "group": "", "original_value": np.nan,
+                        "kind": kind, "reason": (reason or ""), "scope": "cell"})
+    if isinstance(animals, dict):
+        items = [(str(a), r) for a, r in animals.items()]
+    else:
+        items = [(str(a), reason) for a in (animals or [])]
+    target_cols = list(columns) if columns is not None else _metric_columns(df)
+    for animal, r in items:
+        for col in target_cols:
+            records.append({"AnimalName": animal, "column": str(col),
+                            "group": "", "original_value": np.nan,
+                            "kind": kind, "reason": (r or ""), "scope": "animal"})
+    return records
+
+
+def _set_summary_and_save(exp, ledger, base, *, action, scope, save, run_label,
+                          verbose):
+    n_cells = int(len(ledger))
+    n_animals = int(ledger["AnimalName"].nunique()) if n_cells else 0
+    reasons = (sorted({str(r) for r in ledger["reason"] if str(r)})
+               if n_cells else [])
+    exp.exclusion_summary = {
+        "action": action, "scope": scope, "roi": str(base),
+        "n_excluded_cells": n_cells, "n_animals_affected": n_animals,
+        "reasons": reasons,
+    }
+    if save and n_cells:
+        out_dir = os.path.join(
+            getattr(exp, "data_path", None)
+            or os.path.dirname(getattr(exp, "fig_path", ".") or "."),
+            "Exclusions")
+        os.makedirs(out_dir, exist_ok=True)
+        label = strip_name(str(run_label)) if run_label else f"{scope}_{base}"
+        ledger.to_csv(os.path.join(out_dir, f"exclusions_{label}.csv"), index=False)
+    if verbose:
+        verb = "excluded" if action == "exclude" else "marked"
+        _log.confirm(
+            f"[{action}_exclusions] {verb} {n_cells} cell(s) across "
+            f"{n_animals} animal(s) (scope={scope}, roi={base}).")
+    return exp
+
+
+def _apply_manual(experiment, *, cells=None, animals=None, columns=None,
+                  reason=None, kind="manual", fill=None, roi=None, apply=True,
+                  save=False, run_label=None, verbose=False):
     base = _resolve_base(experiment, roi)
     exp = _clean_copy(experiment)
     df = _summary_for(exp, base)
     if df is None:
-        raise ValueError("apply_exclusions: experiment has no summary table.")
+        raise ValueError("exclusions: experiment has no summary table.")
+    records = _manual_records(df, cells, animals, columns, reason, kind)
+    target = df if apply else df.copy()  # mark-only writes to a discarded copy
+    ledger = _write_cells(target, records, fill)
+    _attach_ledger(exp, ledger, getattr(experiment, "exclusions", None))
+    scope = ("animal" if (animals is not None and not cells)
+             else "cell" if cells else "manual")
+    _set_summary_and_save(
+        exp, ledger, base, action=("exclude" if apply else "mark"), scope=scope,
+        save=save, run_label=run_label, verbose=verbose)
+    return exp
 
-    records = []
+
+def apply_exclusions(experiment, *, cells=None, animals=None, columns=None,
+                     reason=None, kind="manual", fill=None, roi=None):
+    """Return a cleaned copy with the given cells/animals blanked for analysis.
+
+    ``cells`` is an iterable of ``(animal_name, column)``; ``animals`` is an
+    iterable of animal names (or a ``{animal: reason}`` dict) blanked across
+    ``columns`` (or every metric column). ``reason`` is recorded in the ledger and
+    encoded into the cell sentinel (``EXCLUDED_MANUAL:<reason>``). With neither
+    ``cells`` nor ``animals``, a previously recorded ``experiment.exclusions``
+    ledger (from :func:`mark_outliers` / :func:`mark_animals`) is realised
+    instead. ``fill`` overrides the sentinel (pass ``np.nan`` for a plain blank).
+
+    The original ``experiment`` is never modified.
+    """
     if cells is None and animals is None:
+        base = _resolve_base(experiment, roi)
+        exp = _clean_copy(experiment)
+        df = _summary_for(exp, base)
+        if df is None:
+            raise ValueError("apply_exclusions: experiment has no summary table.")
         prior = getattr(experiment, "exclusions", None)
+        records = []
         if isinstance(prior, pd.DataFrame) and not prior.empty:
             for _, row in prior.iterrows():
                 records.append({
@@ -240,23 +326,18 @@ def apply_exclusions(experiment, *, cells=None, animals=None, columns=None,
                     "column": str(row["column"]),
                     "group": row.get("group", ""),
                     "original_value": row.get("original_value", np.nan),
-                    "rule": row.get("rule", ""), "scope": row.get("scope", scope_tag),
+                    "kind": row.get("kind", "manual"),
+                    "reason": row.get("reason", ""),
+                    "scope": row.get("scope", ""),
                 })
-    else:
-        for animal, col in (cells or []):
-            records.append({"AnimalName": str(animal), "column": str(col),
-                            "group": "", "original_value": np.nan,
-                            "rule": scope_tag, "scope": "cell"})
-        target_cols = list(columns) if columns is not None else _metric_columns(df)
-        for animal in (animals or []):
-            for col in target_cols:
-                records.append({"AnimalName": str(animal), "column": str(col),
-                                "group": "", "original_value": np.nan,
-                                "rule": scope_tag, "scope": "animal"})
-
-    ledger = _write_cells(df, records, fill)
-    _attach_ledger(exp, ledger, None)
-    return exp
+        ledger = _write_cells(df, records, fill)
+        _attach_ledger(exp, ledger, None)
+        _set_summary_and_save(exp, ledger, base, action="exclude", scope="ledger",
+                              save=False, run_label=None, verbose=False)
+        return exp
+    return _apply_manual(experiment, cells=cells, animals=animals, columns=columns,
+                         reason=reason, kind=kind, fill=fill, roi=roi, apply=True,
+                         save=False, verbose=False)
 
 
 def _detect_outliers(experiment, *, filtered_columns, column_strings, regex_string,
@@ -387,31 +468,46 @@ def mark_outliers(experiment, *, filtered_columns=None, column_strings=None,
 
 
 def mark_exclusions(experiment, *, cells=None, animals=None, columns=None,
-                    roi=None):
+                    reason=None, roi=None):
     """Record an explicit manual exclusion ledger without changing any data.
 
     Mirror of :func:`apply_exclusions`' inputs, but non-destructive: attach the
     ledger to a copy and realise later via ``apply_exclusions(marked)``.
     """
-    base = _resolve_base(experiment, roi)
-    exp = _clean_copy(experiment)
-    df = _summary_for(exp, base)
-    if df is None:
-        raise ValueError("mark_exclusions: experiment has no summary table.")
-    records = []
-    for animal, col in (cells or []):
-        records.append({"AnimalName": str(animal), "column": str(col),
-                        "group": "", "original_value": np.nan,
-                        "rule": "manual", "scope": "cell"})
-    target_cols = list(columns) if columns is not None else _metric_columns(df)
-    for animal in (animals or []):
-        for col in target_cols:
-            records.append({"AnimalName": str(animal), "column": str(col),
-                            "group": "", "original_value": np.nan,
-                            "rule": "manual", "scope": "animal"})
-    ledger = _write_cells(df.copy(), records, None)  # copy discarded; mark-only
-    _attach_ledger(exp, ledger, getattr(experiment, "exclusions", None))
-    return exp
+    return _apply_manual(experiment, cells=cells, animals=animals, columns=columns,
+                         reason=reason, kind="manual", fill=None, roi=roi,
+                         apply=False, save=False, verbose=False)
+
+
+def exclude_animals(experiment, animals, *, reason=None, columns=None, roi=None,
+                    fill=None, save=False, run_label=None, verbose=True):
+    """Manually exclude whole animals from analysis, with a reason.
+
+    ``animals`` is a single name, a list of names (sharing ``reason``), or a
+    ``{animal: reason}`` dict for per-animal reasons. Every metric for each animal
+    (or just ``columns``) is set to the ``EXCLUDED_MANUAL:<reason>`` sentinel in a
+    cleaned copy — so the reason is visible in each cell of the animal's row and
+    every downstream plot/stat ignores it — the reason is recorded in the
+    ``.exclusions`` ledger, and the original experiment is untouched.
+
+        clean = exclude_animals(batch, "M12", reason="damaged section")
+        clean = exclude_animals(batch, {"M12": "damaged", "M07": "wrong genotype"})
+    """
+    if isinstance(animals, str):
+        animals = [animals]
+    return _apply_manual(experiment, animals=animals, columns=columns, reason=reason,
+                         kind="manual", fill=fill, roi=roi, apply=True, save=save,
+                         run_label=run_label, verbose=verbose)
+
+
+def mark_animals(experiment, animals, *, reason=None, columns=None, roi=None,
+                 verbose=True):
+    """Non-destructive twin of :func:`exclude_animals` (records the ledger only)."""
+    if isinstance(animals, str):
+        animals = [animals]
+    return _apply_manual(experiment, animals=animals, columns=columns, reason=reason,
+                         kind="manual", fill=None, roi=roi, apply=False, save=False,
+                         verbose=verbose)
 
 
 def clear_exclusions(experiment):

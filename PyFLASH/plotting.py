@@ -54,7 +54,7 @@ from PyFLASH.utils import (
     flatten_specificity_values, is_specificity_queue,
     iter_specificities, filter_df_by_specificity,
     specificity_path_parts, resolve_column_key, raw_coloc_column_aliases,
-    build_subfolder, resolve_roi_bases, is_excluded_outlier_mask,
+    build_subfolder, resolve_roi_bases, is_excluded_mask,
 )
 
 
@@ -588,7 +588,7 @@ def _prepare_matrix_numeric_df(
             continue
         raw = df[col].copy()
         sentinel_mask = (raw.astype(str).str.contains(str(sentinel), na=False)
-                         | is_excluded_outlier_mask(raw))
+                         | is_excluded_mask(raw))
         raw = raw.where(~sentinel_mask, np.nan)
         coerced = pd.to_numeric(raw, errors='coerce')
         if bool(require_complete_numeric):
@@ -626,7 +626,7 @@ def _coerce_series_for_corr(raw_series, sentinel="NOT_INCLUDED_IN_EXPERIMENT", a
     s = raw_series.copy()
     # Match plot_matrices semantics: sentinel and EXCLUDED_OUTLIER values are
     # removable and should not invalidate the whole column.
-    drop_mask = (s.astype(str) == sentinel) | is_excluded_outlier_mask(s)
+    drop_mask = (s.astype(str) == sentinel) | is_excluded_mask(s)
     non_sentinel = s[~drop_mask]
     numeric_non_sentinel = pd.to_numeric(non_sentinel, errors='coerce')
     if len(numeric_non_sentinel) > 0 and not numeric_non_sentinel.isna().any():

@@ -42,7 +42,7 @@ from PyFLASH.plotting import (
     plot_regressions,
 )
 from PyFLASH.utils import (
-    is_excluded_outlier_mask,
+    is_excluded_mask,
     is_specificity_queue,
     iter_specificities,
     save_fig,
@@ -1580,7 +1580,7 @@ def _ovw_column_inventory(scope_df, columns):
     for col in columns:
         s = scope_df[col]
         sent_mask = s.astype(str).str.contains(_OVW_SENTINEL, na=False)
-        excl_mask = is_excluded_outlier_mask(s)
+        excl_mask = is_excluded_mask(s)
         n_excluded = int(excl_mask.sum())
         # not-included sentinel and excluded-outlier token are separate "not a
         # present value" buckets; keep them apart for honest QC accounting.

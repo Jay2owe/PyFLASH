@@ -42,6 +42,7 @@ __all__ = [
     "data_overview",
     # Outlier exclusion / marking
     "exclude_outliers", "mark_outliers", "apply_exclusions", "mark_exclusions",
+    "exclude_animals", "mark_animals",
     # Config & output control
     "Config", "stainColors",
     "set_verbosity", "silent", "verbose", "Verbosity",
@@ -79,6 +80,8 @@ _LAZY_ATTRS = {
     "mark_outliers": ("PyFLASH.exclusions", "mark_outliers"),
     "apply_exclusions": ("PyFLASH.exclusions", "apply_exclusions"),
     "mark_exclusions": ("PyFLASH.exclusions", "mark_exclusions"),
+    "exclude_animals": ("PyFLASH.exclusions", "exclude_animals"),
+    "mark_animals": ("PyFLASH.exclusions", "mark_animals"),
     "cheat_sheet": ("PyFLASH.plotting", "cheat_sheet"),
     "set_axis_limits": ("PyFLASH.plotting", "set_axis_limits"),
     "clear_axis_limits": ("PyFLASH.plotting", "clear_axis_limits"),

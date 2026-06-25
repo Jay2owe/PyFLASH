@@ -27,6 +27,7 @@ example_notebook.ipynb
 CONTEXT.md
 HANDOFF.md
 .claude/
+.codex/
 
 # Graphify knowledge graph artifacts are local/generated.
 graphify-out/

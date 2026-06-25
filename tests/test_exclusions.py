@@ -10,7 +10,10 @@ import pandas as pd
 
 from PyFLASH import exclusions, pipeline
 from PyFLASH.stats_extra import flag_outliers, iqr_bounds, mad_modified_z
-from PyFLASH.utils import EXCLUDED_SENTINEL_PREFIX, excluded_outlier_token
+from PyFLASH.utils import (
+    EXCLUDED_SENTINEL_PREFIX, EXCLUDED_OUTLIER_PREFIX, EXCLUDED_MANUAL_PREFIX,
+    excluded_outlier_token, excluded_manual_token,
+)
 from PyFLASH.modelling import _to_numeric_excluding_not_included
 from PyFLASH.plotting import _prepare_matrix_numeric_df
 
@@ -166,9 +169,70 @@ def test_overview_counts_excluded_separately(tmp_path):
         len(cleaned.summaries["SCN"]) - n_a_excluded)
 
 
-def test_excluded_token_helper():
-    assert excluded_outlier_token() == EXCLUDED_SENTINEL_PREFIX
-    assert excluded_outlier_token("iqr") == f"{EXCLUDED_SENTINEL_PREFIX}:iqr"
+def test_excluded_token_helpers():
+    assert excluded_outlier_token() == EXCLUDED_OUTLIER_PREFIX
+    assert excluded_outlier_token("iqr") == f"{EXCLUDED_OUTLIER_PREFIX}:iqr"
+    assert excluded_manual_token("damaged") == f"{EXCLUDED_MANUAL_PREFIX}:damaged"
+    # Both kinds share the family prefix the coercion paths recognise.
+    assert excluded_outlier_token().startswith(EXCLUDED_SENTINEL_PREFIX)
+    assert excluded_manual_token().startswith(EXCLUDED_SENTINEL_PREFIX)
+
+
+# ── manual animal exclusion with a reason ────────────────────────────────────
+def test_exclude_animals_with_reason(tmp_path):
+    exp = _exp(tmp_path)
+
+    clean = exclusions.exclude_animals(exp, "S07", reason="damaged section",
+                                       verbose=False)
+
+    cdf = clean.summaries["SCN"]
+    # Every metric in S07's row carries the manual sentinel WITH the reason.
+    for col in ("A", "B", "C"):
+        assert cdf.loc[7, col] == f"{EXCLUDED_MANUAL_PREFIX}:damaged section"
+    # Ledger records the reason and kind; downstream ignores the cells.
+    led = clean.exclusions
+    s07 = led[led["AnimalName"] == "S07"]
+    assert set(s07["reason"]) == {"damaged section"}
+    assert set(s07["kind"]) == {"manual"}
+    assert np.isnan(_to_numeric_excluding_not_included(cdf["A"]).loc[7])
+    # Original untouched; summary reports the reason.
+    assert np.isfinite(exp.summaries["SCN"].loc[7, "A"])
+    assert clean.exclusion_summary["reasons"] == ["damaged section"]
+
+
+def test_exclude_animals_per_animal_reasons(tmp_path):
+    exp = _exp(tmp_path)
+
+    clean = exclusions.exclude_animals(
+        exp, {"S07": "damaged", "S08": "wrong genotype"}, verbose=False)
+
+    cdf = clean.summaries["SCN"]
+    assert cdf.loc[7, "A"] == f"{EXCLUDED_MANUAL_PREFIX}:damaged"
+    assert cdf.loc[8, "A"] == f"{EXCLUDED_MANUAL_PREFIX}:wrong genotype"
+    assert clean.exclusion_summary["n_animals_affected"] == 2
+
+
+def test_exclude_animals_specific_columns(tmp_path):
+    exp = _exp(tmp_path)
+
+    clean = exclusions.exclude_animals(exp, "S07", reason="bad A",
+                                       columns=["A"], verbose=False)
+
+    cdf = clean.summaries["SCN"]
+    assert str(cdf.loc[7, "A"]).startswith(EXCLUDED_MANUAL_PREFIX)
+    assert np.isfinite(cdf.loc[7, "B"])  # other metrics retained
+
+
+def test_mark_animals_then_apply(tmp_path):
+    exp = _exp(tmp_path)
+
+    marked = exclusions.mark_animals(exp, "S07", reason="qc fail", verbose=False)
+    assert np.isfinite(marked.summaries["SCN"].loc[7, "A"])  # unchanged
+    assert not marked.exclusions.empty
+
+    applied = exclusions.apply_exclusions(marked)
+    assert str(applied.summaries["SCN"].loc[7, "A"]).startswith(
+        EXCLUDED_MANUAL_PREFIX)
 
 
 # ── pipeline_io: adjusted-correlation now writes a runs index ─────────────────
