@@ -100,6 +100,59 @@ def test_pyflash_runner_resolves_pipeline_registry_aliases():
     assert "_pyflash_func(batch, endpoints=['A', 'B'], save=False)" in script
 
 
+def test_pyflash_runner_safe_run_id_cannot_escape_store():
+    runner_path = (
+        Path(__file__).resolve().parents[1]
+        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
+    )
+    if not runner_path.exists():
+        pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
+    spec = importlib.util.spec_from_file_location("pyflash_runner_safeid", runner_path)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+
+    # Path-traversal / absolute / separator ids must collapse to a bare slug that
+    # stays inside RESULTS_STORE (no separators, no leading '..').
+    for bad in ("..\\outside", "../../etc/passwd", "C:\\tmp\\x", "a/b\\c"):
+        safe = runner._safe_run_id(bad)
+        assert "/" not in safe and "\\" not in safe and ":" not in safe
+        assert not safe.startswith(".")
+        joined = (runner.RESULTS_STORE / f"{safe}.results.json").resolve()
+        assert str(runner.RESULTS_STORE.resolve()) in str(joined)
+    # Empty / all-junk ids fall back to a random slug, not an empty filename.
+    assert runner._safe_run_id("") and runner._safe_run_id("..")
+    # A normal id is preserved unchanged.
+    assert runner._safe_run_id("abc123") == "abc123"
+    # Distinct ids that sanitise to the same base must NOT collide onto one slug.
+    assert runner._safe_run_id("a/b") != runner._safe_run_id("a:b")
+    assert runner._safe_run_id("../abc") != runner._safe_run_id("abc")
+    # Long clean ids sharing a 64-char prefix must not fold together under [:64].
+    assert runner._safe_run_id("a" * 65) != runner._safe_run_id("a" * 64 + "b")
+    assert all(len(runner._safe_run_id("z" * n)) <= 64 for n in (63, 64, 65, 200))
+
+
+def test_pyflash_runner_describe_status_for_func():
+    runner_path = (
+        Path(__file__).resolve().parents[1]
+        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
+    )
+    if not runner_path.exists():
+        pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
+    spec_mod = importlib.util.spec_from_file_location("pyflash_runner_dsf", runner_path)
+    runner = importlib.util.module_from_spec(spec_mod)
+    spec_mod.loader.exec_module(runner)
+
+    # Resolves describe status from a registry short-name, a plot_* name, or a
+    # module-qualified pipeline target — used to decide whether to flag a 0-record run.
+    assert runner._describe_status_for_func("mean_bars") == "covered"
+    assert runner._describe_status_for_func("plot_mean_bars") == "covered"
+    assert runner._describe_status_for_func("volcano") == "unreviewed"
+    assert runner._describe_status_for_func("plot_images") == "exempt"
+    assert runner._describe_status_for_func("correlation_pipeline") == "covered"
+    assert runner._describe_status_for_func("PyFLASH.pipeline.correlation") == "covered"
+    assert runner._describe_status_for_func("not_a_real_plot") == "unclassified"
+
+
 def test_cheat_sheet_accepts_pipeline_module_targets(capsys):
     from PyFLASH.plotting import cheat_sheet
 
