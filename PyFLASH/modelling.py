@@ -55,12 +55,13 @@ def _unique_preserve_order(values: Iterable[str]) -> list[str]:
 def _sentinel_like_mask(series, sentinel=NOT_INCLUDED_SENTINEL) -> pd.Series:
     """Mask sentinel-like tokens including common misspellings.
 
-    Also matches the ``EXCLUDED_OUTLIER`` analysis-exclusion sentinel
-    (see :data:`PyFLASH.utils.EXCLUDED_SENTINEL_PREFIX`) so values removed by an
-    outlier rule are dropped from numeric coercion just like never-measured cells.
+    Also matches the ``EXCLUDED_`` analysis-exclusion sentinels (outlier or
+    manual; see :data:`PyFLASH.utils.EXCLUDED_SENTINEL_PREFIX`) so values removed
+    by a rule or by the user are dropped from numeric coercion just like
+    never-measured cells.
     """
     s = pd.Series(series)
-    pat = r"(?:NOT_INCLUDED|NOT_INLCUDED|EXCLUDED_OUTLIER)"
+    pat = r"(?:NOT_INCLUDED|NOT_INLCUDED|EXCLUDED_)"
     try:
         base = s.astype(str).str.contains(pat, case=False, na=False, regex=True)
     except Exception:
