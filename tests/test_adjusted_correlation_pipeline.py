@@ -137,6 +137,43 @@ def test_candidate_that_is_not_promoted_stays_endpoint(tmp_path):
     assert res["final_covariates"] == ["Sex"]
 
 
+def test_adjusted_correlation_specificity_queue_writes_independent_runs(tmp_path):
+    exp = _adjusted_dataset(tmp_path)
+    exp.summary["Diagnosis"] = ["Control"] * 18 + ["AD"] * 18
+
+    res = pipeline.adjusted_correlation(
+        exp,
+        endpoints=["A", "B", "C"],
+        covariates=["Sex"],
+        categorical=["Sex"],
+        reference_levels={"Sex": "F"},
+        specificity=[("Diagnosis", "Control"), ("Diagnosis", "AD")],
+        tests=("pearsonr",),
+        require="or",
+        gate="p",
+        min_n=6,
+        max_adjusted_regressions=0,
+        run_label="adjusted_diag_queue",
+        save=True,
+    )
+
+    assert res["queued"] is True
+    assert res["pipeline"] == "adjusted_correlation"
+    assert set(res["results"]) == {("Diagnosis", "Control"), ("Diagnosis", "AD")}
+    assert [run["run_label"] for run in res["runs"]] == [
+        "adjusted_diag_queue_Diagnosis_Control",
+        "adjusted_diag_queue_Diagnosis_AD",
+    ]
+    for spec, child in res["results"].items():
+        assert child["specificity"] == str(spec)
+        assert child["final_covariates"] == ["Sex"]
+        assert os.path.isfile(os.path.join(child["data_dir"], "manifest.json"))
+        assert os.path.isfile(
+            os.path.join(child["data_dir"], "Adjusted", "pairwise_correlations.csv")
+        )
+        assert child["adjusted"]["groups"][0]["n_rows"] == 18
+
+
 def test_always_covariate_cannot_also_be_endpoint(tmp_path):
     exp = _adjusted_dataset(tmp_path)
 

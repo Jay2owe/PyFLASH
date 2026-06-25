@@ -12,6 +12,51 @@ import pandas as pd
 from PyFLASH._logging import logger as _log
 
 
+# ── Analysis-exclusion sentinels ──────────────────────────────────────
+# Token written into a summary cell when a value is deliberately *excluded* from
+# analysis. Distinct from NOT_INCLUDED_IN_EXPERIMENT ("never measured"): an
+# excluded value WAS measured but was removed — either automatically as an
+# outlier (``EXCLUDED_OUTLIER:<rule>``) or manually by the user with a reason
+# (``EXCLUDED_MANUAL:<reason>``). Both share the ``EXCLUDED_`` family prefix, so
+# the numeric-coercion paths treat them as analysis-missing (like the
+# not-included sentinel) while QC reporting counts them separately and the reason
+# stays visible in the cell.
+EXCLUDED_SENTINEL_PREFIX = "EXCLUDED_"          # family prefix recognised everywhere
+EXCLUDED_OUTLIER_PREFIX = "EXCLUDED_OUTLIER"
+EXCLUDED_MANUAL_PREFIX = "EXCLUDED_MANUAL"
+
+
+def excluded_outlier_token(reason=None):
+    """Outlier-exclusion sentinel, optionally tagged with the rule that fired.
+
+    ``excluded_outlier_token("iqr")`` -> ``"EXCLUDED_OUTLIER:iqr"``.
+    """
+    return f"{EXCLUDED_OUTLIER_PREFIX}:{reason}" if reason else EXCLUDED_OUTLIER_PREFIX
+
+
+def excluded_manual_token(reason=None):
+    """Manual-exclusion sentinel, optionally tagged with the user's reason.
+
+    ``excluded_manual_token("damaged section")`` ->
+    ``"EXCLUDED_MANUAL:damaged section"``. The reason is free text (shown in the
+    cell for provenance) and is ignored by the coercion paths.
+    """
+    return f"{EXCLUDED_MANUAL_PREFIX}:{reason}" if reason else EXCLUDED_MANUAL_PREFIX
+
+
+def is_excluded_mask(series):
+    """Boolean mask of cells holding any ``EXCLUDED_`` analysis-exclusion token."""
+    s = pd.Series(series)
+    try:
+        return s.astype(str).str.startswith(EXCLUDED_SENTINEL_PREFIX)
+    except Exception:
+        return pd.Series(False, index=s.index)
+
+
+# Back-compat alias (the predicate now covers manual exclusions too).
+is_excluded_outlier_mask = is_excluded_mask
+
+
 # ── Specificity helpers (canonical versions) ──────────────────────────
 
 def flatten_specificity_values(values):

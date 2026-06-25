@@ -583,3 +583,93 @@ def fit_growth_curve(x, y, model="auto"):
         "predict": (lambda xx, _f=func, _p=popt: np.asarray(_f(np.asarray(xx, float), *_p), float)),
         "all_models": {k: {"aic": float(v["aic"])} for k, v in results.items()},
     }
+
+
+# ── Outlier detection ────────────────────────────────────────────────
+def iqr_bounds(values, k=1.5):
+    """Tukey IQR fence ``(lower, upper)``; ``(nan, nan)`` for <4 finite values.
+
+    A value below ``lower`` or above ``upper`` is an IQR outlier. ``k=1.5`` is the
+    classic Tukey fence; ``k=3`` flags only "far" outliers.
+    """
+    arr = pd.to_numeric(pd.Series(values), errors="coerce").dropna().to_numpy(float)
+    if arr.size < 4:
+        return float("nan"), float("nan")
+    q1, q3 = np.percentile(arr, [25, 75])
+    iqr = q3 - q1
+    return float(q1 - float(k) * iqr), float(q3 + float(k) * iqr)
+
+
+def mad_modified_z(values):
+    """Iglewicz-Hoaglin modified z-scores ``0.6745*(x-median)/MAD``.
+
+    Returns a float array aligned to ``values`` (NaN where the input is non-finite
+    or the median absolute deviation is zero). Uses median/MAD rather than
+    mean/SD, so a single gross outlier does not mask itself. ``|z| > 3.5`` is the
+    conventional flag threshold.
+    """
+    arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return np.full(arr.shape, np.nan)
+    med = float(np.median(finite))
+    mad = float(np.median(np.abs(finite - med)))
+    if mad <= 0:
+        return np.full(arr.shape, np.nan)
+    return 0.6745 * (arr - med) / mad
+
+
+def flag_outliers(df, columns, *, group_labels=None, methods=("iqr", "mad"),
+                  iqr_k=1.5, mad_threshold=3.5, min_rows=4):
+    """Flag per-(group, column) outliers by IQR fence and/or modified-z (MAD).
+
+    Operates on the *experimental-unit* rows of ``df`` — PyFLASH summaries are one
+    row per animal, so flags are animal-level. ``group_labels`` is an optional
+    mapping (df-index -> group label, e.g. a Series) so outliers are judged within
+    each group; ``None`` pools all rows. A (group, column) cell with fewer than
+    ``min_rows`` finite values is skipped (fences are meaningless on tiny n).
+
+    Returns a tidy DataFrame, one row per flagged (group, column, df-index):
+    ``group, column, row, value, iqr_outlier, mad_outlier, modified_z,
+    iqr_lower, iqr_upper`` (``row`` is the original df index label). Empty (with
+    those columns) when nothing is flagged.
+    """
+    methods = [str(m).lower() for m in (methods or ())]
+    use_iqr = "iqr" in methods
+    use_mad = "mad" in methods
+    if group_labels is None:
+        group_labels = pd.Series("all", index=df.index)
+    else:
+        group_labels = pd.Series(group_labels).reindex(df.index)
+
+    out_cols = ["group", "column", "row", "value", "iqr_outlier",
+                "mad_outlier", "modified_z", "iqr_lower", "iqr_upper"]
+    rows = []
+    for glabel in pd.unique(group_labels.dropna()):
+        gidx = group_labels.index[group_labels == glabel]
+        for col in columns:
+            if col not in df.columns:
+                continue
+            s = pd.to_numeric(df.loc[gidx, col], errors="coerce").dropna()
+            if len(s) < int(min_rows):
+                continue
+            arr = s.to_numpy(float)
+            lower, upper = iqr_bounds(arr, iqr_k) if use_iqr else (np.nan, np.nan)
+            med = float(np.median(arr))
+            mad = float(np.median(np.abs(arr - med)))
+            for idx, val in s.items():
+                v = float(val)
+                flag_iqr = bool(use_iqr and np.isfinite(lower)
+                                and (v < lower or v > upper))
+                mz = (0.6745 * (v - med) / mad) if (use_mad and mad > 0) else np.nan
+                flag_mad = bool(use_mad and np.isfinite(mz)
+                                and abs(mz) > float(mad_threshold))
+                if not (flag_iqr or flag_mad):
+                    continue
+                rows.append({
+                    "group": str(glabel), "column": col, "row": idx, "value": v,
+                    "iqr_outlier": flag_iqr, "mad_outlier": flag_mad,
+                    "modified_z": (float(mz) if np.isfinite(mz) else np.nan),
+                    "iqr_lower": lower, "iqr_upper": upper,
+                })
+    return pd.DataFrame(rows, columns=out_cols)

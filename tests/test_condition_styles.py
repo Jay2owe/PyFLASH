@@ -600,3 +600,57 @@ def test_plot_mean_bars_factor_mode_uses_condition_labels(tmp_path, monkeypatch)
 
     assert tick_labels
     assert tick_labels[-1] == ["AD", "Control"]
+
+
+def test_plot_mean_bars_can_save_dunn_bonferroni_posthoc(tmp_path):
+    csv = "\n".join([
+        "ID,Diagnosis,Sex,Period (h)",
+        "1,Dementia-AD,Female,24.2",
+        "2,Dementia-AD,Male,23.9",
+        "3,Dementia-AD,Female,24.4",
+        "4,MCI-AD,Female,23.8",
+        "5,MCI-AD,Male,23.6",
+        "6,MCI-AD,Female,23.7",
+        "7,Healthy control,Female,22.7",
+        "8,Healthy control,Male,22.9",
+        "9,Healthy control,Female,22.8",
+        ",,,",
+    ])
+    (tmp_path / "Data.csv").write_text(csv, encoding="utf-8")
+    diagnosis = conditionList([
+        condition("Control", "Control", "#787a7c", "Diagnosis"),
+        condition("MCI", "MCI", "#4369b2", "Diagnosis"),
+        condition("AD", "AD", "#9f1c1f", "Diagnosis"),
+    ])
+    exp = MiniExperiment(
+        "Human",
+        str(tmp_path),
+        animal_column="ID",
+        factor_mappings={
+            "Diagnosis": {
+                "Dementia-AD": "AD",
+                "MCI-AD": "MCI",
+                "Healthy control": "Control",
+            },
+            "Sex": {"Male": "Male", "Female": "Female"},
+        },
+    )
+    batch = Batch("human", [exp], diagnosis, str(tmp_path))
+    batch.processData(import_images=False, progress=False)
+
+    plotting.plot_mean_bars(
+        batch,
+        filtered_columns=["Period(h)"],
+        points=False,
+        save=False,
+        save_normality=False,
+        force_nonparametric=True,
+        posthoc="Dunn",
+        posthoc_correction="Bonferroni",
+        comparisons=["1-2", "1-3", "2-3"],
+    )
+
+    stats_paths = list(tmp_path.rglob("Period(h).csv"))
+    assert stats_paths
+    stats_csv = stats_paths[0].read_text(encoding="utf-8")
+    assert "Post-Hoc Test Used,Dunn Bonferroni" in stats_csv

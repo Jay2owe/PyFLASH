@@ -1,7 +1,5 @@
 """Composable high-level PyFLASH analysis pipelines."""
 
-import hashlib
-import json
 import os
 
 import numpy as np
@@ -18,8 +16,10 @@ from PyFLASH.modelling import (
 from PyFLASH.plotting import (
     _corr_clear_run_dir,
     _compute_correlation,
+    _corr_isdir,
     _corr_isfile,
     _corr_makedirs,
+    _corr_windows_extended_path,
     _corr_pipeline_append_runs_index,
     _corr_pipeline_compute,
     _corr_pipeline_data_root,
@@ -41,9 +41,67 @@ from PyFLASH.plotting import (
     _resolve_roi_bases,
     plot_regressions,
 )
-from PyFLASH.utils import save_fig, strip_name
+from PyFLASH.utils import (
+    is_excluded_outlier_mask,
+    is_specificity_queue,
+    iter_specificities,
+    save_fig,
+    specificity_path_parts,
+    strip_name,
+)
+from PyFLASH import pipeline_io as _pio
 
-__all__ = ["correlation", "adjusted_correlation"]
+__all__ = ["correlation", "adjusted_correlation", "data_overview"]
+
+
+def _pipeline_specificity_suffix(specificity):
+    parts = [strip_name(str(part)) for part in specificity_path_parts(specificity)]
+    parts = [part for part in parts if part]
+    return "_".join(parts) if parts else "specificity"
+
+
+def _pipeline_child_run_label(run_label, specificity):
+    if run_label is None:
+        return None
+    suffix = _pipeline_specificity_suffix(specificity)
+    return f"{run_label}_{suffix}" if suffix else str(run_label)
+
+
+def _pipeline_specificity_queue(func, experiment, specificity, kwargs, pipeline_name):
+    """Run one independent pipeline per specificity filter.
+
+    This mirrors plot-function specificity queue mode, but each child is a full
+    pipeline run with its own run label, manifest, matrices, and tables.
+    """
+    queued_outputs = {}
+    child_summaries = []
+    base_label = kwargs.get("run_label")
+    for spec_tuple in iter_specificities(specificity):
+        child_kwargs = dict(kwargs)
+        child_kwargs["specificity"] = spec_tuple
+        child_kwargs["run_label"] = _pipeline_child_run_label(base_label, spec_tuple)
+        result = func(experiment, **child_kwargs)
+        queued_outputs[spec_tuple] = result
+        child_summaries.append({
+            "specificity": tuple(spec_tuple) if spec_tuple is not None else None,
+            "run_label": result.get("run_label") if isinstance(result, dict) else None,
+            "fig_dir": result.get("fig_dir") if isinstance(result, dict) else None,
+            "data_dir": result.get("data_dir") if isinstance(result, dict) else None,
+            "n_selected": result.get("n_selected") if isinstance(result, dict) else None,
+            "adjusted_n_selected": (
+                result.get("adjusted", {}).get("n_selected")
+                if isinstance(result, dict) and isinstance(result.get("adjusted"), dict)
+                else None
+            ),
+        })
+    return {
+        "pipeline": pipeline_name,
+        "queued": True,
+        "specificity": [tuple(spec) for spec in iter_specificities(specificity)],
+        "run_label": base_label,
+        "runs": child_summaries,
+        "results": queued_outputs,
+    }
 
 
 def correlation(
@@ -151,9 +209,21 @@ def correlation(
     matrix with AD/MCI/Control regression points), independent of the matrix
     paneling.
 
+    ``specificity`` follows PyFLASH queue semantics. A single tuple filters one
+    run; a list of tuples runs independent child pipelines, one per filter, so
+    each child has its own column resolution, FDR correction, regressions, and
+    run folder. This is different from ``factor``, which panels groups inside
+    one pipeline run.
+
     Returns a dict with the resolved run label, output directories, per-group
     counts, and the pairwise / selected-pair DataFrames.
     """
+    if is_specificity_queue(specificity):
+        kwargs = dict(locals())
+        kwargs.pop("experiment")
+        return _pipeline_specificity_queue(
+            correlation, experiment, specificity, kwargs, "correlation")
+
     methods = [_normalize_correlation_method(t)
                for t in ([tests] if isinstance(tests, str) else list(tests))]
     if not methods:
@@ -675,44 +745,8 @@ def _adj_residualize_endpoints(
 
 
 def _adj_corr_run_dirs(experiment, run_label, if_exists, *, clear_overwrite=True):
-    base_fig = os.path.join(experiment.fig_path, "Adjusted Correlation Pipeline")
-    base_data = os.path.join(_corr_pipeline_data_root(experiment), "Adjusted Correlation Pipeline")
-    policy = str(if_exists).strip().lower()
-    if policy not in {"overwrite", "version", "error", "skip"}:
-        raise ValueError(
-            "if_exists must be 'overwrite', 'version', 'error', or 'skip'; "
-            f"got {if_exists!r}."
-        )
-
-    def _dirs(lbl):
-        safe = strip_name(str(lbl))
-        if not safe:
-            raise ValueError("run_label must resolve to a non-empty folder name.")
-        return os.path.join(base_fig, safe), os.path.join(base_data, safe)
-
-    fig_dir, data_dir = _dirs(run_label)
-    exists = os.path.isdir(fig_dir) or os.path.isdir(data_dir)
-    if not exists:
-        return fig_dir, data_dir, run_label, False
-    if policy == "overwrite":
-        if clear_overwrite:
-            _corr_clear_run_dir(fig_dir, base_fig)
-            _corr_clear_run_dir(data_dir, base_data)
-        return fig_dir, data_dir, run_label, False
-    if policy == "skip":
-        return fig_dir, data_dir, run_label, True
-    if policy == "error":
-        raise RuntimeError(
-            f"Adjusted correlation run {run_label!r} already exists. Pass "
-            f"if_exists='overwrite'/'version'/'skip' or a different run_label."
-        )
-    idx = 2
-    while True:
-        cand = f"{run_label}_v{idx}"
-        fig_dir, data_dir = _dirs(cand)
-        if not (os.path.isdir(fig_dir) or os.path.isdir(data_dir)):
-            return fig_dir, data_dir, cand, False
-        idx += 1
+    return _pio.run_dirs(experiment, "Adjusted Correlation Pipeline", run_label,
+                         if_exists, clear_overwrite=clear_overwrite)
 
 
 def _adj_corr_slug(endpoints, covariates, candidates, methods, gate, alpha, by, factor):
@@ -726,8 +760,7 @@ def _adj_corr_slug(endpoints, covariates, candidates, methods, gate, alpha, by, 
         "by": str(by),
         "factor": str(factor),
     }
-    digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:6]
-    return f"adjusted_{len(endpoints)}endpoints_{digest}"
+    return _pio.slug(f"adjusted_{len(endpoints)}endpoints", payload)
 
 
 def _adj_covariate_design_rank(df, covariates, categorical_set, reference_levels):
@@ -1178,7 +1211,19 @@ def adjusted_correlation(
     screened against the endpoint set; promoted candidates are added to the
     adjustment set and removed from the adjusted endpoint matrix when they were
     also listed as endpoints.
+
+    ``specificity`` follows PyFLASH queue semantics. A single tuple filters one
+    run; a list of tuples runs independent child pipelines, one per filter, so
+    each child has its own covariate screening, residualization, FDR correction,
+    and run folder.
     """
+    if is_specificity_queue(specificity):
+        kwargs = dict(locals())
+        kwargs.pop("experiment")
+        return _pipeline_specificity_queue(
+            adjusted_correlation, experiment, specificity, kwargs,
+            "adjusted_correlation")
+
     methods = [_normalize_correlation_method(t)
                for t in ([tests] if isinstance(tests, str) else list(tests))]
     if not methods:
@@ -1418,6 +1463,25 @@ def adjusted_correlation(
     }
     if save and write_manifest:
         _corr_write_json(manifest, manifest_path)
+        _pio.append_runs_index(experiment, "Adjusted Correlation Pipeline", {
+            "run_label": manifest["run_label"],
+            "n_initial_endpoints": len(manifest.get("initial_endpoints", [])),
+            "n_final_endpoints": len(manifest.get("final_endpoints", [])),
+            "n_final_covariates": len(manifest.get("final_covariates", [])),
+            "n_promoted_covariates": len(manifest.get("promoted_covariates", [])),
+            "tests": "/".join(manifest.get("tests", [])),
+            "require": manifest.get("require"),
+            "gate": manifest.get("gate"),
+            "alpha": manifest.get("alpha"),
+            "by": manifest.get("by"),
+            "factor": manifest.get("factor"),
+            "specificity": manifest.get("specificity"),
+            "roi": manifest.get("roi"),
+            "raw_n_selected": (manifest.get("raw") or {}).get("n_selected"),
+            "adjusted_n_selected": (manifest.get("adjusted") or {}).get("n_selected"),
+            "n_adjusted_regressions": manifest.get("n_adjusted_regressions"),
+            "fig_dir": manifest["fig_dir"],
+        })
 
     if verbose:
         _log.confirm(
@@ -1439,6 +1503,668 @@ def adjusted_correlation(
     result["adjusted"] = dict(result["adjusted"])
     result["adjusted"]["pairwise"] = adjusted_block["pairwise"]
     result["adjusted"]["selected"] = adjusted_block["selected"]
+    return result
+
+
+# ── Data overview pipeline ───────────────────────────────────────────────────
+# Identifier/metadata columns that are never treated as analysable metrics
+# (mirrors the ``to_drop`` set used when ``experiment.createSummary`` builds the
+# per-animal summary).
+_OVW_ID_COLS = {
+    "Region", "AnimalName", "Condition", "Label", "ImageROI",
+    "ROINameRaw", "Hemisphere", "ROI",
+}
+_OVW_SENTINEL = "NOT_INCLUDED_IN_EXPERIMENT"
+
+
+def _ovw_run_dirs(experiment, run_label, if_exists, *, clear_overwrite=True):
+    return _pio.run_dirs(experiment, "Data Overview Pipeline", run_label,
+                         if_exists, clear_overwrite=clear_overwrite)
+
+
+def _ovw_slug(columns, by, factor, specificity, roi, sections, settings=None):
+    payload = {
+        "cols": sorted(str(c) for c in columns),
+        "by": str(by),
+        "factor": str(factor),
+        "specificity": str(specificity),
+        "roi": str(roi),
+        "sections": sorted(str(s) for s in sections),
+        # Output-changing knobs, so a different QC configuration hashes to a
+        # different folder (otherwise if_exists='skip' could reuse a stale run).
+        "settings": {str(k): str(v) for k, v in sorted((settings or {}).items())},
+    }
+    return _pio.slug(f"overview_{len(columns)}cols", payload)
+
+
+def _ovw_append_runs_index(experiment, manifest):
+    """Append one summary row per overview run to a shared index CSV."""
+    counts = manifest.get("inventory_counts", {}) or {}
+    # When the inventory section ran, report its (role-based) numeric count so it
+    # is consistent with the n_boolean/n_constant columns beside it; only fall
+    # back to the broader matrix-numeric count when the inventory was skipped.
+    inventory_ran = "inventory" in (manifest.get("sections") or [])
+    n_numeric = (counts.get("numeric", 0) if inventory_ran
+                 else manifest.get("n_numeric_columns", 0))
+    row = {
+        "run_label": manifest["run_label"],
+        "n_rows": manifest["n_rows"],
+        "n_columns": manifest["n_columns"],
+        "n_numeric": n_numeric,
+        "n_categorical": counts.get("categorical", 0),
+        "n_identifier": counts.get("identifier", 0),
+        "n_boolean": counts.get("boolean", 0),
+        "n_constant": counts.get("constant", 0),
+        "n_all_missing": counts.get("all_missing", 0),
+        "n_outlier_animals": manifest.get("n_outlier_animals", 0),
+        "n_covarying_pairs": manifest.get("n_covarying_pairs", 0),
+        "by": manifest["by"],
+        "factor": manifest["factor"],
+        "specificity": manifest["specificity"],
+        "roi": manifest["roi"],
+        "fig_dir": manifest["fig_dir"],
+    }
+    _pio.append_runs_index(experiment, "Data Overview Pipeline", row)
+
+
+def _ovw_column_inventory(scope_df, columns):
+    """Per-column data dictionary: role / dtype / missing / sentinel / unique.
+
+    Classifies every requested column into one of ``numeric``, ``categorical``
+    (string), ``boolean``, ``identifier``, ``constant`` (single distinct value),
+    or ``all_missing``. NaN ("missing") is counted separately from the
+    ``NOT_INCLUDED_IN_EXPERIMENT`` sentinel ("not measured for this animal").
+    """
+    rows = []
+    n_total = int(len(scope_df))
+    for col in columns:
+        s = scope_df[col]
+        sent_mask = s.astype(str).str.contains(_OVW_SENTINEL, na=False)
+        excl_mask = is_excluded_outlier_mask(s)
+        n_excluded = int(excl_mask.sum())
+        # not-included sentinel and excluded-outlier token are separate "not a
+        # present value" buckets; keep them apart for honest QC accounting.
+        sent_mask = sent_mask & ~excl_mask
+        n_sentinel = int(sent_mask.sum())
+        drop_mask = sent_mask | excl_mask
+        non_sent = s.where(~drop_mask, np.nan)
+        n_nan = int((non_sent.isna() & ~drop_mask).sum())
+        present = non_sent.dropna()
+        n_present = int(len(present))
+        nunique = int(present.nunique()) if n_present else 0
+        coerced = (pd.to_numeric(present, errors="coerce")
+                   if n_present else pd.Series([], dtype=float))
+        is_numeric = bool(n_present > 0 and coerced.notna().all())
+        # Detect booleans from the values too: a bool column carrying a sentinel
+        # or NaN degrades to object dtype, which is_bool_dtype would miss.
+        is_bool = bool(
+            pd.api.types.is_bool_dtype(s)
+            or (n_present > 0
+                and present.map(lambda v: isinstance(v, (bool, np.bool_))).all()))
+        if col in _OVW_ID_COLS:
+            role = "identifier"
+        elif n_present == 0:
+            role = "all_missing"
+        elif is_bool:
+            role = "boolean"
+        elif is_numeric:
+            role = "constant" if nunique <= 1 else "numeric"
+        else:
+            role = "constant" if nunique <= 1 else "categorical"
+        examples = ", ".join(str(v) for v in list(present.unique())[:3])
+        rows.append({
+            "column": col,
+            "role": role,
+            "dtype": str(s.dtype),
+            "n_present": n_present,
+            "n_missing": n_nan,
+            "n_sentinel": n_sentinel,
+            "n_excluded": n_excluded,
+            "pct_missing": (round(100.0 * n_nan / n_total, 2)
+                            if n_total else np.nan),
+            "pct_unavailable": (
+                round(100.0 * (n_nan + n_sentinel + n_excluded) / n_total, 2)
+                if n_total else np.nan),
+            "n_unique": nunique,
+            "examples": examples,
+        })
+    return pd.DataFrame(rows)
+
+
+def _ovw_group_counts(experiment, scope_df):
+    """N animals per condition/factor level (the design table), plus the
+    per-level distribution of ``numSections`` (ROI replication) when present."""
+    rows = []
+    has_animal = "AnimalName" in scope_df.columns
+    total = int(scope_df["AnimalName"].nunique()) if has_animal else int(len(scope_df))
+    rows.append({"grouping": "(all)", "level": "(total)", "n_animals": total,
+                 "sections_min": np.nan, "sections_median": np.nan,
+                 "sections_max": np.nan})
+    cl = getattr(experiment, "condition_list", None)
+    factors = list(getattr(cl, "factor", []) or [])
+    group_cols = []
+    for c in ["Condition"] + factors:
+        if c in scope_df.columns and c not in group_cols:
+            group_cols.append(c)
+    has_sections = "numSections" in scope_df.columns
+    for gc in group_cols:
+        for level, sub in scope_df.groupby(gc):
+            n = (int(sub["AnimalName"].nunique()) if has_animal else int(len(sub)))
+            srow = {"grouping": gc, "level": str(level), "n_animals": n,
+                    "sections_min": np.nan, "sections_median": np.nan,
+                    "sections_max": np.nan}
+            if has_sections:
+                sec = pd.to_numeric(sub["numSections"], errors="coerce").dropna()
+                if len(sec):
+                    srow["sections_min"] = float(sec.min())
+                    srow["sections_median"] = float(sec.median())
+                    srow["sections_max"] = float(sec.max())
+            rows.append(srow)
+    return pd.DataFrame(rows)
+
+
+def _ovw_availability(scope_df, numeric_df, numeric_cols, group_col="Condition"):
+    """Per-numeric-column count of non-missing animals within each condition.
+
+    Surfaces markers that were only measured in some conditions (sentinels mean
+    a metric can be entirely absent for a group).
+    """
+    if group_col not in scope_df.columns or not numeric_cols:
+        return pd.DataFrame()
+    out = {}
+    for level, sub in scope_df.groupby(group_col):
+        idx = numeric_df.index.intersection(sub.index)
+        out[str(level)] = numeric_df.loc[idx, numeric_cols].notna().sum()
+    df = pd.DataFrame(out)
+    df.index.name = "column"
+    return df
+
+
+def _ovw_descriptives(numeric_df, numeric_cols, groups):
+    """Per (group, column) descriptive statistics (reuses report.describe_group)."""
+    from PyFLASH import report
+    from scipy import stats as sp_stats
+
+    rows = []
+    for glabel, gidx, _spec in groups:
+        gnum = numeric_df.loc[numeric_df.index.intersection(gidx)]
+        for col in numeric_cols:
+            vals = gnum[col].dropna()
+            rec = report.describe_group(col, vals)
+            arr = vals.to_numpy(dtype=float)
+            n = int(len(arr))
+            mean = rec.get("mean")
+            sd = rec.get("sd")
+            cv = (abs(sd / mean) * 100.0
+                  if (mean not in (None, 0) and sd is not None) else np.nan)
+            skew = float(sp_stats.skew(arr)) if n >= 3 else np.nan
+            kurt = float(sp_stats.kurtosis(arr)) if n >= 4 else np.nan
+            rows.append({
+                "group": str(glabel), "column": col, "n": rec.get("n"),
+                "mean": mean, "sd": sd, "sem": rec.get("sem"),
+                "median": rec.get("median"), "min": rec.get("min"),
+                "max": rec.get("max"), "q25": rec.get("q25"), "q75": rec.get("q75"),
+                "cv_pct": cv, "skew": skew, "kurtosis": kurt,
+            })
+    return pd.DataFrame(rows)
+
+
+def _ovw_normality(numeric_df, numeric_cols, groups, alpha):
+    """Per (group, column) Shapiro-Wilk / D'Agostino normality + a test hint."""
+    from scipy import stats as sp_stats
+
+    rows = []
+    for glabel, gidx, _spec in groups:
+        gnum = numeric_df.loc[numeric_df.index.intersection(gidx)]
+        for col in numeric_cols:
+            arr = gnum[col].dropna().to_numpy(dtype=float)
+            n = int(len(arr))
+            shapiro_p = np.nan
+            dagostino_p = np.nan
+            distinct = int(np.unique(arr).size) if n else 0
+            if n >= 3 and distinct > 1:
+                try:
+                    shapiro_p = float(sp_stats.shapiro(arr).pvalue)
+                except Exception:
+                    pass
+            if n >= 8 and distinct > 1:
+                try:
+                    dagostino_p = float(sp_stats.normaltest(arr).pvalue)
+                except Exception:
+                    pass
+            has_shapiro = bool(np.isfinite(shapiro_p))
+            is_normal = bool(has_shapiro and shapiro_p >= float(alpha))
+            rows.append({
+                "group": str(glabel), "column": col, "n": n,
+                "shapiro_p": shapiro_p, "dagostino_p": dagostino_p,
+                "is_normal": (is_normal if has_shapiro else None),
+                "suggested": ("parametric" if is_normal
+                              else ("nonparametric" if has_shapiro
+                                    else "insufficient_n")),
+            })
+    return pd.DataFrame(rows)
+
+
+def _ovw_outliers(scope_df, numeric_df, numeric_cols, groups,
+                  methods, iqr_k, mad_threshold):
+    """Flag outliers per (group, column) via :func:`stats_extra.flag_outliers`.
+
+    Tags ``AnimalName`` so a flagged value points straight at the animal, and
+    rolls up to a per-animal "flagged on N metrics" candidate-for-review table.
+    """
+    from PyFLASH.stats_extra import flag_outliers
+
+    group_labels = pd.Series(index=numeric_df.index, dtype=object)
+    for glabel, gidx, _spec in groups:
+        group_labels.loc[numeric_df.index.intersection(gidx)] = str(glabel)
+    flagged = flag_outliers(
+        numeric_df, numeric_cols, group_labels=group_labels,
+        methods=methods, iqr_k=iqr_k, mad_threshold=mad_threshold)
+
+    name_lookup = scope_df["AnimalName"] if "AnimalName" in scope_df.columns else None
+
+    def _animal(idx):
+        if name_lookup is not None:
+            try:
+                return str(name_lookup.loc[idx])
+            except Exception:
+                return str(idx)
+        return str(idx)
+
+    cols = ["group", "column", "AnimalName", "value", "iqr_outlier",
+            "mad_outlier", "modified_z", "iqr_lower", "iqr_upper"]
+    if flagged.empty:
+        outliers_df = pd.DataFrame(columns=cols)
+    else:
+        flagged = flagged.assign(AnimalName=flagged["row"].map(_animal))
+        outliers_df = flagged[cols].reset_index(drop=True)
+    if not outliers_df.empty:
+        animals = (
+            outliers_df.groupby("AnimalName")
+            .agg(n_flags=("column", "size"),
+                 n_columns=("column", "nunique"),
+                 columns=("column", lambda c: ", ".join(sorted(set(c)))))
+            .reset_index()
+            .sort_values("n_flags", ascending=False)
+            .reset_index(drop=True)
+        )
+    else:
+        animals = pd.DataFrame(
+            columns=["AnimalName", "n_flags", "n_columns", "columns"])
+    return outliers_df, animals
+
+
+def _ovw_covariation(numeric_df, numeric_cols, method, threshold, min_n):
+    """Pooled pairwise correlation among numeric columns for redundancy screening.
+
+    Returns (covarying_pairs, all_pairs, matrix). ``covarying_pairs`` are the
+    pairs at or above ``threshold`` |r| — candidates for collinearity/duplication.
+    Unlike the correlation pipeline this is a single-method, no-FDR, no-regression
+    QC view; use ``pipeline.correlation`` for inferential work.
+    """
+    method_n = _normalize_correlation_method(method)
+    disp = _correlation_display_name(method_n)
+    cols = list(numeric_cols)
+    mat = pd.DataFrame(np.nan, index=cols, columns=cols, dtype=float)
+    pairs = []
+    for i in range(len(cols)):
+        mat.loc[cols[i], cols[i]] = 1.0
+        for j in range(i + 1, len(cols)):
+            a, b = cols[i], cols[j]
+            sub = numeric_df[[a, b]].dropna()
+            n = int(len(sub))
+            if n < int(min_n) or sub[a].nunique() < 2 or sub[b].nunique() < 2:
+                continue
+            try:
+                r, p = _compute_correlation(
+                    sub[a].to_numpy(), sub[b].to_numpy(), method_n)
+            except Exception:
+                continue
+            mat.loc[a, b] = r
+            mat.loc[b, a] = r
+            pairs.append({"x": a, "y": b, "n": n, "r": r,
+                          "abs_r": abs(r), "p": p, "method": disp})
+    pairs_df = pd.DataFrame(
+        pairs, columns=["x", "y", "n", "r", "abs_r", "p", "method"])
+    if not pairs_df.empty:
+        pairs_df = pairs_df.sort_values(
+            "abs_r", ascending=False).reset_index(drop=True)
+        covarying = pairs_df[
+            pairs_df["abs_r"] >= float(threshold)].reset_index(drop=True)
+    else:
+        covarying = pairs_df.copy()
+    return covarying, pairs_df, mat
+
+
+def _ovw_missingness_figure(scope_df, columns, tick_label_size, title):
+    """Animals x columns map: present / missing (NaN) / not-included (sentinel)."""
+    from matplotlib.colors import ListedColormap
+    from matplotlib.patches import Patch
+
+    cols = list(columns)
+    n_rows = int(len(scope_df))
+    if n_rows == 0 or len(cols) == 0:
+        return None
+    codes = np.zeros((n_rows, len(cols)), dtype=int)
+    for j, col in enumerate(cols):
+        s = scope_df[col]
+        sent = s.astype(str).str.contains(_OVW_SENTINEL, na=False)
+        nan = s.where(~sent, np.nan).isna() & (~sent)
+        codes[:, j] = np.where(sent.to_numpy(), 2,
+                               np.where(nan.to_numpy(), 1, 0))
+
+    fig_w = min(max(7.0, len(cols) * 0.32), 30.0)
+    fig_h = min(max(5.0, n_rows * 0.28), 27.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    cmap = ListedColormap(["#2ca25f", "#bdbdbd", "#fdae61"])
+    ax.imshow(codes, aspect="auto", cmap=cmap, vmin=0, vmax=2,
+              interpolation="none")
+    tick_fs = max(6, min(int(tick_label_size), int(200 / max(len(cols), 1))))
+    ax.set_xticks(range(len(cols)))
+    ax.set_xticklabels(
+        [str(c)[:28] for c in cols], rotation=90, fontsize=tick_fs)
+    if "AnimalName" in scope_df.columns:
+        ax.set_yticks(range(n_rows))
+        ax.set_yticklabels(
+            [str(a)[:24] for a in scope_df["AnimalName"]],
+            fontsize=max(6, min(int(tick_label_size), int(220 / max(n_rows, 1)))))
+    ax.set_title(title, fontsize=int(tick_label_size))
+    handles = [
+        Patch(color="#2ca25f", label="present"),
+        Patch(color="#bdbdbd", label="missing (NaN)"),
+        Patch(color="#fdae61", label="not included"),
+    ]
+    ax.legend(handles=handles, bbox_to_anchor=(1.01, 1.0),
+              loc="upper left", fontsize=9, frameon=False)
+    fig.tight_layout()
+    return fig
+
+
+def data_overview(
+    experiment,
+    filtered_columns=None,
+    by="all",
+    factor=None,
+    specificity=None,
+    roi=None,
+    save=True,
+    column_strings=None,
+    regex_string=None,
+    exclude="",
+    include_inventory=True,
+    include_group_counts=True,
+    include_descriptives=True,
+    include_normality=True,
+    include_outliers=True,
+    include_covariation=True,
+    outlier_methods=("iqr", "mad"),
+    iqr_k=1.5,
+    mad_threshold=3.5,
+    covariation_method="pearsonr",
+    covariation_threshold=0.9,
+    min_n=3,
+    alpha=0.05,
+    plot_missingness=True,
+    plot_covariation=True,
+    tick_label_size=20,
+    run_label=None,
+    if_exists="overwrite",
+    write_manifest=True,
+    verbose=True,
+):
+    """One-call descriptive overview / QC report for a batch's summary table.
+
+    A companion to :func:`correlation` / :func:`adjusted_correlation` that answers
+    "what does this dataset look like?" before any hypothesis test: the Ns, which
+    columns are numeric vs string, what is missing vs not-measured, which animals
+    look like outliers, and which metrics covary (collinearity/redundancy).
+
+    Everything is computed on the **animal-level summary** (N = animals), treating
+    the ``NOT_INCLUDED_IN_EXPERIMENT`` sentinel as distinct from a true NaN.
+
+    Sections (each toggleable, written as its own CSV)
+    -------------------------------------------------
+    - ``column_inventory`` — per-column role (numeric / categorical / boolean /
+      identifier / constant / all-missing), dtype, present / missing / sentinel
+      counts, unique count, and the numeric-vs-string column tally.
+    - ``group_counts`` — N animals per condition / factor level (the design
+      table) plus per-level ``numSections`` (ROI replication) min/median/max,
+      and ``availability_by_condition`` (non-missing animals per metric per
+      condition).
+    - ``descriptives`` — per (group, column) n / mean / sd / sem / median / IQR /
+      CV / skew / kurtosis.
+    - ``normality`` — per (group, column) Shapiro-Wilk and D'Agostino with a
+      parametric-vs-nonparametric hint.
+    - ``outliers`` — Tukey IQR-fence and modified-z (MAD) flags tagged by
+      ``AnimalName``, plus a per-animal ``outlier_animals`` roll-up.
+    - ``covariation`` — pooled pairwise |r| screen for redundant/collinear
+      metrics, with the full ``covariation_matrix``.
+
+    Column selection follows the usual convention: ``filtered_columns`` (explicit
+    names) or ``column_strings`` / ``regex_string`` / ``exclude`` (discovery), and
+    defaults to *all* summary columns so the inventory is complete. Numeric
+    sections operate only on the columns that resolve to numeric values.
+
+    ``by`` / ``factor`` panel the descriptive / normality / outlier sections by
+    condition or factor level (``by='all'`` pools); covariation and the inventory
+    are always pooled across the scope. ``specificity`` follows PyFLASH queue
+    semantics (a list of tuples runs one independent child overview per filter).
+
+    Run management (``run_label`` / ``if_exists`` / ``save`` / ``write_manifest``)
+    and the return shape (a manifest dict with the section DataFrames attached)
+    mirror the other pipelines. Outputs land in
+    ``Python Figures/Data Overview Pipeline/<run>/`` and
+    ``Data and Stats/Data Overview Pipeline/<run>/``.
+    """
+    if is_specificity_queue(specificity):
+        kwargs = dict(locals())
+        kwargs.pop("experiment")
+        return _pipeline_specificity_queue(
+            data_overview, experiment, specificity, kwargs, "data_overview")
+
+    _roi_base = _resolve_roi_bases(roi, experiment)[0]
+    scope_df = _filtered_summary_for_specificity(
+        experiment, specificity, roi_base=_roi_base)
+
+    if filtered_columns is None and not column_strings and not regex_string:
+        ex = ([exclude] if isinstance(exclude, str) and exclude
+              else (list(exclude) if exclude else []))
+        resolved_columns = [c for c in scope_df.columns
+                            if not any(str(s) in str(c) for s in ex)]
+    else:
+        resolved_columns = _resolve_filtered_columns(
+            experiment, filtered_columns=filtered_columns,
+            column_strings=column_strings, regex_string=regex_string,
+            exclude=exclude, source_df=scope_df,
+        )
+    if not resolved_columns:
+        raise ValueError("data_overview: no columns matched the filter criteria.")
+
+    num_df, numeric_cols, _dropped = _prepare_matrix_numeric_df(
+        scope_df, resolved_columns,
+        drop_duplicate_columns=False, require_complete_numeric=False,
+    )
+    duplicate_columns = []
+    if num_df.shape[1] > 1:
+        dup_mask = num_df.T.duplicated(keep="first")
+        duplicate_columns = num_df.columns[dup_mask].tolist()
+
+    sections = [name for name, on in (
+        ("inventory", include_inventory),
+        ("group_counts", include_group_counts),
+        ("descriptives", include_descriptives),
+        ("normality", include_normality),
+        ("outliers", include_outliers),
+        ("covariation", include_covariation),
+    ) if on]
+
+    label = run_label or _ovw_slug(
+        resolved_columns, by, factor, specificity, _roi_base, sections,
+        settings={
+            "outlier_methods": tuple(str(m).lower() for m in (outlier_methods or ())),
+            "iqr_k": float(iqr_k),
+            "mad_threshold": float(mad_threshold),
+            "covariation_method": str(covariation_method),
+            "covariation_threshold": float(covariation_threshold),
+            "min_n": int(min_n),
+            "alpha": float(alpha),
+        },
+    )
+    fig_dir, data_dir, resolved_label, reuse_existing = _ovw_run_dirs(
+        experiment, label, if_exists, clear_overwrite=bool(save))
+    manifest_path = os.path.join(data_dir, "manifest.json")
+    if reuse_existing and _corr_isfile(manifest_path):
+        cached = _corr_read_json(manifest_path)
+        _log.hint(f"[data_overview] Reusing run {resolved_label!r} (if_exists='skip').")
+        cached["reused"] = True
+        return cached
+
+    groups = _corr_pipeline_groups(
+        experiment, scope_df, num_df, by, factor, specificity)
+
+    # ── compute requested sections ──────────────────────────────────────────
+    inventory = pd.DataFrame()
+    inventory_counts = {}
+    if include_inventory:
+        inventory = _ovw_column_inventory(scope_df, resolved_columns)
+        if not inventory.empty:
+            inventory_counts = inventory["role"].value_counts().to_dict()
+
+    group_counts = pd.DataFrame()
+    availability = pd.DataFrame()
+    if include_group_counts:
+        group_counts = _ovw_group_counts(experiment, scope_df)
+        availability = _ovw_availability(scope_df, num_df, numeric_cols)
+
+    descriptives = pd.DataFrame()
+    if include_descriptives and numeric_cols:
+        descriptives = _ovw_descriptives(num_df, numeric_cols, groups)
+
+    normality = pd.DataFrame()
+    if include_normality and numeric_cols:
+        normality = _ovw_normality(num_df, numeric_cols, groups, alpha)
+
+    outliers = pd.DataFrame()
+    outlier_animals = pd.DataFrame()
+    if include_outliers and numeric_cols:
+        outliers, outlier_animals = _ovw_outliers(
+            scope_df, num_df, numeric_cols, groups,
+            outlier_methods, iqr_k, mad_threshold)
+
+    covarying = pd.DataFrame()
+    covariation_pairs = pd.DataFrame()
+    covariation_matrix = pd.DataFrame()
+    if include_covariation and len(numeric_cols) >= 2:
+        covarying, covariation_pairs, covariation_matrix = _ovw_covariation(
+            num_df, numeric_cols, covariation_method,
+            covariation_threshold, min_n)
+
+    # ── write tables + figures ──────────────────────────────────────────────
+    if save:
+        _corr_makedirs(data_dir)
+        if include_inventory and not inventory.empty:
+            _corr_to_csv(inventory, os.path.join(data_dir, "column_inventory.csv"),
+                         index=False)
+        if include_group_counts:
+            if not group_counts.empty:
+                _corr_to_csv(group_counts,
+                             os.path.join(data_dir, "group_counts.csv"), index=False)
+            if not availability.empty:
+                _corr_to_csv(availability,
+                             os.path.join(data_dir, "availability_by_condition.csv"))
+        if include_descriptives and not descriptives.empty:
+            _corr_to_csv(descriptives,
+                         os.path.join(data_dir, "descriptive_stats.csv"), index=False)
+        if include_normality and not normality.empty:
+            _corr_to_csv(normality, os.path.join(data_dir, "normality.csv"),
+                         index=False)
+        if include_outliers:
+            _corr_to_csv(outliers, os.path.join(data_dir, "outliers.csv"),
+                         index=False)
+            _corr_to_csv(outlier_animals,
+                         os.path.join(data_dir, "outlier_animals.csv"), index=False)
+        if include_covariation and not covariation_matrix.empty:
+            _corr_to_csv(covarying,
+                         os.path.join(data_dir, "covariation_pairs.csv"), index=False)
+            _corr_to_csv(covariation_matrix,
+                         os.path.join(data_dir, "covariation_matrix.csv"))
+
+        if plot_missingness or plot_covariation:
+            _corr_makedirs(fig_dir)
+        if plot_missingness:
+            mfig = _ovw_missingness_figure(
+                scope_df, resolved_columns, tick_label_size,
+                "Data availability (animals x columns)")
+            if mfig is not None:
+                save_fig(mfig, fig_dir, "Missingness Map")
+                plt.close(mfig)
+        if (plot_covariation and include_covariation
+                and not covariation_matrix.empty):
+            sig = covariation_matrix.abs() >= float(covariation_threshold)
+            cfig = _corr_pipeline_heatmap(
+                covariation_matrix, sig,
+                f"Covariation matrix  (* |r|>={covariation_threshold:g})",
+                tick_label_size, cmap="coolwarm", vmin=-1.0, vmax=1.0,
+                colorbar_label=f"{_correlation_display_name(_normalize_correlation_method(covariation_method))} r",
+            )
+            save_fig(cfig, fig_dir, "Covariation Matrix")
+            plt.close(cfig)
+
+    n_outlier_animals = int(len(outlier_animals)) if outlier_animals is not None else 0
+    n_covarying_pairs = int(len(covarying)) if covarying is not None else 0
+
+    manifest = {
+        "run_label": resolved_label,
+        "fig_dir": fig_dir,
+        "data_dir": data_dir,
+        "pipeline": "data_overview",
+        "n_rows": int(len(scope_df)),
+        "n_columns": int(len(resolved_columns)),
+        "columns": list(resolved_columns),
+        "numeric_columns": list(numeric_cols),
+        "n_numeric_columns": int(len(numeric_cols)),
+        "duplicate_columns": list(duplicate_columns),
+        "inventory_counts": {str(k): int(v) for k, v in inventory_counts.items()},
+        "sections": sections,
+        "by": str(by),
+        "factor": factor,
+        "groups": [str(g[0]) for g in groups],
+        "specificity": str(specificity) if specificity is not None else None,
+        "roi": str(_roi_base) if _roi_base is not None else None,
+        "outlier_methods": [str(m).lower() for m in (outlier_methods or ())],
+        "iqr_k": float(iqr_k),
+        "mad_threshold": float(mad_threshold),
+        "n_outliers": int(len(outliers)) if outliers is not None else 0,
+        "n_outlier_animals": n_outlier_animals,
+        "covariation_method": _correlation_display_name(
+            _normalize_correlation_method(covariation_method)),
+        "covariation_threshold": float(covariation_threshold),
+        "n_covarying_pairs": n_covarying_pairs,
+        "alpha": float(alpha),
+        "reused": False,
+    }
+    if save and write_manifest:
+        _corr_write_json(manifest, manifest_path)
+        _ovw_append_runs_index(experiment, manifest)
+
+    if verbose:
+        _log.confirm(
+            f"[data_overview] {resolved_label}: {manifest['n_columns']} columns "
+            f"({manifest['n_numeric_columns']} numeric), "
+            f"{manifest['n_rows']} rows, {n_outlier_animals} animals flagged, "
+            f"{n_covarying_pairs} covarying pairs."
+        )
+
+    result = dict(manifest)
+    result["column_inventory"] = inventory
+    result["group_counts"] = group_counts
+    result["availability_by_condition"] = availability
+    result["descriptives"] = descriptives
+    result["normality"] = normality
+    result["outliers"] = outliers
+    result["outlier_animals"] = outlier_animals
+    result["covariation"] = covarying
+    result["covariation_matrix"] = covariation_matrix
     return result
 
 

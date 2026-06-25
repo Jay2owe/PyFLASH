@@ -352,6 +352,37 @@ def test_pipeline_can_skip_plotted_pq_matrices(tmp_path):
     assert os.path.isfile(os.path.join(res["data_dir"], "qvalues_Pearson.csv"))
 
 
+def test_pipeline_specificity_queue_writes_independent_runs(tmp_path):
+    batch = _human_batch(tmp_path)
+    cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
+
+    res = pipeline.correlation(
+        batch,
+        filtered_columns=cols,
+        specificity=[("Diagnosis", "AD"), ("Diagnosis", "MCI")],
+        tests=("pearsonr",),
+        require="or",
+        gate="p",
+        min_n=3,
+        max_regressions=0,
+        run_label="diag_queue",
+        save=True,
+    )
+
+    assert res["queued"] is True
+    assert res["pipeline"] == "correlation"
+    assert set(res["results"]) == {("Diagnosis", "AD"), ("Diagnosis", "MCI")}
+    assert [run["run_label"] for run in res["runs"]] == [
+        "diag_queue_Diagnosis_AD",
+        "diag_queue_Diagnosis_MCI",
+    ]
+    for spec, child in res["results"].items():
+        assert child["specificity"] == str(spec)
+        assert os.path.isfile(os.path.join(child["data_dir"], "manifest.json"))
+        assert os.path.basename(child["data_dir"]) == child["run_label"]
+        assert child["run_label"].endswith("_" + spec[1])
+
+
 def test_pipeline_save_false_does_not_clear_existing_run(tmp_path):
     batch = _human_batch(tmp_path)
     cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]

@@ -39,6 +39,9 @@ __all__ = [
     "create_batch", "save_state", "load_state", "normalize_paths",
     # Modelling
     "iterative_best_fit", "run_linear_model_pipeline", "adjusted_correlation",
+    "data_overview",
+    # Outlier exclusion / marking
+    "exclude_outliers", "mark_outliers", "apply_exclusions", "mark_exclusions",
     # Config & output control
     "Config", "stainColors",
     "set_verbosity", "silent", "verbose", "Verbosity",
@@ -71,6 +74,11 @@ _LAZY_ATTRS = {
     "iterative_best_fit": ("PyFLASH.modelling", "iterative_best_fit"),
     "run_linear_model_pipeline": ("PyFLASH.modelling", "run_linear_model_pipeline"),
     "adjusted_correlation": ("PyFLASH.pipeline", "adjusted_correlation"),
+    "data_overview": ("PyFLASH.pipeline", "data_overview"),
+    "exclude_outliers": ("PyFLASH.exclusions", "exclude_outliers"),
+    "mark_outliers": ("PyFLASH.exclusions", "mark_outliers"),
+    "apply_exclusions": ("PyFLASH.exclusions", "apply_exclusions"),
+    "mark_exclusions": ("PyFLASH.exclusions", "mark_exclusions"),
     "cheat_sheet": ("PyFLASH.plotting", "cheat_sheet"),
     "set_axis_limits": ("PyFLASH.plotting", "set_axis_limits"),
     "clear_axis_limits": ("PyFLASH.plotting", "clear_axis_limits"),
