@@ -15,9 +15,13 @@ from PyFLASH.batch import Batch
 from PyFLASH.conditions import condition, conditionList
 from PyFLASH.experiment import MiniExperiment
 from PyFLASH.plotting import (
+    _CORR_PVALUE_CMAP,
+    _CORR_QVALUE_CMAP,
+    _corr_difference_matrix_fig,
     _corr_difference_use_fdr,
     _corr_pipeline_compute,
     _corr_pipeline_heatmap,
+    _corr_resolve_value_matrix_flags,
     _corr_pipeline_run_dirs,
     _corr_pipeline_slug,
     _corr_pipeline_use_fdr,
@@ -35,7 +39,26 @@ def _pairs_of(frame):
 
 
 def test_plotting_pipeline_wrapper_keeps_new_entrypoint_signature():
-    assert inspect.signature(plot_correlation_pipeline) == inspect.signature(pipeline.correlation)
+    # The compatibility wrapper mirrors the entrypoint's *public* parameters; the
+    # pipeline's internal queue-merge plumbing (underscore-prefixed params) is not
+    # part of the wrapper surface.
+    def _public(fn):
+        return [n for n in inspect.signature(fn).parameters if not n.startswith("_")]
+    assert _public(plot_correlation_pipeline) == _public(pipeline.correlation)
+
+
+def test_pipeline_defaults_to_raw_p_gate():
+    assert inspect.signature(pipeline.correlation).parameters["gate"].default == "p"
+    assert inspect.signature(pipeline.adjusted_correlation).parameters["gate"].default == "p"
+
+
+def test_value_matrix_selector_aliases_and_legacy_overrides():
+    assert _corr_resolve_value_matrix_flags("p", None, None) == (True, False)
+    assert _corr_resolve_value_matrix_flags("q", None, None) == (False, True)
+    assert _corr_resolve_value_matrix_flags("both", None, None) == (True, True)
+    assert _corr_resolve_value_matrix_flags(["p", "q"], None, None) == (True, True)
+    assert _corr_resolve_value_matrix_flags("none", None, None) == (False, False)
+    assert _corr_resolve_value_matrix_flags("p", False, False) == (False, False)
 
 
 def _expected_selected(long_df, gate, require, alpha):
@@ -194,6 +217,94 @@ def test_pipeline_heatmap_large_matrix_layout_is_readable():
 
 # ── Run naming + collision policy ────────────────────────────────────────
 
+def test_pipeline_heatmap_uses_shared_significance_tiers():
+    matrix = pd.DataFrame(
+        [[1.0, 1.0, 1.0, 1.0, 1.0]],
+        index=["row"],
+        columns=["p00001", "p0005", "p005", "p04", "p2"],
+    )
+    pvalues = pd.DataFrame(
+        [[0.00001, 0.0005, 0.005, 0.04, 0.2]],
+        index=matrix.index,
+        columns=matrix.columns,
+    )
+
+    fig = _corr_pipeline_heatmap(
+        matrix, None, "tiered stars", 12,
+        cmap=_CORR_PVALUE_CMAP, vmin=0, vmax=1,
+        annotation_df=pvalues, annotation_alpha=0.05,
+    )
+    try:
+        assert [text.get_text() for text in fig.axes[0].texts] == [
+            "****", "***", "**", "*",
+        ]
+    finally:
+        plt.close(fig)
+
+
+def test_pipeline_value_matrix_colormaps_and_annotations_are_wired(monkeypatch, tmp_path):
+    batch = _human_batch(tmp_path)
+    cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
+    calls = []
+
+    def fake_heatmap(value_df, sig_df, title, tick_label_size, **kwargs):
+        calls.append({
+            "title": title,
+            "cmap": kwargs.get("cmap"),
+            "sig_df": sig_df,
+            "annotation_df": kwargs.get("annotation_df"),
+            "annotation_alpha": kwargs.get("annotation_alpha"),
+        })
+        return plt.figure()
+
+    monkeypatch.setattr(pipeline, "_corr_pipeline_heatmap", fake_heatmap)
+    pipeline.correlation(
+        batch, filtered_columns=cols, by="all",
+        tests=("pearsonr",), require="and", gate="fdr", alpha=0.05,
+        value_matrices="both", max_regressions=0,
+        run_label="value_matrix_colormaps", save=True,
+    )
+
+    coef_call = next(
+        call for call in calls
+        if "Correlation Matrix" in call["title"]
+        and "P-Value Matrix" not in call["title"]
+        and "FDR Q-Value Matrix" not in call["title"]
+    )
+    p_call = next(call for call in calls if "P-Value Matrix" in call["title"])
+    q_call = next(call for call in calls if "FDR Q-Value Matrix" in call["title"])
+    assert "(* p<0.05)" in coef_call["title"]
+    assert p_call["cmap"] == _CORR_PVALUE_CMAP
+    assert q_call["cmap"] == _CORR_QVALUE_CMAP
+    assert p_call["sig_df"] is None
+    assert q_call["sig_df"] is None
+    assert isinstance(coef_call["annotation_df"], pd.DataFrame)
+    assert isinstance(p_call["annotation_df"], pd.DataFrame)
+    assert isinstance(q_call["annotation_df"], pd.DataFrame)
+    pd.testing.assert_frame_equal(coef_call["annotation_df"], p_call["annotation_df"])
+    assert not coef_call["annotation_df"].equals(q_call["annotation_df"])
+    assert coef_call["annotation_alpha"] == pytest.approx(0.05)
+    assert p_call["annotation_alpha"] == pytest.approx(0.05)
+    assert q_call["annotation_alpha"] == pytest.approx(0.05)
+
+
+def test_difference_value_matrix_colormaps_are_swapped():
+    matrix = pd.DataFrame([[0.005]], index=["x"], columns=["y"])
+
+    pfig = _corr_difference_matrix_fig(
+        matrix, "difference p", 12, kind="p", alpha=0.05,
+    )
+    qfig = _corr_difference_matrix_fig(
+        matrix, "difference q", 12, kind="q", alpha=0.05,
+    )
+    try:
+        assert pfig.axes[0].collections[0].cmap.name == _CORR_PVALUE_CMAP
+        assert qfig.axes[0].collections[0].cmap.name == _CORR_QVALUE_CMAP
+    finally:
+        plt.close(pfig)
+        plt.close(qfig)
+
+
 def test_slug_is_deterministic_and_config_sensitive():
     args = (["a", "b", "c"], [], ["pearsonr", "spearmanr"], "and", "fdr",
             0.05, "all", None, None, None)
@@ -282,6 +393,30 @@ def _human_batch(tmp_path):
     return batch
 
 
+def test_pipeline_default_value_matrix_heatmap_is_p_value(tmp_path):
+    batch = _human_batch(tmp_path)
+    cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
+
+    res = pipeline.correlation(
+        batch, filtered_columns=cols, by="all",
+        tests=("pearsonr",), require="and",
+        max_regressions=0, run_label="default_p_matrix", save=True,
+    )
+
+    assert res["gate"] == "p"
+    assert res["value_matrices"] == "p"
+    assert res["plot_pvalue_matrices"] is True
+    assert res["plot_qvalue_matrices"] is False
+
+    matrices = os.path.join(res["fig_dir"], "Matrices")
+    svgs = [f for f in os.listdir(matrices) if f.endswith(".svg")]
+    assert any("Pearson PValue Matrix" in f for f in svgs)
+    assert not any("Pearson FDR QValue Matrix" in f for f in svgs)
+
+    assert os.path.isfile(os.path.join(res["data_dir"], "pvalues_Pearson.csv"))
+    assert os.path.isfile(os.path.join(res["data_dir"], "qvalues_Pearson.csv"))
+
+
 def test_pipeline_end_to_end_outputs(tmp_path):
     batch = _human_batch(tmp_path)
     cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
@@ -292,7 +427,7 @@ def test_pipeline_end_to_end_outputs(tmp_path):
         tests=("pearsonr", "spearmanr", "kendalltau"),
         require="and", gate="fdr", alpha=0.05,
         regression_factor="Diagnosis", max_regressions=3,
-        run_label="e2e", save=True,
+        value_matrices="both", run_label="e2e", save=True,
     )
 
     assert res["run_label"] == "e2e"
@@ -352,7 +487,10 @@ def test_pipeline_can_skip_plotted_pq_matrices(tmp_path):
     assert os.path.isfile(os.path.join(res["data_dir"], "qvalues_Pearson.csv"))
 
 
-def test_pipeline_specificity_queue_writes_independent_runs(tmp_path):
+def test_pipeline_specificity_queue_merges_into_one_folder(tmp_path):
+    # A specificity queue now writes every condition into ONE shared run folder,
+    # distinguished by a concise specificity tag in each filename, with one
+    # combined manifest + montage (mirrors plot_mean_bars queue behaviour).
     batch = _human_batch(tmp_path)
     cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
 
@@ -369,18 +507,63 @@ def test_pipeline_specificity_queue_writes_independent_runs(tmp_path):
         save=True,
     )
 
-    assert res["queued"] is True
+    # Not a queue *parent* any more: one normal run with a conditions ledger.
+    assert res.get("queued") is not True
     assert res["pipeline"] == "correlation"
-    assert set(res["results"]) == {("Diagnosis", "AD"), ("Diagnosis", "MCI")}
-    assert [run["run_label"] for run in res["runs"]] == [
-        "diag_queue_Diagnosis_AD",
-        "diag_queue_Diagnosis_MCI",
-    ]
-    for spec, child in res["results"].items():
-        assert child["specificity"] == str(spec)
-        assert os.path.isfile(os.path.join(child["data_dir"], "manifest.json"))
-        assert os.path.basename(child["data_dir"]) == child["run_label"]
-        assert child["run_label"].endswith("_" + spec[1])
+    assert os.path.basename(res["data_dir"]) == "diag_queue"
+    assert os.path.basename(res["fig_dir"]) == "diag_queue"
+    assert os.path.isfile(os.path.join(res["data_dir"], "manifest.json"))
+    assert {tuple(c["specificity"]) for c in res["conditions"]} == {
+        ("Diagnosis", "AD"), ("Diagnosis", "MCI")}
+    assert {c["spec_tag"] for c in res["conditions"]} == {
+        "Diagnosis.AD", "Diagnosis.MCI"}
+
+    matrices = os.path.join(res["fig_dir"], "Matrices")
+    svgs = set(os.listdir(matrices))
+    # Both conditions' coefficient matrices live side-by-side in one folder.
+    assert "Pearson Correlation Matrix_Diagnosis.AD.svg" in svgs
+    assert "Pearson Correlation Matrix_Diagnosis.MCI.svg" in svgs
+    # And both conditions' tables sit flat in one data folder.
+    data_files = set(os.listdir(res["data_dir"]))
+    assert "pairwise_correlations_Diagnosis.AD.csv" in data_files
+    assert "pairwise_correlations_Diagnosis.MCI.csv" in data_files
+    # One combined overview montage spans the whole queue.
+    assert res.get("montage") and os.path.isfile(res["montage"])
+
+    # The combined manifest reports queue-level totals, not first-condition values.
+    assert res["n_conditions"] == 2
+    n_per_cond = [c["n_selected"] for c in res["conditions"]]
+    assert res["n_selected"] == sum(n_per_cond)
+
+
+def test_pipeline_auto_named_queues_differ_by_full_queue(tmp_path):
+    # Two auto-named (run_label=None) queues that share the FIRST condition but
+    # differ later must resolve to different folders (slug covers the whole queue),
+    # otherwise the second would silently overwrite the first.
+    batch = _human_batch(tmp_path)
+    cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
+    common = dict(filtered_columns=cols, tests=("pearsonr",), require="or",
+                  gate="p", min_n=3, max_regressions=0, save=True)
+
+    a = pipeline.correlation(
+        batch, specificity=[("Diagnosis", "AD"), ("Diagnosis", "MCI")], **common)
+    b = pipeline.correlation(
+        batch, specificity=[("Diagnosis", "AD"), ("Diagnosis", "Control")], **common)
+    assert a["run_label"] != b["run_label"]
+    assert a["fig_dir"] != b["fig_dir"]
+
+
+def test_pipeline_queue_rejects_colliding_specificity_tags(tmp_path):
+    # Two conditions whose sanitised tags collide (differ only by a char strip_name
+    # deletes) would silently overwrite each other in the shared folder -> error.
+    batch = _human_batch(tmp_path)
+    cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
+    with pytest.raises(ValueError, match="colliding filename tag"):
+        pipeline.correlation(
+            batch, filtered_columns=cols,
+            specificity=[("Diagnosis", "A-D"), ("Diagnosis", "AD")],
+            tests=("pearsonr",), require="or", gate="p", min_n=3,
+            max_regressions=0, run_label="collide", save=True)
 
 
 def test_pipeline_save_false_does_not_clear_existing_run(tmp_path):
@@ -436,12 +619,16 @@ def test_plot_matrix_differences_outputs_and_values(tmp_path):
     assert res["comparisons"][0]["right_group"] == "MCI"
     assert os.path.isfile(os.path.join(res["data_dir"], "manifest.json"))
 
-    comp_dirs = [
-        root for root, _dirs, files in os.walk(res["data_dir"])
-        if "signed_delta_Pearson.csv" in files
+    # Flat output: the per-comparison CSV carries the comparison in its filename
+    # (e.g. signed_delta_Pearson_AD vs MCI.csv), no per-comparison subfolder.
+    signed_files = [
+        os.path.join(root, f)
+        for root, _dirs, files in os.walk(res["data_dir"])
+        for f in files
+        if f.startswith("signed_delta_Pearson") and f.endswith(".csv")
     ]
-    assert comp_dirs, "expected per-comparison difference CSVs"
-    signed = pd.read_csv(os.path.join(comp_dirs[0], "signed_delta_Pearson.csv"), index_col=0)
+    assert signed_files, "expected per-comparison difference CSVs"
+    signed = pd.read_csv(signed_files[0], index_col=0)
 
     summary = batch.summary
     ad = summary[summary["Diagnosis"] == "AD"][["Ma", "Mb"]].corr(method="pearson").loc["Ma", "Mb"]
@@ -465,9 +652,11 @@ def test_plot_matrix_differences_outputs_and_values(tmp_path):
     assert any("Pearson Absolute Difference Matrix" in f for f in matrix_svgs)
     assert any("Pearson Difference PValue Matrix" in f for f in matrix_svgs)
     assert not any("Spearman Difference PValue Matrix" in f for f in matrix_svgs)
-    assert not os.path.exists(os.path.join(comp_dirs[0], "pvalues_difference_Spearman.csv"))
-    assert not os.path.exists(os.path.join(comp_dirs[0], "qvalues_difference_Spearman.csv"))
-    assert not os.path.exists(os.path.join(comp_dirs[0], "gate_difference_Spearman.csv"))
+    # Non-inferential (Spearman) difference p/q/gate tables are not written.
+    data_files = [f for _root, _dirs, files in os.walk(res["data_dir"]) for f in files]
+    assert not any(f.startswith("pvalues_difference_Spearman") for f in data_files)
+    assert not any(f.startswith("qvalues_difference_Spearman") for f in data_files)
+    assert not any(f.startswith("gate_difference_Spearman") for f in data_files)
 
 
 def test_pipeline_writes_difference_matrices(tmp_path):
@@ -496,12 +685,10 @@ def test_pipeline_writes_difference_matrices(tmp_path):
 
     diff_data = os.path.join(res["data_dir"], "Matrix Differences")
     diff_fig = os.path.join(res["fig_dir"], "Matrix Differences")
-    assert os.path.isfile(os.path.join(diff_data, "matrix_differences.csv"))
-    assert any(
-        f.endswith(".svg") and "Signed Difference Matrix" in f
-        for _root, _dirs, files in os.walk(diff_fig)
-        for f in files
-    )
+    # Flat: combined table + comparison-tagged figures live directly in the folder.
+    assert os.path.isfile(os.path.join(diff_data, "matrix_differences_all.csv"))
+    diff_svgs = [f for f in os.listdir(diff_fig) if f.endswith(".svg")]
+    assert any("Signed Difference Matrix" in f for f in diff_svgs)
 
 
 def test_pipeline_auto_naming_and_versioning(tmp_path):

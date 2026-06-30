@@ -1,8 +1,7 @@
 """Tests for the data_overview pipeline (descriptive / QC overview of a batch)."""
 
-from types import SimpleNamespace
-import glob
 import os
+from types import SimpleNamespace
 
 import matplotlib
 matplotlib.use("Agg")
@@ -86,9 +85,40 @@ def test_data_overview_classifies_columns_and_counts_sentinel_vs_nan(tmp_path):
     for fname in ("manifest.json", "column_inventory.csv", "group_counts.csv",
                   "descriptive_stats.csv", "normality.csv", "outliers.csv",
                   "outlier_animals.csv", "covariation_pairs.csv",
-                  "covariation_matrix.csv"):
+                  "covariation_matrix.csv", "condition_distribution_stats.csv",
+                  "condition_fingerprint.csv", "condition_variability.csv",
+                  "effect_sizes.csv"):
         assert os.path.isfile(os.path.join(data_dir, fname)), fname
-    assert glob.glob(os.path.join(res["fig_dir"], "*.svg"))
+    for fname in (
+        "Availability by Condition.svg",
+        "Condition Distribution Z Scores.svg",
+        "Condition Distributions.svg",
+        "Condition Fingerprint.svg",
+        "Condition Variability.svg",
+        "Covariation Matrix.svg",
+        "Covariation Pairs.svg",
+        "Descriptive Summary.svg",
+        "Effect Size Forest.svg",
+        "Group Counts.svg",
+        "Metric Distributions.svg",
+        "Missingness Map.svg",
+        "Normality Summary.svg",
+        "Outlier Summary.svg",
+    ):
+        assert os.path.isfile(os.path.join(res["fig_dir"], fname)), fname
+
+    assert res["condition_distribution_groups"] == ["WT", "KO"]
+    cds = res["condition_distributions"]
+    assert set(cds["group"]) == {"WT", "KO"}
+    assert {"A", "B", "C"}.issubset(set(cds["column"]))
+    wt_a = cds[(cds["group"] == "WT") & (cds["column"] == "A")].iloc[0]
+    assert int(wt_a["n"]) == 12
+    assert not res["condition_fingerprint"].empty
+    assert not res["condition_variability"].empty
+    effects = res["effect_sizes"]
+    assert set(effects["control"]) == {"WT"}
+    assert set(effects["group"]) == {"KO"}
+    assert {"A", "B", "C"}.issubset(set(effects["column"]))
 
 
 def test_data_overview_flags_planted_outlier_animal(tmp_path):
@@ -101,8 +131,24 @@ def test_data_overview_flags_planted_outlier_animal(tmp_path):
     flagged = res["outliers"]
     s05_C = flagged[(flagged["AnimalName"] == "S05") & (flagged["column"] == "C")]
     assert not s05_C.empty
+    assert bool(s05_C.iloc[0]["rout_outlier"])
+    assert not bool(s05_C.iloc[0]["iqr_outlier"])
+    assert not bool(s05_C.iloc[0]["mad_outlier"])
+
+
+def test_data_overview_can_use_legacy_iqr_mad_screen(tmp_path):
+    exp = _overview_dataset(tmp_path)
+
+    res = pipeline.data_overview(
+        exp, outlier_methods=("iqr", "mad"), run_label="overview_iqr_mad",
+        save=False)
+
+    flagged = res["outliers"]
+    s05_C = flagged[(flagged["AnimalName"] == "S05") & (flagged["column"] == "C")]
+    assert not s05_C.empty
     assert bool(s05_C.iloc[0]["iqr_outlier"])
     assert bool(s05_C.iloc[0]["mad_outlier"])
+    assert not bool(s05_C.iloc[0]["rout_outlier"])
 
 
 def test_data_overview_detects_covarying_pair(tmp_path):
@@ -141,7 +187,30 @@ def test_data_overview_panels_by_condition(tmp_path):
     assert set(s05["group"]) == {"WT"}
 
 
-def test_data_overview_specificity_queue_writes_independent_runs(tmp_path):
+def test_data_overview_condition_distributions_can_group_by_factor(tmp_path):
+    exp = _overview_dataset(tmp_path)
+
+    res = pipeline.data_overview(
+        exp,
+        factor="Diagnosis",
+        effect_control="Control",
+        run_label="overview_diag_distributions",
+        save=False,
+    )
+
+    assert res["condition_distribution_groups"] == ["Control", "AD"]
+    dist = res["condition_distributions"]
+    assert set(dist["group"]) == {"Control", "AD"}
+    assert int(dist[(dist["group"] == "Control") & (dist["column"] == "A")]["n"].iloc[0]) == 12
+    effects = res["effect_sizes"]
+    assert set(effects["control"]) == {"Control"}
+    assert set(effects["group"]) == {"AD"}
+    assert effects["hedges_g"].notna().any()
+
+
+def test_data_overview_specificity_queue_merges_into_one_folder(tmp_path):
+    # A specificity queue writes every condition into ONE shared run folder, each
+    # condition's tables/figures distinguished by a concise specificity tag.
     exp = _overview_dataset(tmp_path)
 
     res = pipeline.data_overview(
@@ -151,17 +220,20 @@ def test_data_overview_specificity_queue_writes_independent_runs(tmp_path):
         save=True,
     )
 
-    assert res["queued"] is True
+    assert res.get("queued") is not True
     assert res["pipeline"] == "data_overview"
-    assert set(res["results"]) == {("Diagnosis", "Control"), ("Diagnosis", "AD")}
-    assert [run["run_label"] for run in res["runs"]] == [
-        "overview_diag_queue_Diagnosis_Control",
-        "overview_diag_queue_Diagnosis_AD",
-    ]
-    for spec, child in res["results"].items():
-        assert child["specificity"] == str(spec)
-        assert child["n_rows"] == 12
-        assert os.path.isfile(os.path.join(child["data_dir"], "manifest.json"))
+    assert os.path.basename(res["data_dir"]) == "overview_diag_queue"
+    assert os.path.isfile(os.path.join(res["data_dir"], "manifest.json"))
+    assert {tuple(c["specificity"]) for c in res["conditions"]} == {
+        ("Diagnosis", "Control"), ("Diagnosis", "AD")}
+    assert all(c["n_rows"] == 12 for c in res["conditions"])
+
+    # Both conditions' inventories sit flat in one data folder.
+    data_files = set(os.listdir(res["data_dir"]))
+    assert "column_inventory_Diagnosis.Control.csv" in data_files
+    assert "column_inventory_Diagnosis.AD.csv" in data_files
+    # One combined overview montage spans the whole queue.
+    assert res.get("montage") and os.path.isfile(res["montage"])
 
 
 def test_data_overview_section_toggles_skip_work(tmp_path):
@@ -173,6 +245,8 @@ def test_data_overview_section_toggles_skip_work(tmp_path):
         include_normality=False,
         include_outliers=False,
         include_covariation=False,
+        include_condition_distributions=False,
+        include_effect_sizes=False,
         run_label="overview_inventory_only",
         save=True,
     )
@@ -181,10 +255,34 @@ def test_data_overview_section_toggles_skip_work(tmp_path):
     assert res["normality"].empty
     assert res["outliers"].empty
     assert res["covariation"].empty
+    assert res["condition_distributions"].empty
+    assert res["effect_sizes"].empty
     assert not res["column_inventory"].empty
     data_dir = res["data_dir"]
     assert os.path.isfile(os.path.join(data_dir, "column_inventory.csv"))
     assert not os.path.isfile(os.path.join(data_dir, "descriptive_stats.csv"))
+    assert not os.path.isfile(os.path.join(data_dir, "condition_distribution_stats.csv"))
+    assert not os.path.isfile(os.path.join(data_dir, "effect_sizes.csv"))
+    for fname in (
+        "Covariation Matrix.svg",
+        "Covariation Pairs.svg",
+        "Condition Distribution Z Scores.svg",
+        "Condition Distributions.svg",
+        "Condition Fingerprint.svg",
+        "Condition Variability.svg",
+        "Descriptive Summary.svg",
+        "Effect Size Forest.svg",
+        "Metric Distributions.svg",
+        "Normality Summary.svg",
+        "Outlier Summary.svg",
+    ):
+        assert not os.path.isfile(os.path.join(res["fig_dir"], fname)), fname
+    for fname in (
+        "Availability by Condition.svg",
+        "Group Counts.svg",
+        "Missingness Map.svg",
+    ):
+        assert os.path.isfile(os.path.join(res["fig_dir"], fname)), fname
 
 
 def test_data_overview_role_classification_bool_vs_int(tmp_path):

@@ -142,14 +142,32 @@ def run_dirs(experiment, pipeline_name, run_label, if_exists, *, clear_overwrite
         n += 1
 
 
+def _canon(value):
+    """Order-stable, JSON-serialisable form of a slug payload value.
+
+    Sorts dict keys and set members so equivalent configs (e.g. a
+    ``reference_levels`` dict or a ``categorical`` set in different orders) hash
+    identically. Lists keep their order (it may be meaningful). Leaf scalars are
+    returned as-is; anything else falls back to ``str`` at ``json.dumps`` time.
+    """
+    if isinstance(value, dict):
+        return {str(k): _canon(value[k]) for k in sorted(value, key=str)}
+    if isinstance(value, (set, frozenset)):
+        return sorted((_canon(v) for v in value), key=str)
+    if isinstance(value, (list, tuple)):
+        return [_canon(v) for v in value]
+    return value
+
+
 def slug(prefix, payload):
     """Deterministic ``"<prefix>_<6-hex>"`` run name from a JSON-stable payload.
 
     Identical settings hash to the same folder (so a repeat run reuses it); a
-    different configuration hashes elsewhere and never collides.
+    different configuration hashes elsewhere and never collides. The payload is
+    canonicalised first so dict/set ordering never changes the hash.
     """
     digest = hashlib.sha1(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(_canon(payload), sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()[:6]
     return f"{prefix}_{digest}"
 

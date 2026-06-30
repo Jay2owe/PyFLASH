@@ -42,9 +42,13 @@ PLOT_REGISTRY = {
     'power_curve': 'plot_power_curve',
     'marker_pca': 'plot_marker_pca',
     'timecourse': 'plot_timecourse',
+    'superplot': 'plot_superplot',
+    'effect_forest': 'plot_effect_forest',
+    'group_matrix': 'plot_group_matrix',
     'correlation_pipeline': 'PyFLASH.pipeline.correlation',
     'adjusted_correlation_pipeline': 'PyFLASH.pipeline.adjusted_correlation',
     'data_overview_pipeline': 'PyFLASH.pipeline.data_overview',
+    'group_comparison_pipeline': 'PyFLASH.pipeline.group_comparison',
 }
 
 # ── Describe-layer coverage (the structured-results / "describe" feature) ────
@@ -73,11 +77,15 @@ DESCRIBE_COVERED = {
     'regressions',
     'correlation_pipeline',
     'adjusted_correlation_pipeline',
+    'group_comparison_pipeline',
 }
 DESCRIBE_EXEMPT = {
     'condition_key', 'images', 'representative_images', 'locations',
     'coloc_upset', 'coloc_sankey', 'pie_charts', 'combo_pies',
     'histograms', 'ridgeline', 'ecdf', 'radar', 'power_curve',
+    # Descriptive group-comparison views (raw points / effect sizes, no test).
+    # The inferential capture lives in the group_comparison pipeline (COVERED).
+    'superplot', 'effect_forest', 'group_matrix',
 }
 DESCRIBE_UNREVIEWED = {
     'matrices', 'rect_matrices', 'matrix_differences',
