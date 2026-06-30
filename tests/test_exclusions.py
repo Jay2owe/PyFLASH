@@ -9,7 +9,12 @@ import numpy as np
 import pandas as pd
 
 from PyFLASH import exclusions, pipeline
-from PyFLASH.stats_extra import flag_outliers, iqr_bounds, mad_modified_z
+from PyFLASH.stats_extra import (
+    flag_outliers,
+    iqr_bounds,
+    mad_modified_z,
+    rout_outlier_stats,
+)
 from PyFLASH.utils import (
     EXCLUDED_SENTINEL_PREFIX, EXCLUDED_OUTLIER_PREFIX, EXCLUDED_MANUAL_PREFIX,
     excluded_outlier_token, excluded_manual_token,
@@ -49,6 +54,24 @@ def test_flag_outliers_finds_extreme_value():
     assert np.isfinite(lower) and np.isfinite(upper)
     z = mad_modified_z([1, 2, 3, 4, 5, 100])
     assert abs(z[-1]) > 3.5
+
+
+def test_flag_outliers_supports_rout_method():
+    df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0, 100.0]})
+    flagged = flag_outliers(df, ["x"], methods=("rout",), rout_q=1.0)
+
+    assert set(flagged["row"]) == {5}
+    assert bool(flagged.iloc[0]["rout_outlier"])
+    assert not bool(flagged.iloc[0]["iqr_outlier"])
+    assert not bool(flagged.iloc[0]["mad_outlier"])
+
+    flags, pvals, thresholds, _tvals, center, rsdr = rout_outlier_stats(
+        [1, 2, 3, 4, 5, 100], q=1.0)
+    assert bool(flags[-1])
+    assert np.isfinite(pvals[-1])
+    assert np.isfinite(thresholds[-1])
+    assert np.isfinite(center)
+    assert np.isfinite(rsdr)
 
 
 def test_flag_outliers_respects_group_labels():
@@ -262,3 +285,153 @@ def test_adjusted_correlation_writes_runs_index(tmp_path):
     assert os.path.isfile(index_path)
     idx = pd.read_csv(index_path)
     assert "adj_idx" in set(idx["run_label"].astype(str))
+
+
+# ── excluded values flow correctly into adjusted_correlation ──────────────────
+def test_excluded_endpoint_stays_numeric_in_adjusted_correlation(tmp_path):
+    rng = np.random.default_rng(2)
+    n = 30
+    age = np.linspace(50, 85, n)
+    summary = pd.DataFrame({
+        "AnimalName": [f"S{i:02d}" for i in range(n)],
+        "A": 0.8 * age + rng.normal(0, 1.0, n),
+        "B": -0.7 * age + rng.normal(0, 1.0, n),
+        "C": rng.normal(0, 1, n),
+    })
+    fig_path = str(tmp_path / "Python Figures")
+    data_path = str(tmp_path / "Data and Stats")
+    os.makedirs(fig_path, exist_ok=True)
+    os.makedirs(data_path, exist_ok=True)
+    exp = SimpleNamespace(summary=summary, summaries={"SCN": summary},
+                          fig_path=fig_path, data_path=data_path, condition_list=[])
+
+    # Excluding one A value makes A object dtype (it now holds a token).
+    cleaned = exclusions.apply_exclusions(exp, cells=[("S05", "A")])
+    assert cleaned.summaries["SCN"]["A"].dtype == object
+
+    res = pipeline.adjusted_correlation(
+        cleaned, endpoints=["A", "B", "C"], tests=("pearsonr",), gate="p",
+        categorical="auto", max_adjusted_regressions=0, save=False, verbose=False)
+    # A must stay a numeric endpoint, NOT be auto-classified categorical.
+    assert "A" not in res["categorical"]
+    assert "A" in res["final_endpoints"]
+
+
+# ── mark(fill=np.nan) realises NaN on apply ──────────────────────────────────
+def test_mark_with_nan_fill_then_apply_realises_nan(tmp_path):
+    exp = _exp(tmp_path)
+
+    marked = exclusions.mark_outliers(exp, methods=("mad",), scope="cell",
+                                      fill=np.nan, verbose=False)
+    assert marked.summaries["SCN"].loc[4, "A"] == 500.0  # mark changes nothing
+
+    applied = exclusions.apply_exclusions(marked)
+    val = applied.summaries["SCN"].loc[4, "A"]
+    assert isinstance(val, float) and np.isnan(val)  # realised as NaN, not a token
+
+
+# ── missingness map distinguishes excluded cells ─────────────────────────────
+def test_missingness_codes_mark_excluded(tmp_path):
+    from PyFLASH.pipeline import _ovw_missingness_codes
+
+    exp = _exp(tmp_path)
+    cleaned = exclusions.exclude_outliers(exp, methods=("mad",), scope="cell",
+                                          verbose=False)
+    cdf = cleaned.summaries["SCN"]
+    codes = _ovw_missingness_codes(cdf, ["A", "B", "C"])
+
+    assert codes[4, 0] == 3          # S04/A excluded -> code 3
+    assert codes[0, 2] == 0          # an untouched cell -> present
+    assert (codes == 3).any()
+
+
+# ── cleaned copy keeps a consistent plain `.summary` attribute ────────────────
+def test_cleaned_copy_summary_attribute_is_consistent(tmp_path):
+    exp = _exp(tmp_path)
+
+    cleaned = exclusions.exclude_outliers(exp, methods=("mad",), scope="cell",
+                                          verbose=False)
+    # A downstream reading `.summary` directly sees the cleaned table.
+    assert cleaned.summary is cleaned.summaries["SCN"]
+    assert str(cleaned.summary.loc[4, "A"]).startswith(EXCLUDED_SENTINEL_PREFIX)
+    assert exp.summary.loc[4, "A"] == 500.0  # original untouched
+
+
+# ── numeric column with an excluded token AND a real NaN stays numeric ────────
+def test_excluded_numeric_with_real_nan_not_categorical(tmp_path):
+    rng = np.random.default_rng(4)
+    n = 30
+    age = np.linspace(50, 85, n)
+    a = 0.8 * age + rng.normal(0, 1.0, n)
+    a[3] = np.nan  # a genuine missing value, in addition to the excluded cell
+    summary = pd.DataFrame({
+        "AnimalName": [f"S{i:02d}" for i in range(n)],
+        "A": a,
+        "B": -0.7 * age + rng.normal(0, 1.0, n),
+        "C": rng.normal(0, 1, n),
+        "Sex": np.where(np.arange(n) % 2 == 0, "F", "M"),
+    })
+    fig_path = str(tmp_path / "Python Figures")
+    data_path = str(tmp_path / "Data and Stats")
+    os.makedirs(fig_path, exist_ok=True)
+    os.makedirs(data_path, exist_ok=True)
+    exp = SimpleNamespace(summary=summary, summaries={"SCN": summary},
+                          fig_path=fig_path, data_path=data_path, condition_list=[])
+
+    cleaned = exclusions.apply_exclusions(exp, cells=[("S05", "A")])
+    res = pipeline.adjusted_correlation(
+        cleaned, endpoints=["A", "B", "C"], covariates=["Sex"],
+        categorical="auto", reference_levels={"Sex": "F"}, tests=("pearsonr",),
+        gate="p", max_adjusted_regressions=0, save=False, verbose=False)
+
+    assert "A" not in res["categorical"]   # numeric despite token + real NaN
+    assert "Sex" in res["categorical"]      # genuine categorical still categorical
+
+
+def test_adjusted_slug_stable_across_equivalent_settings():
+    from PyFLASH.pipeline import _adj_corr_slug
+
+    s1 = _adj_corr_slug(
+        ["A", "B"], ["Sex", "Geno"], [], ("pearsonr",), "fdr", 0.05, "all", None,
+        settings={"reference_levels": {"Sex": "F", "Geno": "WT"},
+                  "categorical": {"Sex", "Geno"}})
+    s2 = _adj_corr_slug(
+        ["A", "B"], ["Sex", "Geno"], [], ("pearsonr",), "fdr", 0.05, "all", None,
+        settings={"reference_levels": {"Geno": "WT", "Sex": "F"},
+                  "categorical": {"Geno", "Sex"}})
+    assert s1 == s2  # dict/set ordering must not change the slug
+    s3 = _adj_corr_slug(
+        ["A", "B"], ["Sex", "Geno"], [], ("pearsonr",), "fdr", 0.05, "all", None,
+        settings={"reference_levels": {"Sex": "M"}, "categorical": {"Sex"}})
+    assert s3 != s1  # a materially different config still differs
+    # max_adjusted_regressions changes which regression rows are written.
+    s4 = _adj_corr_slug(
+        ["A", "B"], [], [], ("pearsonr",), "fdr", 0.05, "all", None,
+        settings={"max_adjusted_regressions": 4})
+    s5 = _adj_corr_slug(
+        ["A", "B"], [], [], ("pearsonr",), "fdr", 0.05, "all", None,
+        settings={"max_adjusted_regressions": 8})
+    assert s4 != s5
+
+
+def test_correlation_slug_encodes_min_n():
+    from PyFLASH.plotting import _corr_pipeline_slug
+
+    base = dict(columns=["A", "B"], against_columns=[], methods=["pearsonr"],
+                require="and", gate="fdr", alpha=0.05, by="all", factor=None,
+                specificity=None, roi="SCN")
+    s_a = _corr_pipeline_slug(**base, settings={"min_n": 3})
+    s_b = _corr_pipeline_slug(**base, settings={"min_n": 8})
+    assert s_a != s_b  # min_n changes which pairs are included -> different run
+    # Equivalent settings (different dict order) still collapse.
+    s_c = _corr_pipeline_slug(**base, settings={"min_n": 3, "normalize_x": False})
+    s_d = _corr_pipeline_slug(**base, settings={"normalize_x": False, "min_n": 3})
+    assert s_c == s_d
+
+
+def test_pie_valid_row_mask_drops_excluded(tmp_path):
+    from PyFLASH.plotting import _pie_valid_row_mask
+
+    s = pd.Series(["WT", "KO", f"{EXCLUDED_MANUAL_PREFIX}:damaged", "KO"])
+    mask = _pie_valid_row_mask(s)
+    assert list(mask) == [True, True, False, True]  # excluded row not counted

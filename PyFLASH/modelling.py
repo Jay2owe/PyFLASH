@@ -61,7 +61,9 @@ def _sentinel_like_mask(series, sentinel=NOT_INCLUDED_SENTINEL) -> pd.Series:
     never-measured cells.
     """
     s = pd.Series(series)
-    pat = r"(?:NOT_INCLUDED|NOT_INLCUDED|EXCLUDED_)"
+    # EXCLUDED_ is anchored to the string start (it is always a leading token),
+    # so a legitimate value merely *containing* the substring is not dropped.
+    pat = r"(?:NOT_INCLUDED|NOT_INLCUDED|^EXCLUDED_)"
     try:
         base = s.astype(str).str.contains(pat, case=False, na=False, regex=True)
     except Exception:

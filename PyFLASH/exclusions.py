@@ -70,9 +70,16 @@ _LEDGER_COLS = [
 
 
 def _token_for(rec, fill):
-    """The sentinel to write for a record: explicit ``fill``, else kind-coded."""
+    """The sentinel to write for a record.
+
+    Precedence: an explicit ``fill`` argument, then a ``fill`` recorded on the
+    record (when realising a previously-marked ledger, so ``mark(fill=np.nan)``
+    stays NaN on apply), then the kind-coded default sentinel.
+    """
     if fill is not None:
         return fill
+    if "fill" in rec:
+        return rec["fill"]
     if rec.get("kind") == "manual":
         return excluded_manual_token(rec.get("reason"))
     return excluded_outlier_token(rec.get("reason"))
@@ -101,6 +108,19 @@ def _clean_copy(experiment):
     summaries = getattr(experiment, "summaries", None)
     if isinstance(summaries, dict):
         exp.summaries = {k: v.copy() for k, v in summaries.items()}
+        # Keep a plain `.summary` attribute consistent with the cleaned dict (so a
+        # downstream that reads `.summary` directly never sees the original). On a
+        # real Experiment `.summary` is a property over `.summaries`, so this just
+        # re-sets the same frame harmlessly; on a plain-attr object it rebinds it.
+        if hasattr(experiment, "summary"):
+            scn = exp.summaries.get("SCN")
+            if scn is None and exp.summaries:
+                scn = next(iter(exp.summaries.values()))
+            if scn is not None:
+                try:
+                    exp.summary = scn
+                except Exception:
+                    pass
     else:
         summary = getattr(experiment, "summary", None)
         if isinstance(summary, pd.DataFrame):
@@ -140,6 +160,8 @@ def _cells_from_outliers(outliers, scope, columns, animals_table, animal_min_fla
             bits.append("iqr")
         if bool(row.get("mad_outlier", False)):
             bits.append("mad")
+        if bool(row.get("rout_outlier", False)):
+            bits.append("rout")
         return "+".join(bits) or "outlier"
 
     if scope == "cell":
@@ -320,8 +342,9 @@ def apply_exclusions(experiment, *, cells=None, animals=None, columns=None,
         prior = getattr(experiment, "exclusions", None)
         records = []
         if isinstance(prior, pd.DataFrame) and not prior.empty:
+            has_fill = "fill" in prior.columns
             for _, row in prior.iterrows():
-                records.append({
+                rec = {
                     "AnimalName": str(row["AnimalName"]),
                     "column": str(row["column"]),
                     "group": row.get("group", ""),
@@ -329,7 +352,11 @@ def apply_exclusions(experiment, *, cells=None, animals=None, columns=None,
                     "kind": row.get("kind", "manual"),
                     "reason": row.get("reason", ""),
                     "scope": row.get("scope", ""),
-                })
+                }
+                if has_fill:
+                    # Preserve the originally-marked fill (e.g. np.nan) on apply.
+                    rec["fill"] = row["fill"]
+                records.append(rec)
         ledger = _write_cells(df, records, fill)
         _attach_ledger(exp, ledger, None)
         _set_summary_and_save(exp, ledger, base, action="exclude", scope="ledger",
@@ -342,7 +369,7 @@ def apply_exclusions(experiment, *, cells=None, animals=None, columns=None,
 
 def _detect_outliers(experiment, *, filtered_columns, column_strings, regex_string,
                      exclude, by, factor, specificity, roi, methods, iqr_k,
-                     mad_threshold):
+                     mad_threshold, rout_q):
     """Reuse the data_overview detection path so flags match the QC report exactly."""
     from PyFLASH.pipeline import data_overview
 
@@ -355,6 +382,7 @@ def _detect_outliers(experiment, *, filtered_columns, column_strings, regex_stri
         include_descriptives=False, include_normality=False,
         include_covariation=False, include_outliers=True,
         outlier_methods=methods, iqr_k=iqr_k, mad_threshold=mad_threshold,
+        rout_q=rout_q,
         save=False, plot_missingness=False, plot_covariation=False, verbose=False,
     )
     return ov["outliers"], ov.get("outlier_animals"), ov.get("numeric_columns", [])
@@ -362,8 +390,8 @@ def _detect_outliers(experiment, *, filtered_columns, column_strings, regex_stri
 
 def _exclude_or_mark(experiment, *, apply, filtered_columns, column_strings,
                      regex_string, exclude, by, factor, specificity, scope,
-                     methods, iqr_k, mad_threshold, animal_min_flags, fill, roi,
-                     outliers, save, run_label, verbose):
+                     methods, iqr_k, mad_threshold, rout_q, animal_min_flags,
+                     fill, roi, outliers, save, run_label, verbose):
     base = _resolve_base(experiment, roi)
     outlier_animals = None
     numeric_cols = []
@@ -372,7 +400,8 @@ def _exclude_or_mark(experiment, *, apply, filtered_columns, column_strings,
             experiment, filtered_columns=filtered_columns,
             column_strings=column_strings, regex_string=regex_string,
             exclude=exclude, by=by, factor=factor, specificity=specificity,
-            roi=roi, methods=methods, iqr_k=iqr_k, mad_threshold=mad_threshold)
+            roi=roi, methods=methods, iqr_k=iqr_k,
+            mad_threshold=mad_threshold, rout_q=rout_q)
 
     base_df = _summary_for(experiment, base)
     metric_cols = numeric_cols or _metric_columns(base_df)
@@ -397,6 +426,7 @@ def _exclude_or_mark(experiment, *, apply, filtered_columns, column_strings,
         "action": "exclude" if apply else "mark",
         "scope": scope, "roi": str(base), "methods": [str(m).lower() for m in methods],
         "iqr_k": float(iqr_k), "mad_threshold": float(mad_threshold),
+        "rout_q": float(rout_q),
         "n_excluded_cells": n_cells, "n_animals_affected": n_animals,
     }
 
@@ -419,14 +449,15 @@ def _exclude_or_mark(experiment, *, apply, filtered_columns, column_strings,
 
 def exclude_outliers(experiment, *, filtered_columns=None, column_strings=None,
                      regex_string=None, exclude="", by="all", factor=None,
-                     specificity=None, scope="cell", methods=("iqr", "mad"),
-                     iqr_k=1.5, mad_threshold=3.5, animal_min_flags=2, fill=None,
-                     roi=None, outliers=None, save=False, run_label=None,
+                     specificity=None, scope="cell", methods=("rout",),
+                     iqr_k=1.5, mad_threshold=3.5, rout_q=1.0,
+                     animal_min_flags=2, fill=None, roi=None, outliers=None,
+                     save=False, run_label=None,
                      verbose=True):
     """Detect outliers and return a cleaned copy with them removed from analysis.
 
     Detection reuses the exact ``data_overview`` path (same column resolution,
-    ``by``/``factor``/``specificity`` paneling, and IQR/MAD rules), so what is
+    ``by``/``factor``/``specificity`` paneling, and outlier rules), so what is
     excluded matches the QC report. Pass an ``outliers`` table (e.g. the one
     ``data_overview`` returns) to skip re-detection.
 
@@ -440,16 +471,17 @@ def exclude_outliers(experiment, *, filtered_columns=None, column_strings=None,
         experiment, apply=True, filtered_columns=filtered_columns,
         column_strings=column_strings, regex_string=regex_string, exclude=exclude,
         by=by, factor=factor, specificity=specificity, scope=scope, methods=methods,
-        iqr_k=iqr_k, mad_threshold=mad_threshold, animal_min_flags=animal_min_flags,
-        fill=fill, roi=roi, outliers=outliers, save=save, run_label=run_label,
-        verbose=verbose)
+        iqr_k=iqr_k, mad_threshold=mad_threshold, rout_q=rout_q,
+        animal_min_flags=animal_min_flags, fill=fill, roi=roi,
+        outliers=outliers, save=save, run_label=run_label, verbose=verbose)
 
 
 def mark_outliers(experiment, *, filtered_columns=None, column_strings=None,
                   regex_string=None, exclude="", by="all", factor=None,
-                  specificity=None, scope="cell", methods=("iqr", "mad"),
-                  iqr_k=1.5, mad_threshold=3.5, animal_min_flags=2, fill=None,
-                  roi=None, outliers=None, save=False, run_label=None,
+                  specificity=None, scope="cell", methods=("rout",),
+                  iqr_k=1.5, mad_threshold=3.5, rout_q=1.0,
+                  animal_min_flags=2, fill=None, roi=None, outliers=None,
+                  save=False, run_label=None,
                   verbose=True):
     """Non-destructive twin of :func:`exclude_outliers`.
 
@@ -462,9 +494,9 @@ def mark_outliers(experiment, *, filtered_columns=None, column_strings=None,
         experiment, apply=False, filtered_columns=filtered_columns,
         column_strings=column_strings, regex_string=regex_string, exclude=exclude,
         by=by, factor=factor, specificity=specificity, scope=scope, methods=methods,
-        iqr_k=iqr_k, mad_threshold=mad_threshold, animal_min_flags=animal_min_flags,
-        fill=fill, roi=roi, outliers=outliers, save=save, run_label=run_label,
-        verbose=verbose)
+        iqr_k=iqr_k, mad_threshold=mad_threshold, rout_q=rout_q,
+        animal_min_flags=animal_min_flags, fill=fill, roi=roi,
+        outliers=outliers, save=save, run_label=run_label, verbose=verbose)
 
 
 def mark_exclusions(experiment, *, cells=None, animals=None, columns=None,

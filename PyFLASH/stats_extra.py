@@ -619,31 +619,124 @@ def mad_modified_z(values):
     return 0.6745 * (arr - med) / mad
 
 
-def flag_outliers(df, columns, *, group_labels=None, methods=("iqr", "mad"),
-                  iqr_k=1.5, mad_threshold=3.5, min_rows=4):
-    """Flag per-(group, column) outliers by IQR fence and/or modified-z (MAD).
+def _rout_robust_center_and_rsdr(arr, *, n_params=1):
+    """ROUT-style robust constant fit and robust SD of residuals."""
+    arr = np.asarray(arr, float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size <= int(n_params):
+        return float("nan"), float("nan")
+
+    center = float(np.median(arr))
+
+    def _rsdr(residuals):
+        finite = np.abs(np.asarray(residuals, float))
+        finite = finite[np.isfinite(finite)]
+        if finite.size <= int(n_params):
+            return float("nan")
+        p68 = float(np.percentile(finite, 68.27))
+        df = finite.size - int(n_params)
+        if df <= 0 or not np.isfinite(p68) or p68 <= 0:
+            return float("nan")
+        return float(p68 * finite.size / df)
+
+    rsdr = _rsdr(arr - center)
+    for _ in range(50):
+        if not np.isfinite(rsdr) or rsdr <= 0:
+            break
+        rr = (arr - center) / rsdr
+        weights = 1.0 / (1.0 + rr * rr)
+        total = float(np.sum(weights))
+        if not np.isfinite(total) or total <= 0:
+            break
+        new_center = float(np.sum(weights * arr) / total)
+        if abs(new_center - center) <= 1e-10 * max(1.0, abs(center)):
+            center = new_center
+            break
+        center = new_center
+        rsdr = _rsdr(arr - center)
+
+    return center, _rsdr(arr - center)
+
+
+def rout_outlier_stats(values, *, q=1.0, n_params=1, max_fraction=0.30):
+    """ROUT-style outlier flags for a one-column animal-summary vector.
+
+    ``q`` is the maximum desired false discovery rate in percent; GraphPad
+    Prism's recommended/default setting is 1%.
+    """
+    arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(float)
+    flags = np.zeros(arr.shape, dtype=bool)
+    pvals = np.full(arr.shape, np.nan)
+    thresholds = np.full(arr.shape, np.nan)
+    tvals = np.full(arr.shape, np.nan)
+
+    finite_mask = np.isfinite(arr)
+    finite = arr[finite_mask]
+    n = finite.size
+    if n < 3:
+        return flags, pvals, thresholds, tvals, float("nan"), float("nan")
+
+    center, rsdr = _rout_robust_center_and_rsdr(finite, n_params=n_params)
+    if not np.isfinite(rsdr) or rsdr <= 0:
+        return flags, pvals, thresholds, tvals, center, rsdr
+
+    df = max(int(n - n_params), 1)
+    q_fraction = max(float(q), 0.0) / 100.0
+    local_t = np.abs(finite - center) / rsdr
+    local_p = 2.0 * _sps.t.sf(local_t, df=df)
+    local_thresholds = np.full(n, np.nan)
+
+    order = np.argsort(local_p)
+    max_candidates = max(1, int(np.floor(float(max_fraction) * n)))
+    max_candidates = min(max_candidates, n)
+    cutoff_rank = 0
+    for rank, pos in enumerate(order[:max_candidates], start=1):
+        threshold = q_fraction * rank / n
+        local_thresholds[pos] = threshold
+        if local_p[pos] <= threshold:
+            cutoff_rank = rank
+
+    local_flags = np.zeros(n, dtype=bool)
+    if cutoff_rank:
+        local_flags[order[:cutoff_rank]] = True
+
+    finite_positions = np.flatnonzero(finite_mask)
+    flags[finite_positions] = local_flags
+    pvals[finite_positions] = local_p
+    thresholds[finite_positions] = local_thresholds
+    tvals[finite_positions] = local_t
+    return flags, pvals, thresholds, tvals, center, rsdr
+
+
+def flag_outliers(df, columns, *, group_labels=None, methods=("rout",),
+                  iqr_k=1.5, mad_threshold=3.5, rout_q=1.0, min_rows=4):
+    """Flag per-(group, column) outliers by IQR, modified-z (MAD), and/or ROUT.
 
     Operates on the *experimental-unit* rows of ``df`` — PyFLASH summaries are one
     row per animal, so flags are animal-level. ``group_labels`` is an optional
     mapping (df-index -> group label, e.g. a Series) so outliers are judged within
-    each group; ``None`` pools all rows. A (group, column) cell with fewer than
-    ``min_rows`` finite values is skipped (fences are meaningless on tiny n).
+    each group; ``None`` pools all rows. IQR/MAD use ``min_rows`` finite values;
+    ROUT can run with three finite values.
 
     Returns a tidy DataFrame, one row per flagged (group, column, df-index):
     ``group, column, row, value, iqr_outlier, mad_outlier, modified_z,
-    iqr_lower, iqr_upper`` (``row`` is the original df index label). Empty (with
-    those columns) when nothing is flagged.
+    iqr_lower, iqr_upper, rout_outlier, rout_p, rout_threshold, rout_t,
+    rout_center, rout_rsdr`` (``row`` is the original df index label). Empty
+    (with those columns) when nothing is flagged.
     """
     methods = [str(m).lower() for m in (methods or ())]
     use_iqr = "iqr" in methods
     use_mad = "mad" in methods
+    use_rout = "rout" in methods
     if group_labels is None:
         group_labels = pd.Series("all", index=df.index)
     else:
         group_labels = pd.Series(group_labels).reindex(df.index)
 
     out_cols = ["group", "column", "row", "value", "iqr_outlier",
-                "mad_outlier", "modified_z", "iqr_lower", "iqr_upper"]
+                "mad_outlier", "modified_z", "iqr_lower", "iqr_upper",
+                "rout_outlier", "rout_p", "rout_threshold", "rout_t",
+                "rout_center", "rout_rsdr"]
     rows = []
     for glabel in pd.unique(group_labels.dropna()):
         gidx = group_labels.index[group_labels == glabel]
@@ -651,25 +744,51 @@ def flag_outliers(df, columns, *, group_labels=None, methods=("iqr", "mad"),
             if col not in df.columns:
                 continue
             s = pd.to_numeric(df.loc[gidx, col], errors="coerce").dropna()
-            if len(s) < int(min_rows):
+            active_iqr = use_iqr and len(s) >= int(min_rows)
+            active_mad = use_mad and len(s) >= int(min_rows)
+            active_rout = use_rout and len(s) >= 3
+            if not (active_iqr or active_mad or active_rout):
                 continue
             arr = s.to_numpy(float)
-            lower, upper = iqr_bounds(arr, iqr_k) if use_iqr else (np.nan, np.nan)
+            lower, upper = iqr_bounds(arr, iqr_k) if active_iqr else (np.nan, np.nan)
             med = float(np.median(arr))
             mad = float(np.median(np.abs(arr - med)))
-            for idx, val in s.items():
+            if active_rout:
+                rout_flags, rout_p, rout_threshold, rout_t, rout_center, rout_rsdr = (
+                    rout_outlier_stats(arr, q=rout_q)
+                )
+            else:
+                rout_flags = np.zeros(arr.shape, dtype=bool)
+                rout_p = np.full(arr.shape, np.nan)
+                rout_threshold = np.full(arr.shape, np.nan)
+                rout_t = np.full(arr.shape, np.nan)
+                rout_center = np.nan
+                rout_rsdr = np.nan
+            for pos, (idx, val) in enumerate(s.items()):
                 v = float(val)
-                flag_iqr = bool(use_iqr and np.isfinite(lower)
+                flag_iqr = bool(active_iqr and np.isfinite(lower)
                                 and (v < lower or v > upper))
-                mz = (0.6745 * (v - med) / mad) if (use_mad and mad > 0) else np.nan
-                flag_mad = bool(use_mad and np.isfinite(mz)
+                mz = (0.6745 * (v - med) / mad) if (active_mad and mad > 0) else np.nan
+                flag_mad = bool(active_mad and np.isfinite(mz)
                                 and abs(mz) > float(mad_threshold))
-                if not (flag_iqr or flag_mad):
+                flag_rout = bool(rout_flags[pos])
+                if not (flag_iqr or flag_mad or flag_rout):
                     continue
                 rows.append({
                     "group": str(glabel), "column": col, "row": idx, "value": v,
                     "iqr_outlier": flag_iqr, "mad_outlier": flag_mad,
                     "modified_z": (float(mz) if np.isfinite(mz) else np.nan),
                     "iqr_lower": lower, "iqr_upper": upper,
+                    "rout_outlier": flag_rout,
+                    "rout_p": float(rout_p[pos]) if np.isfinite(rout_p[pos]) else np.nan,
+                    "rout_threshold": (
+                        float(rout_threshold[pos])
+                        if np.isfinite(rout_threshold[pos]) else np.nan
+                    ),
+                    "rout_t": float(rout_t[pos]) if np.isfinite(rout_t[pos]) else np.nan,
+                    "rout_center": (
+                        float(rout_center) if np.isfinite(rout_center) else np.nan
+                    ),
+                    "rout_rsdr": float(rout_rsdr) if np.isfinite(rout_rsdr) else np.nan,
                 })
     return pd.DataFrame(rows, columns=out_cols)
