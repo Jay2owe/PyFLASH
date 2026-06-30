@@ -16,7 +16,20 @@ from PyFLASH.experiment import (
     _attach_image_metadata, _build_images_dict, _empty_image_table, _sort_image_table,
 )
 from PyFLASH.markers import objectMarker, cellMarker, Antibody
-from PyFLASH.export import _raw_name_cache, write_conditions_table_sheet, convert_raw_name_cached, safe_sheet_name, write_experiment_data_list_sheet, convert_name, convert_summary_sheet_name, sort_if_summary_columns, BEHAVIOR_NAME_MAP, convert_behavior_name
+from PyFLASH.export import (
+    _raw_name_cache,
+    write_conditions_table_sheet,
+    convert_raw_name_cached,
+    safe_sheet_name,
+    write_experiment_data_list_sheet,
+    convert_name,
+    convert_summary_sheet_name,
+    sort_if_summary_columns,
+    BEHAVIOR_NAME_MAP,
+    convert_behavior_name,
+    is_registered_summary_export_column,
+    extra_summary_sheet_name,
+)
 from PyFLASH.utils import ProgressTracker
 
 
@@ -556,12 +569,16 @@ class Batch(Experiment):
         behaviour_exclude=None,
         if_extended_exclude=None,
         if_summary_exclude=None,
+        unregistered_summary=True,
+        unregistered_summary_exclude=None,
         behaviour_include=None,
         if_extended_include=None,
         if_summary_include=None,
+        unregistered_summary_include=None,
         behaviour_save_name="Behavior_Summary",
         if_extended_save_name="IF_Extended",
         if_summary_save_name="IF_Summary",
+        unregistered_summary_save_name="Extra_Summary",
     ):
         save_path = self._resolve_export_save_path(save_path)
         os.makedirs(save_path, exist_ok=True)
@@ -594,6 +611,14 @@ class Batch(Experiment):
                 include=behaviour_include,
                 exclude=behaviour_exclude,
                 save_name=behaviour_save_name,
+            )
+
+        if unregistered_summary:
+            self.export_extra_summary_excel(
+                save_path,
+                include=unregistered_summary_include,
+                exclude=unregistered_summary_exclude,
+                save_name=unregistered_summary_save_name,
             )
 
     def export_all_excel(self, save_path=None, **kwargs):
@@ -953,6 +978,142 @@ class Batch(Experiment):
         _log.confirm(f"Exported IF summary to {workbook_path}")
         if cols_not_included:
             _log.hint(f"Columns not included (no name map): {cols_not_included}")
+
+    def export_unregistered_summary_excel(
+        self,
+        save_path=None,
+        roi_base=None,
+        *,
+        include=None,
+        exclude=None,
+        save_name="Extra_Summary",
+    ):
+        save_path = self._resolve_export_save_path(save_path)
+        os.makedirs(save_path, exist_ok=True)
+        regex_filters = _prepare_export_regex_filters(include=include, exclude=exclude, label="extra summary")
+        workbook_path, regex_report_path, workbook_stem = _resolve_export_paths(
+            save_path,
+            save_name,
+            default_stem="Extra_Summary",
+        )
+
+        if roi_base is not None:
+            summaries = self._ensure_batch_summaries_for_export()
+            summary = summaries.get(roi_base, self.summary)
+        else:
+            summary = self.summary
+
+        factors = getattr(self, "factor", getattr(self.condition_list, "factor", []))
+        if isinstance(factors, str):
+            factors = [factors]
+        id_columns = {"Condition", "AnimalName", *[str(f) for f in factors]}
+        candidate_columns = [col for col in summary.columns if str(col) not in id_columns]
+        columns_to_check, skipped_columns = _apply_export_regex_filters(candidate_columns, regex_filters)
+
+        registered_columns = []
+        columns_to_save = []
+        for col in columns_to_check:
+            if is_registered_summary_export_column(str(col)):
+                registered_columns.append(str(col))
+            else:
+                columns_to_save.append(str(col))
+
+        condition_list = getattr(self, "condition_list", [])
+        conditions = getattr(self, "conditions", list(condition_list))
+        if "Condition" in summary.columns and len(condition_list) > 0:
+            summary_by_condition = {
+                cond.name: summary.loc[summary["Condition"] == cond.name]
+                for cond in condition_list
+            }
+        else:
+            summary_by_condition = {"All": summary}
+
+        exported_sheet_details = []
+        used_sheet_names = set()
+        conditions_sheet = safe_sheet_name("Experimental Conditions", used_sheet_names)
+        index_sheet = safe_sheet_name("Extra Columns", used_sheet_names)
+        sheet_plan = []
+        for col in columns_to_save:
+            label, _desc = extra_summary_sheet_name(col, truncate=False)
+            sheet_name = safe_sheet_name(label, used_sheet_names)
+            sheet_plan.append((col, label, sheet_name))
+
+        with pd.ExcelWriter(workbook_path, engine="xlsxwriter") as writer:
+            write_conditions_table_sheet(writer, conditions, sheet_name=conditions_sheet)
+
+            index_rows = [
+                {
+                    "Column": col,
+                    "Display Name": label,
+                    "Sheet": sheet_name,
+                }
+                for col, label, sheet_name in sheet_plan
+            ]
+            if len(index_rows) == 0:
+                index_rows = [{
+                    "Column": "",
+                    "Display Name": "",
+                    "Sheet": "",
+                }]
+            index_df = pd.DataFrame(index_rows)
+            index_df.to_excel(writer, sheet_name=index_sheet, index=False)
+            index_ws = writer.sheets[index_sheet]
+            for j, column in enumerate(index_df.columns):
+                max_len = max(len(str(column)), index_df[column].astype(str).map(len).max() if len(index_df) else 0)
+                index_ws.set_column(j, j, min(max_len + 2, 70))
+
+            for col, _label, sheet_name in sheet_plan:
+                column_data = {
+                    condition_name: group[col]
+                    for condition_name, group in summary_by_condition.items()
+                    if col in group.columns
+                }
+                column_df = pd.DataFrame(column_data)
+                column_df_cleaned = pd.DataFrame({
+                    column: column_df[column].dropna().reset_index(drop=True)
+                    for column in column_df.columns
+                })
+                column_df_cleaned.to_excel(writer, sheet_name=sheet_name, index=False)
+                exported_sheet_details.append(f"{sheet_name}: {col}")
+
+                worksheet = writer.sheets[sheet_name]
+                for i, column in enumerate(column_df_cleaned):
+                    worksheet.set_column(i, i, max(len(str(column)) + 4, 14))
+
+        _write_export_regex_report(
+            regex_report_path,
+            export_label="Extra Summary",
+            workbook_name=workbook_stem,
+            include_patterns=regex_filters["include_patterns"],
+            exclude_patterns=regex_filters["exclude_patterns"],
+            selection_target="summary columns",
+            candidate_count=len(candidate_columns),
+            exported_count=len(exported_sheet_details),
+            sections=[
+                ("Exported tabs", exported_sheet_details),
+                (
+                    "Skipped candidate columns",
+                    [f"{col} ({reason})" for col, reason in skipped_columns],
+                ),
+                (
+                    "Columns covered by standard IF summary maps",
+                    registered_columns,
+                ),
+            ],
+            notes=[
+                f"ROI base: {roi_base if roi_base is not None else 'Batch default'}",
+            ],
+        )
+        _log.confirm(f"Exported extra summary to {workbook_path}")
+
+    def export_extra_summary_excel(self, save_path=None, roi_base=None, *, include=None, exclude=None, save_name="Extra_Summary"):
+        return self.export_unregistered_summary_excel(
+            save_path=save_path,
+            roi_base=roi_base,
+            include=include,
+            exclude=exclude,
+            save_name=save_name,
+        )
 
 
     def export_behavior_summary_excel(self, save_path=None, *, include=None, exclude=None, save_name="Behavior_Summary"):

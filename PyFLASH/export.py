@@ -1155,10 +1155,11 @@ def write_conditions_table_sheet(writer, conditions, sheet_name="Conditions", pa
         if c.name in used:
             continue
         used.add(c.name)
+        explanation = getattr(c, "factor_explanation", "") or ""
         rows.append({
             "Factor": getattr(c, "factor", ""),
             "Name": getattr(c, "name", ""),
-            "Explanation": re.sub(EXCEL_FORBIDDEN, "", getattr(c, "factor_explanation", "")),
+            "Explanation": re.sub(EXCEL_FORBIDDEN, "", str(explanation)),
         })
 
     df = pd.DataFrame(rows) if rows else pd.DataFrame([{"Factor": "", "Name": "", "Explanation": "No conditions found."}])
@@ -1179,6 +1180,48 @@ def convert_behavior_name(colname: str, truncate: bool = True):
     return (rule["label"][:EXCEL_MAX] if truncate else rule["label"]), rule["desc"]
 
 
+_EXTRA_SUMMARY_EXACT_LABELS = {
+    "sleeptreatment": "Sleep treatment",
+    "Volumeanterior-inferiorHT": "Volume anterior-inferior HT",
+    "Daysincludedintheanalysis": "Days included in the analysis",
+    "Daterecording(month)": "Date recording (month)",
+    "Period(h)": "Period (h)",
+    "Alphacounts(day)": "Alpha counts (day)",
+    "Rhocounts(night)": "Rho counts (night)",
+    "Totalcounts": "Total counts",
+    "Avgactivityrestingphase(L5)": "Avg activity resting phase (L5)",
+    "StarttimeL5(h)": "Start time L5 (h)",
+    "Avgactivityactivephase(M10)": "Avg activity active phase (M10)",
+    "StarttimeM10(h)": "Start time M10 (h)",
+    "Onset(h)": "Onset (h)",
+    "Acrophase(h)": "Acrophase (h)",
+    "Valleyindex": "Valley index",
+    "Eveningpeakamplitude": "Evening peak amplitude",
+}
+
+
+def is_registered_summary_export_column(colname: str) -> bool:
+    try:
+        convert_summary_sheet_name(colname)
+    except KeyError:
+        return False
+    return True
+
+
+def extra_summary_sheet_name(colname: str, truncate: bool = False):
+    raw = str(colname)
+    label = _EXTRA_SUMMARY_EXACT_LABELS.get(raw)
+    if label is None:
+        label = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", raw.replace("_", " "))
+        label = re.sub(r"\s+", " ", label).strip() or raw
+    return (label[:EXCEL_MAX] if truncate else label), ""
+
+
+def unregistered_summary_sheet_name(colname: str, truncate: bool = False):
+    """Backward-compatible alias for the extra summary export label helper."""
+    return extra_summary_sheet_name(colname, truncate=truncate)
+
+
 def _display_label_for_summary_column(colname: str) -> str:
     try:
         return convert_name(colname, truncate=False)[0]
@@ -1186,7 +1229,7 @@ def _display_label_for_summary_column(colname: str) -> str:
         try:
             return convert_behavior_name(colname, truncate=False)[0]
         except KeyError:
-            return colname
+            return extra_summary_sheet_name(colname, truncate=False)[0]
 
 
 def format_summary_for_display(summary: pd.DataFrame) -> pd.DataFrame:
