@@ -12,6 +12,38 @@ import pandas as pd
 from PyFLASH._logging import logger as _log
 
 
+# ── Figure-save observers ─────────────────────────────────────────────
+# A decoupled hook so higher layers can watch every figure as it is saved without
+# this low-level module importing them. The pipeline montage layer
+# (``PyFLASH.pipeline_montage``) registers an observer for the duration of a
+# pipeline run to capture the live figure before the caller closes it. Each
+# observer is called as ``cb(figure, full_path, image_name, subfolder, key)`` and
+# must never raise — a misbehaving observer is isolated so it can't break a save.
+_FIG_SAVE_OBSERVERS = []
+
+
+def register_fig_save_observer(callback):
+    """Register a ``save_fig`` observer (idempotent)."""
+    if callback not in _FIG_SAVE_OBSERVERS:
+        _FIG_SAVE_OBSERVERS.append(callback)
+
+
+def unregister_fig_save_observer(callback):
+    """Remove a previously-registered ``save_fig`` observer (no-op if absent)."""
+    try:
+        _FIG_SAVE_OBSERVERS.remove(callback)
+    except ValueError:
+        pass
+
+
+def _notify_fig_save_observers(figure, full_path, image_name, subfolder, key):
+    for cb in list(_FIG_SAVE_OBSERVERS):
+        try:
+            cb(figure, full_path, image_name, subfolder, key)
+        except Exception:
+            pass  # an observer must never break a figure save
+
+
 # ── Analysis-exclusion sentinels ──────────────────────────────────────
 # Token written into a summary cell when a value is deliberately *excluded* from
 # analysis. Distinct from NOT_INCLUDED_IN_EXPERIMENT ("never measured"): an
@@ -434,6 +466,59 @@ def build_subfolder(plot_type=None, marker=None, factor=None,
     return subfolder, suffix
 
 
+def build_pipeline_suffix(*, block=None, group=None, group_key=None,
+                          specificity=None, aliases=None):
+    """Encode pipeline run conditions as a compact filename suffix.
+
+    Lets pipeline outputs (correlation matrices, gate matrices, their CSVs) sit
+    flat in one folder, distinguished by a concise condition tag, instead of being
+    buried in ``<block>/<group>/Matrices/`` subfolders. Tokens are joined with a
+    single ``_`` — unlike :func:`build_subfolder`'s ``--`` (which ``save_fig``'s
+    ``strip_name`` deletes), ``_`` survives sanitisation, so the *same* tag appears
+    on both figures (saved via ``save_fig``) and CSVs (written directly). The
+    ``key.value`` / ``+`` grammar of the aliases themselves is unchanged.
+
+    Tokens, in order, when present:
+    - ``block``       → bare aliased token, e.g. ``'Raw'`` / ``'Adjusted'``.
+    - ``group``       → ``'group_key.group'`` (e.g. ``'GT.WT'``) when a
+      ``group_key`` (the ``by``/``factor`` column) is given, else the bare
+      aliased group label.
+    - ``specificity`` → delegated to :func:`build_specificity_alias`
+      (e.g. ``'Dx.AD'``).
+
+    Returns ``''`` when nothing is set.
+
+    Examples:
+        block='Adjusted', group='WT', group_key='Genotype'  → '_Adjusted_GT.WT'
+        specificity=('Diagnosis', 'AD')                      → '_Dx.AD'
+    """
+    parts = []
+    if block is not None:
+        token = apply_alias(str(block), aliases)
+        if token:
+            parts.append(token)
+    if group is not None:
+        group_token = apply_alias(str(group), aliases)
+        if group_token:
+            if group_key is not None:
+                key_token = apply_alias(str(group_key), aliases)
+                parts.append(f"{key_token}.{group_token}" if key_token else group_token)
+            else:
+                parts.append(group_token)
+    spec_alias = build_specificity_alias(specificity, aliases)
+    if spec_alias:
+        parts.append(spec_alias)
+
+    if not parts:
+        return ''
+    # Sanitise so the tag is filesystem-safe AND identical on figures (which
+    # ``save_fig`` re-runs through ``strip_name``) and CSVs (written directly).
+    # Without this, a token containing a stripped char (e.g. ``-``) would survive
+    # in the CSV name but vanish from the figure name. ``strip_name`` keeps ``_``,
+    # ``.`` and ``+`` (our separators/grammar) and removes ``-``/``:``/``/`` etc.
+    return strip_name('_' + '_'.join(parts))
+
+
 # ── String helpers ─────────────────────────────────────────────────────
 
 def strip_name(name):
@@ -822,10 +907,32 @@ def filter_dict(my_dict, key_substring):
 
 # ── Plotting helpers ───────────────────────────────────────────────────
 
-def rc_params(line_width=3, tick_major_width=3, tick_major_size=11.5,
-              tick_label_size=25, font_weight='bold', font_family='Arial',
-              labelsize=22, labelweight='bold'):
-    """Set matplotlib rcParams for publication-quality figures."""
+def rc_params(line_width=2, tick_major_width=2, tick_major_size=11,
+              tick_label_size=20, font_weight='normal', font_family='Arial',
+              labelsize=22, labelweight='bold',
+              title_size=20, title_weight='bold',
+              despine=True, legend_frame=False, legend_fontsize=15,
+              tick_direction='out'):
+    """Set matplotlib rcParams for PyFLASH's uniform house aesthetic.
+
+    The defaults encode the look of the reference plots (bar charts and
+    correlation matrices): Arial, bold axis labels, bold titles, despined
+    top/right spines, frameless legends, and thick ticks/spines. Because these
+    are matplotlib *rcParams*, every plot — current and future — inherits them
+    automatically *unless the plotting code hard-codes its own value*; so new
+    plot functions get the house style for free.
+
+    The originals from the analysis notebook
+    (``font_weight='normal', tick_label_size=20, tick_major_size=11,
+    tick_major_width=2, line_width=2``) remain the defaults, so the notebook's
+    explicit call is unchanged. Pass any argument to override one knob.
+
+    Notes
+    -----
+    Colour is intentionally *not* set here (no ``axes.prop_cycle``) — palette is
+    handled per plot. ``despine`` toggles ``axes.spines.top/right`` (heatmaps are
+    unaffected since their cells fill the axes); polar/3D axes ignore it.
+    """
     from matplotlib import pyplot as plt
     from PyFLASH.config import apply_matplotlib_fast_path
     apply_matplotlib_fast_path()
@@ -837,8 +944,17 @@ def rc_params(line_width=3, tick_major_width=3, tick_major_size=11.5,
         'ytick.major.size': tick_major_size,
         'xtick.labelsize': tick_label_size,
         'ytick.labelsize': tick_label_size,
+        'xtick.direction': tick_direction,
+        'ytick.direction': tick_direction,
         'axes.labelsize': labelsize,
         'axes.labelweight': labelweight,
+        'axes.titlesize': title_size,
+        'axes.titleweight': title_weight,
+        'axes.spines.top': not despine,
+        'axes.spines.right': not despine,
+        'legend.frameon': legend_frame,
+        'legend.fontsize': legend_fontsize,
+        'legend.title_fontsize': legend_fontsize,
         'font.weight': font_weight,
         'font.family': font_family,
         'svg.fonttype': 'none',
@@ -869,7 +985,7 @@ def rasterize_data_artists(figure, threshold=50):
 
 def save_fig(figure, save_path, image_name, extra_artist=None,
              pad_inches=1, subfolder=None, verbose=True,
-             skip_existing=None, rasterize=True):
+             skip_existing=None, rasterize=True, montage=False):
     """Save a figure as SVG with optional subfolder creation.
 
     Parameters
@@ -877,6 +993,12 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
     skip_existing : bool or None
         If True, skip saving when the output file already exists.
         None falls back to ``Config.SKIP_EXISTING``.
+    montage : bool
+        Hint passed through to any registered figure-save observer (see
+        ``register_fig_save_observer``) marking this figure as a *headline*
+        figure for the pipeline montage layer. Has no effect on the saved file;
+        it only flags the figure as one of a run's most important graphs so
+        ``PyFLASH.pipeline_montage`` puts it on the overview montage.
     """
     from matplotlib import pyplot as plt
     from PyFLASH.config import Config, apply_matplotlib_fast_path
@@ -915,6 +1037,12 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
 
     use_skip = skip_existing if skip_existing is not None else Config.SKIP_EXISTING
 
+    # Notify observers with the live figure before the caller closes it (and
+    # before rasterize_data_artists mutates it for SVG). Fires regardless of
+    # SAVE_MODE / skip so a montage can capture even a skipped/no-write run.
+    if _FIG_SAVE_OBSERVERS:
+        _notify_fig_save_observers(figure, full_path, image_name, subfolder, bool(montage))
+
     if Config.SAVE_MODE:
         if use_skip and os.path.isfile(save_full_path):
             if verbose:
@@ -923,6 +1051,14 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
 
         if rasterize:
             rasterize_data_artists(figure)
+
+        # Attach the overlap-safe layout engine just before saving so over-long
+        # titles are shrunk to fit and an overlapping suptitle is lifted clear,
+        # without shrinking the data axes. No-op for figures flagged manual or
+        # created with their own (e.g. constrained) engine.
+        if getattr(Config, "USE_PYFLASH_LAYOUT", True):
+            from PyFLASH.layout import apply_pyflash_layout
+            apply_pyflash_layout(figure)
 
         with plt.rc_context({'svg.fonttype': 'none'}):
             figure.savefig(save_full_path, bbox_inches='tight',

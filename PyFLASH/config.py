@@ -69,6 +69,15 @@ class Config:
     EXPORT_HTML = False  # True to export interactive Altair HTML alongside SVG plots
     STATS_CACHE = False  # True to cache stats results within a session
 
+    # ── Figure aesthetic / layout ──────────────────────────────────────
+    # HOUSE_STYLE applies the notebook's rc_params() house style on first
+    # plotting import so every figure shares one uniform aesthetic.
+    # USE_PYFLASH_LAYOUT attaches the overlap-safe PyFlashLayout engine at save
+    # time (shrinks over-long titles, lifts overlapping suptitles; never shrinks
+    # the data axes). Both are on by default; set False to restore raw behaviour.
+    HOUSE_STYLE = True
+    USE_PYFLASH_LAYOUT = True
+
     # ── Effect sizes ───────────────────────────────────────────────────
     EFFECT_SIZES = True        # compute effect sizes alongside p-values
     EFFECT_CI = True           # bootstrap CIs for parametric pairwise effects

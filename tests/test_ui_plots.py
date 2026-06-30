@@ -20,6 +20,7 @@ import ast
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 import types
@@ -151,6 +152,47 @@ def test_pyflash_runner_describe_status_for_func():
     assert runner._describe_status_for_func("correlation_pipeline") == "covered"
     assert runner._describe_status_for_func("PyFLASH.pipeline.correlation") == "covered"
     assert runner._describe_status_for_func("not_a_real_plot") == "unclassified"
+
+
+def test_pyflash_runner_discover_includes_registered_pipeline_signatures():
+    runner_path = (
+        Path(__file__).resolve().parents[1]
+        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
+    )
+    if not runner_path.exists():
+        pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
+    spec_mod = importlib.util.spec_from_file_location("pyflash_runner_discover", runner_path)
+    runner = importlib.util.module_from_spec(spec_mod)
+    spec_mod.loader.exec_module(runner)
+
+    discovered = runner.discover()
+    corr = discovered["registered_callables"]["correlation_pipeline"]
+    adjusted = discovered["registered_callables"]["adjusted_correlation_pipeline"]
+
+    assert corr["target"] == "PyFLASH.pipeline.correlation"
+    assert "gate='p'" in corr["signature"]
+    assert "value_matrices='p'" in corr["signature"]
+    assert adjusted["target"] == "PyFLASH.pipeline.adjusted_correlation"
+    assert "value_matrices='p'" in adjusted["signature"]
+    assert "correlation_pipeline" not in discovered["undocumented"]
+    assert "adjusted_correlation_pipeline" not in discovered["undocumented"]
+
+
+def test_pyflash_reference_updater_is_current():
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "update_pyflash_references.py"
+    if not (root / ".claude" / "skills" / "pyflash" / "reference" / "plot-functions.md").exists():
+        pytest.skip("pyflash skill references are local to this project")
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--check"],
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_cheat_sheet_accepts_pipeline_module_targets(capsys):

@@ -55,7 +55,14 @@ from PyFLASH.utils import (
     iter_specificities, filter_df_by_specificity,
     specificity_path_parts, resolve_column_key, raw_coloc_column_aliases,
     build_subfolder, resolve_roi_bases, is_excluded_mask,
+    rc_params as _rc_params,
 )
+
+# Apply the house aesthetic once on first plotting import so figures made
+# outside the notebook (pipelines, the runner, tests) share the same uniform
+# look the notebook sets. A later explicit rc_params(...) call still overrides.
+if getattr(Config, "HOUSE_STYLE", True):
+    _rc_params()
 
 
 # ── Optional Altair dependency for interactive HTML export ───────────
@@ -3925,7 +3932,10 @@ def _style_radar_axis(ax, columns, *, normalize=True, tick_label_size=10, label_
     ax.set_theta_offset(np.pi / 2)
     ax.set_theta_direction(-1)
     ax.set_xticks(angles)
-    ax.set_xticklabels(labels, fontsize=tick_label_size)
+    # Spokes crowd near the top/bottom as their count grows; shrink the angular
+    # label font past ~12 variables so neighbouring labels don't overlap.
+    spoke_fs = tick_label_size if n_cols <= 12 else max(6.0, tick_label_size * 12.0 / n_cols)
+    ax.set_xticklabels(labels, fontsize=spoke_fs)
     ax.tick_params(axis='x', pad=10)
     label_radii = _normalize_radar_radial_value_radii(radial_value_radii)
     radial_tick_size = max(7, tick_label_size - 2) if radial_value_size is None else float(radial_value_size)
@@ -6478,6 +6488,9 @@ def _build_pie_counts_from_series(series: pd.Series, threshold=None, drop_zeros=
 
     text = raw_non_na.astype(str).str.strip()
     text = text[text != ""]
+    # Exclusion / not-included sentinels are not real categories.
+    text = text[~text.str.startswith("EXCLUDED_")
+                & ~text.str.contains("NOT_INCLUDED", na=False)]
     if len(text) == 0:
         return [], []
     counts = text.value_counts(sort=False)
@@ -6817,7 +6830,8 @@ def _count_unique_animals(df: pd.DataFrame, mask=None):
 def _pie_valid_row_mask(series: pd.Series, threshold=None):
     raw = series.copy()
     try:
-        sentinel_mask = raw.astype(str).str.contains("NOT_INCLUDED_IN_EXPERIMENT", na=False)
+        sentinel_mask = (raw.astype(str).str.contains("NOT_INCLUDED_IN_EXPERIMENT", na=False)
+                         | is_excluded_mask(raw))
         raw = raw.mask(sentinel_mask, np.nan)
     except Exception:
         pass
@@ -11032,54 +11046,39 @@ def matrix_action(ctx: Context, state: dict,
         df = df.reindex(columns=grouped)
 
     corr = df.corr(method=_correlation_pandas_method(correlation))
-    n_cols = max(1, len(corr.columns))
-    # Adaptive sizing: treat tick_label_size as an upper bound. Large matrices
-    # with long labels otherwise allocate most of the canvas to tick text and
-    # visually crush the heatmap.
-    tick_fs = max(7, min(int(tick_label_size), int(130 / n_cols)))
-    star_fs = min(25, max(8, int(220 / n_cols)))
     coeff_label = f"{_correlation_display_name(correlation)} coefficient"
 
-    heatmap = sns.heatmap(corr, annot=False, fmt=".2f", cmap='coolwarm',
-                          linewidths=0.5, ax=ax, vmin=-1, vmax=1)
-    try:
-        cbar = heatmap.collections[0].colorbar
-        cbar_tick_fs = max(16, int(tick_fs * 1.2))
-        cbar_label_fs = max(18, int(tick_fs * 1.35))
-        cbar.ax.tick_params(labelsize=cbar_tick_fs, width=2.0, length=8)
-        cbar.ax.text(
-            1.02, 1.05, coeff_label,
-            transform=cbar.ax.transAxes,
-            ha='left', va='bottom',
-            fontsize=cbar_label_fs,
-            fontweight='bold',
-        )
-    except Exception:
-        pass
-
-    # Annotate significance
+    # Significance stars (upper triangle) + the correlations result dict. The
+    # shared renderer draws the stars; we only decide which cells carry them.
     results = {}
-    for i, c1 in enumerate(corr.columns):
-        for j, c2 in enumerate(corr.columns):
+    cols = list(corr.columns)
+    annot = pd.DataFrame("", index=cols, columns=cols, dtype=object)
+    for i, c1 in enumerate(cols):
+        for j, c2 in enumerate(cols):
             if i < j:
                 valid = df[[c1, c2]].dropna()
                 if len(valid) > 1:
                     coefficient, p_value = _compute_correlation(valid[c1], valid[c2], correlation)
                     star = _get_annotation(p_value, ns='')
-                    ax.text(j + 0.5, i + 0.6, star, ha='center', va='center',
-                            fontsize=star_fs, color='black', fontweight='bold')
+                    if star:
+                        annot.iat[i, j] = star
                     results[f'{c1} vs {c2}'] = (p_value, coefficient)
 
-    # Relabel ticks
-    labels = [get_display_name(c, minimal=True) for c in corr.columns]
-    tick_pos = np.arange(len(corr.columns), dtype=float) + 0.5
-    ax.set_xticks(tick_pos)
-    ax.set_yticks(tick_pos)
-    ax.set_xticklabels(
-        labels, rotation=60, ha='right', va='top',
-        rotation_mode='anchor', fontsize=tick_fs,
-    )
-    ax.set_yticklabels(labels, rotation=0, ha='right', fontsize=tick_fs)
+    # Title the matrix with its group only (short, so it stays prominent at any
+    # matrix size), matching plot_rect_matrices' panel titles; the correlation
+    # method is shown on the colorbar caption.
+    group_name = (getattr(ctx, 'label', None) or getattr(ctx, 'condition', None)
+                  or getattr(ctx, 'factor_value', None))
+    _title = (get_display_name(str(group_name), minimal=True) if group_name
+              else f"{_correlation_display_name(correlation)} Correlation Matrix")
+
+    # All matrix styling (square cells, matrix-height colorbar, figure-scaled
+    # title/colorbar fonts, minimal tick labels) lives in the shared renderer so
+    # plot_matrices and the pipeline matrices look identical.
+    _, _, heatmap = _render_value_matrix(
+        corr, ax=ax, fig=fig, cmap='coolwarm', vmin=-1, vmax=1,
+        colorbar_label=coeff_label, title=_title, annotations=annot,
+        tick_label_size=tick_label_size)
 
     return {'heatmap': heatmap, 'correlations': results}
 
@@ -11096,6 +11095,124 @@ def _get_annotation(p, ns='ns'):
     elif p < 0.05:
         return '*'
     return ns
+
+
+def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
+                         vmin=None, vmax=None, colorbar_label=None, title=None,
+                         annotations=None, tick_label_size=20, square=True,
+                         linewidths=0.5, minimal_labels=True):
+    """Render a value matrix in PyFLASH's house "perfect matrix" style.
+
+    One shared renderer for every PyFLASH correlation-family matrix
+    (``matrix_action`` / ``plot_matrices`` and the pipeline matrices built via
+    ``_corr_pipeline_heatmap``) so they look identical: square cells, a slim
+    colorbar sized to the *matrix* height (not the full axes), figure-scaled
+    title / colorbar fonts, and minimal display-name tick labels. The
+    overlap-safe layout engine trims any residual tick crowding at save time.
+
+    Parameters
+    ----------
+    matrix : pandas.DataFrame
+        Values to colour; ``index`` labels the rows, ``columns`` the columns.
+    ax, fig : matplotlib Axes / Figure, optional
+        Draw into these when given (the action framework supplies a shared
+        figure). When ``ax`` is None a new square figure is created, sized to
+        the matrix.
+    annotations : pandas.DataFrame or 2-D sequence of str, optional
+        Per-cell text (e.g. significance stars) drawn centred in each cell;
+        empty / falsy / non-finite entries are skipped. Must align to ``matrix``.
+    tick_label_size : int
+        Final tick-label font. Callers pre-scale this to their column count;
+        this renderer trusts it and does not re-shrink (avoids double-shrinking).
+
+    Returns
+    -------
+    tuple
+        ``(fig, ax, heatmap)``.
+    """
+    if hasattr(matrix, "apply"):
+        matrix = matrix.apply(lambda s: pd.to_numeric(s, errors="coerce"))
+    ycols = list(matrix.index)
+    xcols = list(matrix.columns)
+    ny, nx = len(ycols), len(xcols)
+    n = max(nx, ny, 1)
+
+    if ax is None:
+        fig_side = min(max(5.4, n * 0.46), 34.0)
+        fig, ax = plt.subplots(figsize=(fig_side + 3.0, fig_side))
+    elif fig is None:
+        fig = ax.figure
+
+    # Trust the caller's tick font (already count-scaled); the layout engine
+    # trims anything that still overlaps. Title / colorbar text scales with the
+    # figure size (~ n * 0.45) so it stays prominent on big matrices and
+    # proportionate on small ones, rather than tracking tick_label_size.
+    tick_fs = max(9, int(tick_label_size))
+    _fig_scale = min(36.0, max(6.0, n * 0.45))
+    title_fs = int(max(18, min(34, _fig_scale * 1.7)))
+    cbar_label_fs = int(max(18, min(30, _fig_scale * 1.55)))
+    cbar_tick_fs = int(max(18, min(26, _fig_scale * 1.25)))
+    star_fs = min(25, max(8, int(220 / n)))
+
+    # Square heatmap WITHOUT seaborn's colorbar - seaborn's colorbar spans the
+    # full axes height, taller than the (square-shrunk) matrix. Build it manually
+    # sized to the matrix's real height so the legend matches the squares exactly.
+    heatmap = sns.heatmap(matrix, annot=False, cmap=cmap, linewidths=linewidths,
+                          ax=ax, vmin=vmin, vmax=vmax, square=square, cbar=False)
+    try:
+        ax.apply_aspect()  # lock the box so get_position() is the matrix
+        pos = ax.get_position()
+        cax = fig.add_axes([pos.x1 + 0.014, pos.y0, 0.036, pos.height])
+        cbar = fig.colorbar(ax.collections[0], cax=cax)
+        cbar.ax.tick_params(labelsize=cbar_tick_fs, width=1.6, length=6)
+        try:
+            cbar.outline.set_visible(False)
+        except Exception:
+            pass
+        if colorbar_label:
+            # Caption sits just above the colorbar, aligned with it; the gap from
+            # the top tick number is vertical (y > 1).
+            cbar.ax.text(0.0, 1.03, colorbar_label, transform=cbar.ax.transAxes,
+                         ha="left", va="bottom", fontsize=cbar_label_fs,
+                         fontweight="bold")
+    except Exception:
+        pass
+
+    if title:
+        ax.set_title(title, fontsize=title_fs, fontweight="bold", pad=16)
+
+    # Per-cell annotations (e.g. significance stars). The caller decides which
+    # cells carry text by leaving the rest empty / NaN.
+    if annotations is not None:
+        if hasattr(annotations, "reindex"):
+            grid = annotations.reindex(index=ycols, columns=xcols)
+            _get_cell = lambda i, j: grid.iat[i, j]
+        else:
+            _get_cell = lambda i, j: annotations[i][j]
+        for i in range(ny):
+            for j in range(nx):
+                try:
+                    txt = _get_cell(i, j)
+                except Exception:
+                    continue
+                if txt is None:
+                    continue
+                if isinstance(txt, float) and not np.isfinite(txt):
+                    continue
+                txt = str(txt).strip()
+                if not txt:
+                    continue
+                ax.text(j + 0.5, i + 0.6, txt, ha="center", va="center",
+                        fontsize=star_fs, color="black", fontweight="bold")
+
+    labels_x = [get_display_name(c, minimal=minimal_labels) for c in xcols]
+    labels_y = [get_display_name(c, minimal=minimal_labels) for c in ycols]
+    ax.set_xticks(np.arange(nx, dtype=float) + 0.5)
+    ax.set_yticks(np.arange(ny, dtype=float) + 0.5)
+    ax.set_xticklabels(labels_x, rotation=60, ha="right", va="top",
+                       rotation_mode="anchor", fontsize=tick_fs)
+    ax.set_yticklabels(labels_y, rotation=0, ha="right", fontsize=tick_fs)
+    return fig, ax, heatmap
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -13639,6 +13756,12 @@ def plot_volcano(experiment, filtered_columns=None,
         else:
             fig = state['shared_fig']
             ax = state['shared_ax']
+            # Remove the prior condition's colorbar (and any other) axes so they
+            # don't accumulate on the shared figure — ax.clear() alone leaves
+            # seaborn's separate colorbar axes behind, stacking one per condition.
+            for extra_ax in list(fig.axes):
+                if extra_ax is not ax:
+                    extra_ax.remove()
             ax.clear()
         state['fig'] = fig
         state['ax'] = ax
@@ -14856,9 +14979,16 @@ def plot_matrices(experiment, filtered_columns=None,
                 _log.warn("[plot_matrices] No shared valid columns across panels after NaN/sentinel filtering.")
 
     n = len(resolved_columns)
-    fig_w = min(max(6.0, n * 0.35), 30.0)
-    fig_h = min(max(5.4, n * 0.315), 27.0)
-    tick_label_size_eff = min(tick_label_size, max(4, int(300 / max(1, n))))
+    # Square heatmap (square=True in matrix_action keeps cells square); size the
+    # square plotting area by n and add fixed width for the colorbar so the cells
+    # fill it rather than being squeezed thin by the colorbar.
+    fig_side = min(max(5.4, n * 0.46), 34.0)
+    fig_h = fig_side
+    fig_w = fig_side + 3.0
+    # Tick-label font: keep a higher floor so big figures (many columns) don't get
+    # tiny labels — cells stay ~constant in size, so there is room. Small matrices
+    # (few columns, large cells) still get the largest labels.
+    tick_label_size_eff = min(max(tick_label_size, 16), max(15, int(640 / max(1, n))))
     drop_duplicate_columns_for_action = not bool(share_columns_across_panels)
 
     _matrix_shared_fig_ref = {"fig": None}
@@ -14878,6 +15008,12 @@ def plot_matrices(experiment, filtered_columns=None,
         else:
             fig = state['shared_fig']
             ax = state['shared_ax']
+            # Remove the prior condition's colorbar (and any other) axes so they
+            # don't accumulate on the shared figure — ax.clear() alone leaves
+            # seaborn's separate colorbar axes behind, stacking one per condition.
+            for extra_ax in list(fig.axes):
+                if extra_ax is not ax:
+                    extra_ax.remove()
             ax.clear()
         state['fig'] = fig
         state['ax'] = ax
@@ -14936,6 +15072,8 @@ def plot_matrices(experiment, filtered_columns=None,
 # for the surviving pairs, all written into one self-contained run folder.
 
 _CORR_METHOD_SHORT = {"pearsonr": "P", "spearmanr": "S", "kendalltau": "K"}
+_CORR_PVALUE_CMAP = "coolwarm"
+_CORR_QVALUE_CMAP = "viridis_r"
 
 
 def _corr_pipeline_use_fdr(gate):
@@ -14943,6 +15081,95 @@ def _corr_pipeline_use_fdr(gate):
     return str(gate).strip().lower() in (
         "fdr", "q", "qvalue", "q_value", "q-value", "fdr_bh", "bh"
     )
+
+
+def _corr_value_matrix_set(value_matrices):
+    """Normalize the p/q value-matrix selector to a set of {"p", "q"}."""
+    if value_matrices is None:
+        return {"p"}
+    if isinstance(value_matrices, bool):
+        return {"p", "q"} if value_matrices else set()
+    if isinstance(value_matrices, (list, tuple, set, pd.Index, np.ndarray)):
+        out = set()
+        for item in value_matrices:
+            out.update(_corr_value_matrix_set(item))
+        return out
+
+    token = str(value_matrices).strip().lower()
+    if token == "":
+        return {"p"}
+    token = (
+        token.replace("-", "_")
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("+", "_")
+        .replace("&", "_")
+        .replace(",", "_")
+    )
+    while "__" in token:
+        token = token.replace("__", "_")
+    aliases = {
+        "p": {"p"},
+        "pvalue": {"p"},
+        "p_value": {"p"},
+        "raw": {"p"},
+        "raw_p": {"p"},
+        "raw_p_value": {"p"},
+        "q": {"q"},
+        "qvalue": {"q"},
+        "q_value": {"q"},
+        "fdr": {"q"},
+        "fdr_q": {"q"},
+        "fdr_q_value": {"q"},
+        "bh": {"q"},
+        "fdr_bh": {"q"},
+        "both": {"p", "q"},
+        "all": {"p", "q"},
+        "p_q": {"p", "q"},
+        "q_p": {"p", "q"},
+        "p_and_q": {"p", "q"},
+        "q_and_p": {"p", "q"},
+        "pvalue_qvalue": {"p", "q"},
+        "qvalue_pvalue": {"p", "q"},
+        "none": set(),
+        "off": set(),
+        "false": set(),
+        "no": set(),
+    }
+    if token in aliases:
+        return set(aliases[token])
+    raise ValueError(
+        "value_matrices must be one of 'p', 'q', 'both', or 'none'; "
+        f"got {value_matrices!r}."
+    )
+
+
+def _corr_value_matrix_label(plot_pvalue_matrices, plot_qvalue_matrices):
+    """Return the canonical value-matrix selector label for manifests."""
+    p = bool(plot_pvalue_matrices)
+    q = bool(plot_qvalue_matrices)
+    if p and q:
+        return "both"
+    if p:
+        return "p"
+    if q:
+        return "q"
+    return "none"
+
+
+def _corr_resolve_value_matrix_flags(
+    value_matrices="p",
+    plot_pvalue_matrices=None,
+    plot_qvalue_matrices=None,
+):
+    """Resolve new selector plus legacy booleans into (plot_p, plot_q)."""
+    if plot_pvalue_matrices is not None or plot_qvalue_matrices is not None:
+        return (
+            True if plot_pvalue_matrices is None else bool(plot_pvalue_matrices),
+            True if plot_qvalue_matrices is None else bool(plot_qvalue_matrices),
+        )
+    selected = _corr_value_matrix_set(value_matrices)
+    return "p" in selected, "q" in selected
 
 
 # ── Pipeline run-folder / manifest I/O ───────────────────────────────────────
@@ -14964,7 +15191,7 @@ _corr_pipeline_data_root = _pio.data_root
 
 
 def _corr_pipeline_slug(columns, against_columns, methods, require, gate, alpha,
-                        by, factor, specificity, roi):
+                        by, factor, specificity, roi, settings=None):
     """Deterministic short run name derived from the configuration."""
     payload = {
         "cols": sorted(str(c) for c in columns),
@@ -14977,6 +15204,9 @@ def _corr_pipeline_slug(columns, against_columns, methods, require, gate, alpha,
         "factor": str(factor),
         "specificity": str(specificity),
         "roi": str(roi),
+        # Output-changing knobs (min_n, regression + difference settings) so a
+        # materially different run hashes to a different folder.
+        "settings": settings or {},
     }
     short = "".join(_CORR_METHOD_SHORT.get(m, "?") for m in methods)
     return _pio.slug(f"{len(columns)}cols_{short}_{str(gate).lower()}", payload)
@@ -15281,7 +15511,7 @@ def _corr_result_pair_lookup(result, method):
 
 
 def _corr_compute_difference_payload(left_result, right_result, methods, *,
-                                     alpha=0.05, gate="fdr",
+                                     alpha=0.05, gate="p",
                                      test="fisher_z"):
     """Compare two computed correlation-result payloads cell by cell."""
     from PyFLASH.stats_extra import apply_fdr
@@ -15361,30 +15591,35 @@ def _corr_compute_difference_payload(left_result, right_result, methods, *,
 
 
 def _corr_difference_matrix_fig(matrix, title, tick_label_size, *,
-                                kind="signed", sig_df=None, alpha=0.05):
+                                kind="signed", sig_df=None, annotation_df=None,
+                                alpha=0.05):
     if kind == "signed":
         return _corr_pipeline_heatmap(
             matrix, sig_df, title, tick_label_size,
             cmap="coolwarm", vmin=-2.0, vmax=2.0,
-            colorbar_label="delta r",
+            colorbar_label="delta r", annotation_df=annotation_df,
+            annotation_alpha=alpha,
         )
     if kind == "absolute":
         return _corr_pipeline_heatmap(
             matrix, sig_df, title, tick_label_size,
             cmap="magma", vmin=0.0, vmax=2.0,
-            colorbar_label="absolute delta r",
+            colorbar_label="absolute delta r", annotation_df=annotation_df,
+            annotation_alpha=alpha,
         )
     if kind == "p":
         return _corr_pipeline_heatmap(
-            matrix, _corr_pipeline_sig_from_values(matrix, alpha), title,
-            tick_label_size, cmap="viridis_r", vmin=0.0, vmax=1.0,
-            colorbar_label="difference p value",
+            matrix, None, title, tick_label_size,
+            cmap=_CORR_PVALUE_CMAP, vmin=0.0, vmax=1.0,
+            colorbar_label="difference p value", annotation_df=matrix,
+            annotation_alpha=alpha,
         )
     if kind == "q":
         return _corr_pipeline_heatmap(
-            matrix, _corr_pipeline_sig_from_values(matrix, alpha), title,
-            tick_label_size, cmap="viridis_r", vmin=0.0, vmax=1.0,
-            colorbar_label="difference FDR q value",
+            matrix, None, title, tick_label_size,
+            cmap=_CORR_QVALUE_CMAP, vmin=0.0, vmax=1.0,
+            colorbar_label="difference FDR q value", annotation_df=matrix,
+            annotation_alpha=alpha,
         )
     if kind == "gate":
         return _corr_pipeline_heatmap(
@@ -15414,50 +15649,57 @@ def _corr_render_matrix_differences(
     save=True,
     tick_label_size=20,
     alpha=0.05,
-    gate="fdr",
+    gate="p",
     test="fisher_z",
     plot_signed=True,
     plot_absolute=True,
-    plot_pvalue_matrices=True,
-    plot_qvalue_matrices=True,
+    value_matrices="p",
+    plot_pvalue_matrices=None,
+    plot_qvalue_matrices=None,
     plot_gate_matrix=True,
+    name_suffix="",
 ):
-    """Render/save pairwise matrix differences from already-computed groups."""
+    """Render/save pairwise matrix differences from already-computed groups.
+
+    Outputs are flat: every figure/table lands directly in ``fig_dir`` / ``data_dir``
+    (one ``Matrix Differences`` folder), with the comparison — and the run's
+    specificity via ``name_suffix`` — encoded into each filename rather than nested
+    ``<comparison>/Matrices/`` subfolders.
+    """
+    plot_pvalue_matrices, plot_qvalue_matrices = _corr_resolve_value_matrix_flags(
+        value_matrices, plot_pvalue_matrices, plot_qvalue_matrices)
+
     def _write_csv(frame, path, **kwargs):
         _corr_to_csv(frame, path, **kwargs)
 
-    def _csv_path(directory, preferred_name, compact_name):
-        path = os.path.join(directory, preferred_name)
-        if os.name == "nt" and len(path) >= 248:
-            return os.path.join(directory, compact_name)
-        return path
+    # comp_label -> collision-free sanitized token (populated once comparisons are
+    # resolved); guards against two comparison labels whose sanitized forms collide.
+    comp_token_map = {}
 
-    def _comparison_folder(label, data_root=None, fig_root=None):
-        preferred = strip_name(label) or "comparison"
-        if os.name != "nt":
-            return preferred
-        digest = hashlib.sha1(str(label).encode("utf-8")).hexdigest()[:10]
-        compact = f"cmp_{digest}"
-        checks = []
-        if data_root:
-            checks.append(os.path.join(data_root, preferred, "p_Pearson.csv"))
-        if fig_root:
-            checks.append(os.path.join(
-                fig_root, preferred, "Matrices",
-                f"{strip_name('Pearson Q Matrix')}.svg",
-            ))
-        return compact if any(len(path) >= 248 for path in checks) else preferred
+    def _flat_stem(preferred_base, compact_base, comp_label, ext):
+        """Flat filename stem ``<base>_<comparison><name_suffix>`` for one output.
 
-    def _fig_target(root, comp_safe, preferred_name, compact_name):
-        subfolder = os.path.join(comp_safe, "Matrices")
-        name = preferred_name
-        path = os.path.join(root, subfolder, f"{strip_name(name)}.svg")
-        if os.name == "nt" and len(path) >= 248:
-            name = compact_name
-            path = os.path.join(root, subfolder, f"{strip_name(name)}.svg")
-        if os.name == "nt" and len(path) >= 248:
-            subfolder = os.path.join(comp_safe, "M")
-        return name, subfolder
+        Everything lands directly in the single Matrix Differences folder (no
+        per-comparison / Matrices subfolders); the comparison and the run's
+        specificity (``name_suffix``) ride in the filename. Falls back to the
+        compact base, then a hashed comparison label, if a deep Windows path would
+        otherwise exceed MAX_PATH.
+        """
+        comp_safe = comp_token_map.get(comp_label) or strip_name(str(comp_label)) or "comparison"
+        digest = "cmp_" + hashlib.sha1(str(comp_label).encode("utf-8")).hexdigest()[:10]
+        root = (fig_dir if ext == "svg" else data_dir) or ""
+        for base, comp in ((preferred_base, comp_safe),
+                           (compact_base, comp_safe),
+                           (compact_base, digest)):
+            stem = strip_name(f"{base}_{comp}{name_suffix}")
+            full = os.path.join(root, f"{stem}.{ext}")
+            if not (os.name == "nt" and len(full) >= 248):
+                return stem
+        return strip_name(f"{compact_base}_{digest}{name_suffix}")
+
+    def _diff_csv_path(preferred_base, compact_base, comp_label):
+        stem = _flat_stem(preferred_base, compact_base, comp_label, "csv")
+        return os.path.join(data_dir, f"{stem}.csv")
 
     methods = [_normalize_correlation_method(m)
                for m in ([methods] if isinstance(methods, str) else list(methods))]
@@ -15468,6 +15710,18 @@ def _corr_render_matrix_differences(
         prefer_condition_comparisons=prefer_condition_comparisons,
     )
     group_map = _corr_group_result_dict(groups_results)
+    # Build collision-free per-comparison tokens: if two comparison labels sanitize
+    # to the same (case-insensitive) stem — e.g. groups "A-B" vs "AB" both strip to
+    # "AB" — append a short hash to the later one so their flat per-comparison files
+    # never overwrite each other.
+    _seen_comp = {}
+    for _l, _r, _cl in comparisons_resolved:
+        base = strip_name(str(_cl)) or "comparison"
+        key = os.path.normcase(base)
+        if key in _seen_comp and _seen_comp[key] != _cl:
+            base = f"{base}_{hashlib.sha1(str(_cl).encode('utf-8')).hexdigest()[:6]}"
+        _seen_comp.setdefault(key, _cl)
+        comp_token_map[_cl] = base
     if len(comparisons_resolved) == 0:
         return {
             "comparisons": [],
@@ -15476,6 +15730,12 @@ def _corr_render_matrix_differences(
             "n_difference_tests": 0,
             "n_difference_significant": 0,
         }
+
+    # Flat output writes figures straight into ``fig_dir`` with ``subfolder=None``,
+    # so ensure the single Matrix Differences folder exists (``save_fig`` only
+    # makedirs when a subfolder is given; ``_corr_to_csv`` makedirs for tables).
+    if save and fig_dir:
+        _corr_makedirs(fig_dir)
 
     all_long = []
     summaries = []
@@ -15486,19 +15746,16 @@ def _corr_render_matrix_differences(
             left_res, right_res, methods,
             alpha=alpha, gate=gate, test=test,
         )
-        comp_safe = _comparison_folder(comp_label, data_dir, fig_dir)
-        comp_data_dir = os.path.join(data_dir, comp_safe) if data_dir else None
-
         long_df = payload["long"].copy()
         if not long_df.empty:
             long_df.insert(0, "comparison", comp_label)
             long_df.insert(1, "left_group", left_label)
             long_df.insert(2, "right_group", right_label)
             all_long.append(long_df)
-            if save and comp_data_dir:
+            if save and data_dir:
                 _write_csv(
                     long_df,
-                    _csv_path(comp_data_dir, "matrix_differences.csv", "diffs.csv"),
+                    _diff_csv_path("matrix_differences", "diffs", comp_label),
                     index=False,
                 )
 
@@ -15519,82 +15776,72 @@ def _corr_render_matrix_differences(
                 "inferential": inferential,
                 "n_significant": n_sig,
             })
-            if save and comp_data_dir:
-                _write_csv(mres["signed"], _csv_path(comp_data_dir, f"signed_delta_{disp}.csv", f"signed_{disp}.csv"))
-                _write_csv(mres["absolute"], _csv_path(comp_data_dir, f"absolute_delta_{disp}.csv", f"abs_{disp}.csv"))
+            if save and data_dir:
+                _write_csv(mres["signed"], _diff_csv_path(f"signed_delta_{disp}", f"signed_{disp}", comp_label))
+                _write_csv(mres["absolute"], _diff_csv_path(f"absolute_delta_{disp}", f"abs_{disp}", comp_label))
                 if inferential:
-                    _write_csv(mres["p"], _csv_path(comp_data_dir, f"pvalues_difference_{disp}.csv", f"p_{disp}.csv"))
-                    _write_csv(mres["q"], _csv_path(comp_data_dir, f"qvalues_difference_{disp}.csv", f"q_{disp}.csv"))
-                    _write_csv(mres["sig"].astype(int), _csv_path(comp_data_dir, f"gate_difference_{disp}.csv", f"gate_{disp}.csv"))
+                    _write_csv(mres["p"], _diff_csv_path(f"pvalues_difference_{disp}", f"p_{disp}", comp_label))
+                    _write_csv(mres["q"], _diff_csv_path(f"qvalues_difference_{disp}", f"q_{disp}", comp_label))
+                    _write_csv(mres["sig"].astype(int), _diff_csv_path(f"gate_difference_{disp}", f"gate_{disp}", comp_label))
 
             if save and fig_dir:
+                star_df = (
+                    mres["q"] if _corr_difference_use_fdr(gate) else mres["p"]
+                ) if inferential else None
                 if plot_signed:
                     sfig = _corr_difference_matrix_fig(
                         mres["signed"], f"{disp} signed correlation difference\n{comp_label}: left - right",
                         tick_label_size, kind="signed",
-                        sig_df=mres["sig"] if inferential else None, alpha=alpha,
+                        annotation_df=star_df, alpha=alpha,
                     )
-                    fig_name, fig_sub = _fig_target(
-                        fig_dir, comp_safe,
-                        f"{disp} Signed Difference Matrix",
-                        f"{disp} Signed Delta",
-                    )
-                    save_fig(sfig, fig_dir, fig_name, subfolder=fig_sub)
+                    save_fig(sfig, fig_dir, _flat_stem(
+                        f"{disp} Signed Difference Matrix", f"{disp} Signed Delta",
+                        comp_label, "svg"))
                     plt.close(sfig)
                 if plot_absolute:
                     afig = _corr_difference_matrix_fig(
                         mres["absolute"], f"{disp} absolute correlation difference\n{comp_label}: |left - right|",
                         tick_label_size, kind="absolute",
-                        sig_df=mres["sig"] if inferential else None, alpha=alpha,
+                        annotation_df=star_df, alpha=alpha,
                     )
-                    fig_name, fig_sub = _fig_target(
-                        fig_dir, comp_safe,
-                        f"{disp} Absolute Difference Matrix",
-                        f"{disp} Abs Delta",
-                    )
-                    save_fig(afig, fig_dir, fig_name, subfolder=fig_sub)
+                    save_fig(afig, fig_dir, _flat_stem(
+                        f"{disp} Absolute Difference Matrix", f"{disp} Abs Delta",
+                        comp_label, "svg"))
                     plt.close(afig)
                 if inferential and plot_pvalue_matrices:
                     pfig = _corr_difference_matrix_fig(
                         mres["p"], f"{disp} correlation-difference P-Value Matrix\n{comp_label} (* p<{alpha:g})",
                         tick_label_size, kind="p", alpha=alpha,
                     )
-                    fig_name, fig_sub = _fig_target(
-                        fig_dir, comp_safe,
-                        f"{disp} Difference P-Value Matrix",
-                        f"{disp} P Matrix",
-                    )
-                    save_fig(pfig, fig_dir, fig_name, subfolder=fig_sub)
+                    save_fig(pfig, fig_dir, _flat_stem(
+                        f"{disp} Difference P-Value Matrix", f"{disp} P Matrix",
+                        comp_label, "svg"))
                     plt.close(pfig)
                 if inferential and plot_qvalue_matrices:
                     qfig = _corr_difference_matrix_fig(
                         mres["q"], f"{disp} correlation-difference FDR Q-Value Matrix\n{comp_label} (* q<{alpha:g})",
                         tick_label_size, kind="q", alpha=alpha,
                     )
-                    fig_name, fig_sub = _fig_target(
-                        fig_dir, comp_safe,
-                        f"{disp} Difference FDR Q-Value Matrix",
-                        f"{disp} Q Matrix",
-                    )
-                    save_fig(qfig, fig_dir, fig_name, subfolder=fig_sub)
+                    save_fig(qfig, fig_dir, _flat_stem(
+                        f"{disp} Difference FDR Q-Value Matrix", f"{disp} Q Matrix",
+                        comp_label, "svg"))
                     plt.close(qfig)
                 if inferential and plot_gate_matrix:
                     gfig = _corr_difference_matrix_fig(
                         mres["sig"], f"{disp} correlation-difference gate\n{comp_label} @ {'q' if _corr_difference_use_fdr(gate) else 'p'}<{alpha:g}",
                         tick_label_size, kind="gate", alpha=alpha,
                     )
-                    fig_name, fig_sub = _fig_target(
-                        fig_dir, comp_safe,
-                        f"{disp} Difference Gate Matrix",
-                        f"{disp} Gate Matrix",
-                    )
-                    save_fig(gfig, fig_dir, fig_name, subfolder=fig_sub)
+                    save_fig(gfig, fig_dir, _flat_stem(
+                        f"{disp} Difference Gate Matrix", f"{disp} Gate Matrix",
+                        comp_label, "svg"))
                     plt.close(gfig)
         summaries.append(comp_summary)
 
     combined_long = pd.concat(all_long, ignore_index=True) if all_long else pd.DataFrame()
     if save and data_dir:
-        _write_csv(combined_long, os.path.join(data_dir, "matrix_differences.csv"), index=False)
+        _write_csv(combined_long,
+                   os.path.join(data_dir, f"matrix_differences_all{name_suffix}.csv"),
+                   index=False)
 
     n_tests = int(combined_long["p"].notna().sum()) if "p" in combined_long else 0
     n_sig = int(combined_long["passes"].sum()) if "passes" in combined_long else 0
@@ -15609,65 +15856,51 @@ def _corr_render_matrix_differences(
 
 def _corr_pipeline_heatmap(value_df, sig_df, title, tick_label_size, *,
                            cmap="coolwarm", vmin=-1.0, vmax=1.0,
-                           colorbar_label=None):
-    """Render a pipeline matrix using the same visual language as plot_matrices."""
+                           colorbar_label=None, annotation_df=None,
+                           annotation_alpha=0.05):
+    """Render a pipeline matrix in the shared house "perfect matrix" style.
+
+    Builds per-cell significance stars from ``annotation_df`` (p/q values, kept
+    where < ``annotation_alpha``) or a boolean ``sig_df`` mask, then defers all
+    drawing to :func:`_render_value_matrix` so pipeline matrices (correlation /
+    p / q / gate / covariation / difference / group-stats) look identical to
+    ``plot_matrices``.
+    """
     ycols = list(value_df.index)
     xcols = list(value_df.columns)
     ny, nx = len(ycols), len(xcols)
     n = max(nx, ny, 1)
-    fig_w = min(max(7.0, nx * 0.42), 30.0)
-    fig_h = min(max(6.2, ny * 0.38), 27.0)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    matrix = value_df.apply(lambda s: pd.to_numeric(s, errors="coerce"))
-    tick_fs = max(7, min(int(tick_label_size), int(130 / n)))
-    star_fs = min(25, max(8, int(220 / n)))
-
-    heatmap = sns.heatmap(
-        matrix, annot=False, fmt=".2f", cmap=cmap,
-        linewidths=0.5, ax=ax, vmin=vmin, vmax=vmax,
-    )
-    try:
-        cbar = heatmap.collections[0].colorbar
-        cbar_tick_fs = max(8, min(12, int(tick_fs * 1.1)))
-        cbar_label_fs = max(9, min(13, int(tick_fs * 1.15)))
-        cbar.ax.tick_params(labelsize=cbar_tick_fs, width=1.2, length=5)
-        if colorbar_label:
-            cbar.ax.text(
-                1.02, 1.05, colorbar_label,
-                transform=cbar.ax.transAxes,
-                ha="left", va="bottom",
-                fontsize=cbar_label_fs,
-                fontweight="bold",
-            )
-    except Exception:
-        pass
-
-    if sig_df is not None:
-        sig = sig_df.reindex(index=ycols, columns=xcols).fillna(False).to_numpy()
+    annot = None
+    if annotation_df is not None:
+        ann = annotation_df.reindex(index=ycols, columns=xcols)
+        annot = pd.DataFrame("", index=ycols, columns=xcols, dtype=object)
         for i in range(ny):
             for j in range(nx):
-                if bool(sig[i, j]):
-                    ax.text(j + 0.5, i + 0.6, "*", ha="center", va="center",
-                            fontsize=star_fs, color="black", fontweight="bold")
+                try:
+                    p_value = float(ann.iat[i, j])
+                except (TypeError, ValueError):
+                    continue
+                if not np.isfinite(p_value):
+                    continue
+                if annotation_alpha is not None and p_value >= float(annotation_alpha):
+                    continue
+                annot.iat[i, j] = _get_annotation(p_value, ns="")
+    elif sig_df is not None:
+        sig = sig_df.reindex(index=ycols, columns=xcols).fillna(False)
+        annot = pd.DataFrame("", index=ycols, columns=xcols, dtype=object)
+        for i in range(ny):
+            for j in range(nx):
+                if bool(sig.iat[i, j]):
+                    annot.iat[i, j] = "*"
 
-    labels_x = [get_display_name(c, minimal=True) for c in xcols]
-    labels_y = [get_display_name(c, minimal=True) for c in ycols]
-    tick_pos_x = np.arange(nx, dtype=float) + 0.5
-    tick_pos_y = np.arange(ny, dtype=float) + 0.5
-    ax.set_xticks(tick_pos_x)
-    ax.set_yticks(tick_pos_y)
-    ax.set_xticklabels(
-        labels_x, rotation=60, ha="right", va="top",
-        rotation_mode="anchor", fontsize=tick_fs,
-    )
-    ax.set_yticklabels(labels_y, rotation=0, ha="right", fontsize=tick_fs)
-    ax.set_title(title, fontsize=int(tick_label_size))
-    max_x_len = max([len(str(label)) for label in labels_x] or [1])
-    max_y_len = max([len(str(label)) for label in labels_y] or [1])
-    left = min(0.42, max(0.20, 0.08 + max_y_len * 0.0065))
-    bottom = min(0.42, max(0.22, 0.08 + max_x_len * 0.008))
-    fig.subplots_adjust(left=left, bottom=bottom, right=0.86, top=0.88)
+    # Count-scale the tick font here (the shared renderer trusts the final
+    # value); the layout engine trims any residual crowding on dense matrices.
+    eff_tls = max(9, min(int(tick_label_size), int(560 / n)))
+    fig, _, _ = _render_value_matrix(
+        value_df, cmap=cmap, vmin=vmin, vmax=vmax,
+        colorbar_label=colorbar_label, title=title, annotations=annot,
+        tick_label_size=eff_tls)
     return fig
 
 
@@ -15714,12 +15947,13 @@ def plot_matrix_differences(
     correlation="pearsonr",
     alpha=0.05,
     min_n=3,
-    difference_gate="fdr",
+    difference_gate="p",
     difference_test="fisher_z",
     plot_signed=True,
     plot_absolute=True,
-    plot_pvalue_matrices=True,
-    plot_qvalue_matrices=True,
+    value_matrices="p",
+    plot_pvalue_matrices=None,
+    plot_qvalue_matrices=None,
     plot_gate_matrix=True,
     tick_label_size=20,
     run_label=None,
@@ -15729,14 +15963,19 @@ def plot_matrix_differences(
     For each requested comparison, this computes each group's correlation
     matrix, then plots ``r_left - r_right`` and ``abs(r_left - r_right)`` cell
     by cell. Pearson matrices also get an independent-groups Fisher r-to-z
-    difference test by default, saved as p-value, FDR q-value, and gate
-    matrices. Spearman/Kendall difference matrices are descriptive unless a
+    difference test by default, saved as p-value and gate matrices. Set
+    ``value_matrices='q'`` or ``value_matrices='both'`` to save FDR q-value
+    heatmaps too. Spearman/Kendall difference matrices are descriptive unless a
     future test backend is added.
     """
     methods = [_normalize_correlation_method(t)
                for t in ([correlation] if isinstance(correlation, str) else list(correlation))]
     if not methods:
         raise ValueError("correlation must name at least one method.")
+    plot_pvalue_matrices, plot_qvalue_matrices = _corr_resolve_value_matrix_flags(
+        value_matrices, plot_pvalue_matrices, plot_qvalue_matrices)
+    value_matrices_label = _corr_value_matrix_label(
+        plot_pvalue_matrices, plot_qvalue_matrices)
 
     _roi_base = _resolve_roi_bases(roi, experiment)[0]
     scope_df = _filtered_summary_for_specificity(experiment, specificity, roi_base=_roi_base)
@@ -15831,6 +16070,7 @@ def plot_matrix_differences(
         test=difference_test,
         plot_signed=plot_signed,
         plot_absolute=plot_absolute,
+        value_matrices=value_matrices_label,
         plot_pvalue_matrices=plot_pvalue_matrices,
         plot_qvalue_matrices=plot_qvalue_matrices,
         plot_gate_matrix=plot_gate_matrix,
@@ -15850,6 +16090,9 @@ def plot_matrix_differences(
         "alpha": float(alpha),
         "difference_gate": str(difference_gate).lower(),
         "difference_test": str(difference_test),
+        "value_matrices": value_matrices_label,
+        "plot_pvalue_matrices": bool(plot_pvalue_matrices),
+        "plot_qvalue_matrices": bool(plot_qvalue_matrices),
         "n_comparisons": diff["n_comparisons"],
         "n_difference_tests": diff["n_difference_tests"],
         "n_difference_significant": diff["n_difference_significant"],
@@ -15882,7 +16125,7 @@ def plot_correlation_pipeline(
     against_exclude="",
     tests=("pearsonr", "spearmanr", "kendalltau"),
     require="and",
-    gate="fdr",
+    gate="p",
     alpha=0.05,
     min_n=3,
     max_regressions=12,
@@ -15892,8 +16135,9 @@ def plot_correlation_pipeline(
     normalize_x=False,
     normalize_y=False,
     tick_label_size=20,
-    plot_pvalue_matrices=True,
-    plot_qvalue_matrices=True,
+    value_matrices="p",
+    plot_pvalue_matrices=None,
+    plot_qvalue_matrices=None,
     plot_difference_matrices=False,
     difference_comparisons=None,
     difference_gate=None,
@@ -15902,11 +16146,12 @@ def plot_correlation_pipeline(
     plot_difference_signed=True,
     plot_difference_absolute=True,
     plot_difference_pvalue_matrices=True,
-    plot_difference_qvalue_matrices=True,
+    plot_difference_qvalue_matrices=False,
     plot_difference_gate_matrix=True,
     run_label=None,
     if_exists="overwrite",
     write_manifest=True,
+    montage=True,
 ):
     """Compatibility wrapper for :func:`PyFLASH.pipeline.correlation`."""
     kwargs = dict(locals())
@@ -16135,6 +16380,10 @@ def plot_rect_matrices(
     # Width follows x/y cell aspect so square cells do not create large
     # horizontal dead-space between panels.
     panel_w = min(6.0, max(1.2, panel_h * (max_x / max(1, max_y))))
+    # Shrink tick-label font as the matrix gets denser so labels don't overlap
+    # (mirrors the adaptive sizing single-panel matrices use); the layout engine
+    # is a further safety net at save time.
+    rect_tick_fs = max(7, min(int(tick_label_size), int(130 / max(max_x, max_y))))
 
     panel_fig_axes = []
     fig, axes = plt.subplots(
@@ -16296,9 +16545,9 @@ def plot_rect_matrices(
         ax.set_xticks(x_tick_pos)
         ax.set_yticks(y_tick_pos)
 
-        ax.set_xticklabels(x_labels, rotation=60, ha='right', fontsize=tick_label_size)
+        ax.set_xticklabels(x_labels, rotation=60, ha='right', fontsize=rect_tick_fs)
         if i == 0:
-            ax.set_yticklabels(y_labels, rotation=0, ha='right', fontsize=tick_label_size)
+            ax.set_yticklabels(y_labels, rotation=0, ha='right', fontsize=rect_tick_fs)
         else:
             ax.set_yticks([])
             ax.set_ylabel("")
@@ -17643,20 +17892,21 @@ _PARAM_DESCRIPTIONS = {
     # ── Correlation pipeline ─────────────────────────────────────────
     'tests':                    'Correlation methods to run, e.g. ("pearsonr", "spearmanr", "kendalltau").',
     'require':                  'Combine methods with "and" (pair must pass every test) or "or" (any test).',
-    'gate':                     'Significance basis for selecting pairs: "fdr" (q-values) or "p" (raw p-values).',
+    'gate':                     'Significance basis for selecting pairs: "p" (raw p-values, default) or "fdr" (q-values).',
     'min_n':                    'Minimum paired observations required to test a correlation (default 3).',
     'max_regressions':          'Cap on regression plots for surviving pairs; None plots all.',
-    'plot_pvalue_matrices':     'For correlation_pipeline, save raw p-value matrix heatmaps for each test.',
-    'plot_qvalue_matrices':     'For correlation_pipeline, save FDR q-value matrix heatmaps for each test.',
+    'value_matrices':           'Which p/q matrix heatmaps to save: "p" (default), "q", "both", or "none". CSVs always include both.',
+    'plot_pvalue_matrices':     'Legacy override for saving raw p-value matrix heatmaps for each test.',
+    'plot_qvalue_matrices':     'Legacy override for saving FDR q-value matrix heatmaps for each test.',
     'plot_difference_matrices': 'For correlation_pipeline, compare grouped correlation matrices pairwise.',
     'difference_comparisons':   'Matrix-difference comparisons: ["1-2"] or explicit pairs like [("AD", "MCI")].',
-    'difference_gate':          'Significance basis for matrix-difference gate: "fdr"/q-values or "p"/raw p-values.',
+    'difference_gate':          'Significance basis for matrix-difference gate: "p"/raw p-values or "fdr"/q-values.',
     'difference_alpha':         'Alpha threshold for matrix-difference p/q/gate heatmaps. Defaults to pipeline alpha.',
     'difference_test':          'Correlation-difference test backend. "fisher_z" tests independent Pearson correlations.',
     'plot_difference_signed':   'Save signed correlation-difference matrices (left minus right).',
     'plot_difference_absolute': 'Save absolute correlation-difference matrices abs(left minus right).',
     'plot_difference_pvalue_matrices': 'Save Fisher-z p-value heatmaps for supported matrix differences.',
-    'plot_difference_qvalue_matrices': 'Save FDR q-value heatmaps for supported matrix differences.',
+    'plot_difference_qvalue_matrices': 'Save FDR q-value heatmaps for supported matrix differences; off by default.',
     'plot_difference_gate_matrix':     'Save binary gate heatmaps for supported matrix differences.',
     'regression_factor':        'Factor used to colour/group the regression scatter (e.g. "Diagnosis").',
     'regression_test':          'Correlation method annotated on each regression plot.',
@@ -17664,6 +17914,22 @@ _PARAM_DESCRIPTIONS = {
     'run_label':                'Name for this run folder; auto-derived from columns+settings if omitted.',
     'if_exists':                'On run-folder collision: "overwrite" (default), "version", "error", or "skip".',
     'write_manifest':           'Write manifest.json and append to the runs index (default True).',
+    'include_condition_distributions': 'For data_overview_pipeline, compute condition/factor distribution stats.',
+    'include_effect_sizes':     'For data_overview_pipeline, compute control-vs-group effect-size table.',
+    'outlier_methods':          'Outlier methods for data_overview_pipeline: "rout" (default), "iqr", "mad", or a tuple combining them.',
+    'rout_q':                   'ROUT false-discovery-rate Q value in percent (default 1.0, matching GraphPad Prism).',
+    'iqr_k':                    'Tukey IQR fence multiplier when using outlier_methods including "iqr" (default 1.5).',
+    'mad_threshold':            'Modified-z absolute threshold when using outlier_methods including "mad" (default 3.5).',
+    'plot_condition_distributions': 'Save raw condition/factor distribution panels for selected numeric columns.',
+    'plot_condition_distribution_zscores': 'Save z-scored condition/factor distribution panels.',
+    'plot_condition_fingerprint': 'Save group x metric z-score heatmap from condition distribution summaries.',
+    'plot_condition_variability': 'Save group x metric variability heatmap from condition distribution summaries.',
+    'plot_effect_sizes':        'Save effect-size forest plot for group-vs-control comparisons.',
+    'condition_distribution_plot': 'Distribution style: "raincloud", "boxstrip", "violin", or "strip".',
+    'fingerprint_stat':         'Statistic used in the condition fingerprint heatmap, usually "median" or "mean".',
+    'variability_stat':         'Statistic used in the condition variability heatmap, e.g. "cv_pct" or "iqr".',
+    'effect_control':           'Control group for data_overview effect sizes; defaults to the first condition/factor group.',
+    'max_plot_items':           'Cap long overview plots to this many columns/items (default 30).',
     'conditions':               'Subset of conditions to include.',
     'encode_x_categorical':     'Treat x-axis as categorical.',
     'combine_conditions':       'Combine all conditions into one panel.',
@@ -17916,11 +18182,17 @@ def plot_power_curve(batch=None, *, effect_sizes=(0.2, 0.5, 0.8), n_range=(2, 30
             rows.append({"effect_size": abs(es), "n_per_group": int(n), "power": p, "observed": is_obs})
 
     for tp in target_powers:
-        ax.axhline(tp, color="grey", lw=1, ls=":")
-        ax.text(ns[-1], tp, f" {int(tp * 100)}%", va="center", fontsize=10, color="grey")
+        ax.axhline(tp, color="grey", lw=1.5, ls=":")
+        # Place the % label just past the right spine so the dotted line doesn't
+        # run through it.
+        ax.text(1.015, tp, f"{int(tp * 100)}%", transform=ax.get_yaxis_transform(),
+                va="center", ha="left", fontsize=18, color="grey",
+                fontweight="bold", clip_on=False)
     if observed_n is not None:
-        ax.axvline(observed_n, color="crimson", lw=1.5, ls="-.")
-        ax.text(observed_n, 0.02, f" n={observed_n}", color="crimson", fontsize=10, rotation=90, va="bottom")
+        ax.axvline(observed_n, color="crimson", lw=2.0, ls="-.")
+        _gap = (float(n_range[1]) - float(n_range[0])) * 0.025
+        ax.text(observed_n - _gap, 0.05, f"n={observed_n}", color="crimson", fontsize=18,
+                fontweight="bold", rotation=90, va="bottom", ha="center")
 
     ax.set_xlabel("n per group")
     ax.set_ylabel("Power")
@@ -18087,3 +18359,448 @@ def plot_timecourse(batch, column, time_col="Time", group_col="Genotype",
         save_fig(fig, _stat_plot_save_path(batch, save_path),
                  strip_name(save_name or f"{column}_timecourse"), verbose=False)
     return (fig, fits) if return_data else fig
+
+
+# ── Group-comparison plot primitives ─────────────────────────────────────────
+# Shared drawing cores + standalone ``plot_*`` wrappers for the figure types
+# introduced by ``PyFLASH.pipeline.group_comparison``. They live in the plotting
+# module so every pipeline figure type is also a first-class, registry-listed plot
+# callable on its own (docs/new_pipeline_plans/PREFERENCES.md §8). The pipeline
+# feeds precomputed inferential p/q into the cores via ``value_col``; the standalone
+# wrappers compute descriptive animal-level effect sizes / raw points themselves.
+
+
+def _superplot_figure(roi_long, order, marker, tick_label_size=20):
+    """SuperPlot: ROI points coloured by animal over per-animal means + the group
+    mean line. ``roi_long`` has columns ``[value, AnimalName, group]``."""
+    present = set(roi_long["group"].astype(str))
+    groups = [g for g in order if str(g) in present]
+    if not groups:
+        return None
+    cmap = plt.get_cmap("tab20")
+    rng = np.random.default_rng(0)
+    fig, ax = plt.subplots(figsize=(1.7 * len(groups) + 2.5, 6))
+    for gi, gl in enumerate(groups):
+        sub = roi_long[roi_long["group"].astype(str) == str(gl)]
+        animals = list(dict.fromkeys(sub["AnimalName"]))
+        animal_means = []
+        for ai, an in enumerate(animals):
+            v = sub[sub["AnimalName"] == an]["value"].to_numpy()
+            if not len(v):
+                continue
+            jitter = (rng.random(len(v)) - 0.5) * 0.28
+            ax.scatter(np.full(len(v), gi) + jitter, v, s=14,
+                       color=cmap(ai % 20), alpha=0.5, edgecolor="none", zorder=2)
+            m = float(np.mean(v))
+            animal_means.append(m)
+            ax.scatter([gi], [m], s=90, color=cmap(ai % 20),
+                       edgecolor="black", linewidth=0.8, zorder=3)
+        if animal_means:
+            gm = float(np.mean(animal_means))
+            ax.plot([gi - 0.32, gi + 0.32], [gm, gm], color="black", lw=2.2, zorder=4)
+    ax.set_xticks(range(len(groups)))
+    ax.set_xticklabels([str(g) for g in groups],
+                       fontsize=max(8, int(tick_label_size) - 7))
+    ax.set_ylabel(str(marker), fontsize=max(9, int(tick_label_size) - 5))
+    ax.set_title(f"SuperPlot: {marker}", fontsize=int(tick_label_size))
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def _effect_forest_figure(df, value_col=None, alpha=0.05, tick_label_size=20, max_items=30):
+    """Forest of Hedges g (+ CI) per row of ``df`` (needs ``hedges_g``; optional
+    ``ci_low``/``ci_high``, ``comparison``). When ``value_col`` is given, rows with
+    ``value_col < alpha`` are marked significant."""
+    d = df.copy()
+    if "hedges_g" not in d.columns:
+        return None
+    d["hedges_g"] = pd.to_numeric(d["hedges_g"], errors="coerce")
+    d = d[np.isfinite(d["hedges_g"])]
+    if d.empty:
+        return None
+    d["_abs"] = d["hedges_g"].abs()
+    d = d.sort_values("_abs", ascending=False, kind="mergesort")
+    if max_items is not None and len(d) > int(max_items):
+        d = d.head(int(max_items))
+    d = d.iloc[::-1].reset_index(drop=True)
+    if value_col is not None and value_col in d.columns:
+        sig = pd.to_numeric(d[value_col], errors="coerce") < float(alpha)
+    else:
+        sig = pd.Series(False, index=d.index)
+    label_col = "comparison" if "comparison" in d.columns else None
+    y = np.arange(len(d))
+    fig, ax = plt.subplots(figsize=(10.5, min(max(4.2, 0.4 * len(d) + 1.8), 18.0)))
+    for yi, (_, r) in enumerate(d.iterrows()):
+        g = float(r["hedges_g"])
+        lo, hi = r.get("ci_low", np.nan), r.get("ci_high", np.nan)
+        is_sig = bool(sig.iloc[yi]) if len(sig) else False
+        color = "#c0392b" if is_sig else "#4878a8"
+        if np.isfinite(lo) and np.isfinite(hi):
+            ax.plot([float(lo), float(hi)], [yi, yi], color=color, lw=1.4, alpha=0.85)
+        ax.scatter([g], [yi], s=46, color=color, zorder=3,
+                   edgecolor="black" if is_sig else "none", linewidth=0.4)
+    ax.axvline(0.0, color="#252525", lw=1.0)
+    ax.axvline(-0.8, color="#cccccc", ls="--", lw=0.8)
+    ax.axvline(0.8, color="#cccccc", ls="--", lw=0.8)
+    ax.set_yticks(y)
+    ax.set_yticklabels(
+        [f"{r['marker']} | {r[label_col]}" if label_col else str(r["marker"])
+         for _, r in d.iterrows()],
+        fontsize=max(7, int(tick_label_size) - 9))
+    ax.set_xlabel("Hedges g (group - reference)",
+                  fontsize=max(9, int(tick_label_size) - 5))
+    suff = f"  (* {value_col} < {alpha:g})" if (value_col is not None and value_col in df.columns) else ""
+    ax.set_title("Effect size forest" + suff, fontsize=int(tick_label_size))
+    ax.grid(axis="x", alpha=0.25)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def _stats_matrix_figure(df, value_col=None, alpha=0.05, tick_label_size=20):
+    """Marker x comparison heatmap of signed Hedges g (``df`` needs ``marker``,
+    ``comparison``, ``hedges_g``). When ``value_col`` is given, cells with
+    ``value_col < alpha`` are asterisked."""
+    if df.empty or "marker" not in df.columns or "comparison" not in df.columns:
+        return None
+    markers = list(dict.fromkeys(df["marker"].astype(str)))
+    comps = list(dict.fromkeys(df["comparison"].astype(str)))
+    eff = pd.DataFrame(np.nan, index=markers, columns=comps, dtype=float)
+    pmat = pd.DataFrame(np.nan, index=markers, columns=comps, dtype=float)
+    annotate = value_col is not None and value_col in df.columns
+    for _, r in df.iterrows():
+        eff.loc[str(r["marker"]), str(r["comparison"])] = pd.to_numeric(
+            r["hedges_g"], errors="coerce")
+        if annotate:
+            pmat.loc[str(r["marker"]), str(r["comparison"])] = pd.to_numeric(
+                r[value_col], errors="coerce")
+    finite = eff.to_numpy()[np.isfinite(eff.to_numpy())]
+    vmax = float(np.max(np.abs(finite))) if finite.size else 1.0
+    vmax = max(vmax, 0.2)
+    suff = f"; * {value_col} < {alpha:g}" if annotate else ""
+    return _corr_pipeline_heatmap(
+        eff, None, f"Group differences (Hedges g{suff})", tick_label_size,
+        cmap="coolwarm", vmin=-vmax, vmax=vmax,
+        colorbar_label="Hedges g (group - reference)",
+        annotation_df=(pmat if annotate else None), annotation_alpha=alpha,
+    )
+
+
+def _volcano_table_figure(sub, value_col, alpha, title, tick_label_size=20):
+    """Volcano from a precomputed table (``hedges_g`` on x, ``-log10(value_col)``
+    on y). Used by the pipeline for its q-gated volcanos; the standalone volcano
+    plot is :func:`plot_volcano`."""
+    d = sub.copy()
+    d["_e"] = pd.to_numeric(d["hedges_g"], errors="coerce")
+    d["_p"] = pd.to_numeric(d[value_col], errors="coerce")
+    d = d[np.isfinite(d["_e"]) & np.isfinite(d["_p"])]
+    if d.empty:
+        return None
+    y = -np.log10(d["_p"].clip(lower=1e-300))
+    sig = d["_p"] < alpha
+    fig, ax = plt.subplots(figsize=(8.5, 7))
+    ax.scatter(d["_e"][~sig], y[~sig], s=42, c="#bdbdbd", edgecolor="none",
+               label="ns", zorder=2)
+    ax.scatter(d["_e"][sig], y[sig], s=56, c="#c0392b", edgecolor="black",
+               linewidth=0.4, label=f"{value_col} < {alpha:g}", zorder=3)
+    ax.axhline(-np.log10(alpha), color="#777", ls="--", lw=0.9)
+    ax.axvline(0.0, color="#252525", lw=1.0)
+    for _, r in d[sig].iterrows():
+        ax.annotate(str(r["marker"]),
+                    (float(r["_e"]), float(-np.log10(max(float(r["_p"]), 1e-300)))),
+                    fontsize=max(7, int(tick_label_size) - 11),
+                    xytext=(3, 3), textcoords="offset points")
+    ax.set_xlabel("Hedges g (group - reference)",
+                  fontsize=max(9, int(tick_label_size) - 5))
+    ax.set_ylabel(f"-log10({value_col})", fontsize=max(9, int(tick_label_size) - 5))
+    ax.set_title(title, fontsize=int(tick_label_size))
+    ax.legend(fontsize=max(7, int(tick_label_size) - 9), frameon=False)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def _animal_group_map_from_groups(scope_df, groups):
+    """Map each in-scope animal to its comparison-group label (AnimalName -> label),
+    respecting the by/factor/specificity grouping the summary was split into."""
+    out = {}
+    if "AnimalName" in scope_df.columns:
+        for glabel, gidx, _spec in groups:
+            in_group = scope_df.loc[scope_df.index.intersection(gidx), "AnimalName"]
+            for an in in_group.astype(str):
+                out[an] = str(glabel)
+    return out
+
+
+def _resolve_marker_roi_long(experiment, summary_col, animal_group_map, roi_base=None):
+    """Best-effort ROI-level long frame ``[value, AnimalName, group]`` for a summary
+    column, or ``None`` when no matching ROI column is found. Restricts to the run's
+    ROI base + in-scope animals and tags each row with its comparison group."""
+    data = getattr(experiment, "data", None)
+    if not data or not animal_group_map:
+        return None
+    _GC_AGG_SUFFIXES = ("Mean", "Median", "Total", "Sum", "Max", "Min", "Std", "SEM")
+    target = str(summary_col)
+    match = None
+    for key, attr in data.items():
+        df = getattr(attr, "df", None)
+        if df is None:
+            continue
+        cols = set(map(str, df.columns))
+        if target in cols:
+            match = (key, target)
+            break
+        for suf in _GC_AGG_SUFFIXES:
+            if target.endswith(suf) and target[:-len(suf)] in cols:
+                match = (key, target[:-len(suf)])
+                break
+        if match is not None:
+            break
+    if match is None:
+        return None
+    key, roi_col = match
+    df = data[key].df
+    df = df.reset_index() if df.index.name is not None else df
+    if "AnimalName" not in df.columns:
+        return None
+    if roi_base is not None:
+        base_col = "ROI" if "ROI" in df.columns else (
+            "Region" if "Region" in df.columns else None)
+        if base_col is not None:
+            from PyFLASH.utils import extract_region_base
+
+            based = df[base_col].fillna("").astype(str).map(extract_region_base)
+            match = based == str(roi_base)
+            if match.any():
+                df = df[match]
+            elif len(_resolve_roi_bases(None, experiment)) > 1:
+                # Multi-base experiment, but this marker's ROI table has no rows for
+                # the requested base -> there is no data here; do NOT pool the other
+                # bases' rows. (A single-base experiment whose ROI names don't encode
+                # the base falls through and keeps all rows.)
+                return None
+    keep = df[[roi_col, "AnimalName"]].copy()
+    keep = keep.rename(columns={roi_col: "value"})
+    keep["value"] = pd.to_numeric(keep["value"], errors="coerce")
+    keep["group"] = keep["AnimalName"].astype(str).map(animal_group_map)
+    keep = keep.dropna(subset=["value", "group"])
+    return keep if not keep.empty else None
+
+
+def _match_group_label(labels, control):
+    """Resolve a control/reference group label (case-insensitive)."""
+    if control is None:
+        return str(labels[0]) if len(labels) else None
+    target = str(control).strip().casefold()
+    for label in labels:
+        if str(label).strip().casefold() == target:
+            return str(label)
+    raise ValueError(f"control {control!r} is not one of {list(labels)}.")
+
+
+def _effect_sizes_vs_control(num_df, numeric_cols, groups, control_label,
+                             *, effect_ci=True, n_resamples=2000, min_n=3):
+    """Animal-level Hedges g (+ bootstrap CI) per marker, each group vs the control."""
+    from PyFLASH.stats_extra import effect_ci as _eff_ci, hedges_g, interpret_magnitude
+
+    rows = []
+    for col in numeric_cols:
+        arr = {}
+        for glabel, gidx, _spec in groups:
+            arr[str(glabel)] = pd.to_numeric(
+                num_df.loc[num_df.index.intersection(gidx), col], errors="coerce"
+            ).dropna().astype(float).to_numpy()
+        ctrl = arr.get(str(control_label))
+        if ctrl is None or len(ctrl) < int(min_n):
+            continue
+        for glabel, _gidx, _spec in groups:
+            gl = str(glabel)
+            if gl == str(control_label):
+                continue
+            gv = arr.get(gl)
+            if gv is None or len(gv) < int(min_n):
+                continue
+            g = float(hedges_g(gv, ctrl))
+            lo = hi = float("nan")
+            if effect_ci and np.isfinite(g):
+                try:
+                    lo, hi = _eff_ci(gv, ctrl, "hedges", n_resamples=n_resamples)
+                    lo, hi = float(lo), float(hi)
+                except Exception:
+                    lo = hi = float("nan")
+            rows.append({
+                "marker": str(col), "reference": str(control_label), "group": gl,
+                "comparison": f"{gl} vs {control_label}", "n_reference": int(len(ctrl)),
+                "n_group": int(len(gv)), "hedges_g": g, "ci_low": lo, "ci_high": hi,
+                "interpretation": interpret_magnitude(g, "d") if np.isfinite(g) else "",
+            })
+    return pd.DataFrame(rows)
+
+
+def _gc_plot_prepare(experiment, filtered_columns, column_strings, regex_string,
+                     exclude, by, factor, specificity, roi):
+    """Shared scope/column/group resolution for the standalone group-comparison plots."""
+    _roi_base = _resolve_roi_bases(roi, experiment)[0]
+    scope_df = _filtered_summary_for_specificity(experiment, specificity, roi_base=_roi_base)
+    cols = _resolve_filtered_columns(
+        experiment, filtered_columns=filtered_columns, column_strings=column_strings,
+        regex_string=regex_string, exclude=exclude, source_df=scope_df)
+    num_df, numeric_cols, _dropped = _prepare_matrix_numeric_df(
+        scope_df, cols, drop_duplicate_columns=False, require_complete_numeric=False)
+    groups = _corr_pipeline_groups(experiment, scope_df, num_df, by, factor, specificity)
+    return _roi_base, scope_df, num_df, numeric_cols, groups
+
+
+def plot_superplot(experiment, filtered_columns=None, by='conditions', factor=None,
+                   specificity=None, roi=None, column_strings=None, regex_string=None,
+                   exclude='', tick_label_size=20, save=True):
+    """SuperPlot per marker: ROI-level points coloured by animal over each animal's
+    mean and the group mean (Lord et al. 2020). Shows biological (animal) vs technical
+    (ROI) spread for the chosen grouping. Needs ROI-level data
+    (``experiment.data[...]``); markers without resolvable ROI rows are skipped.
+
+    Returns ``{marker: fig}`` (or a nested dict in ROI/specificity-queue modes).
+    """
+    _roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(_roi_bases) > 1:
+        return {rb: plot_superplot(
+            experiment, filtered_columns=filtered_columns, by=by, factor=factor,
+            specificity=specificity, roi=rb, column_strings=column_strings,
+            regex_string=regex_string, exclude=exclude, tick_label_size=tick_label_size,
+            save=save) for rb in _roi_bases}
+    if is_specificity_queue(specificity):
+        return {spec: plot_superplot(
+            experiment, filtered_columns=filtered_columns, by=by, factor=factor,
+            specificity=spec, roi=roi, column_strings=column_strings,
+            regex_string=regex_string, exclude=exclude, tick_label_size=tick_label_size,
+            save=save) for spec in iter_specificities(specificity)}
+
+    _roi_base, scope_df, num_df, numeric_cols, groups = _gc_plot_prepare(
+        experiment, filtered_columns, column_strings, regex_string, exclude,
+        by, factor, specificity, roi)
+    if len(numeric_cols) < 1:
+        raise ValueError("plot_superplot: no numeric marker columns after filtering.")
+    group_labels = [str(g[0]) for g in groups]
+    amap = _animal_group_map_from_groups(scope_df, groups)
+    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+    subfolder, suffix = build_subfolder(
+        plot_type='SuperPlot', factor=factor, specificity=specificity,
+        aliases=getattr(experiment, 'aliases', None), roi_base=_roi_base,
+        multi_roi=_multi_roi)
+    out = {}
+    for col in numeric_cols:
+        roi_long = _resolve_marker_roi_long(experiment, col, amap, _roi_base)
+        if roi_long is None:
+            _log.hint(f"[plot_superplot] no ROI-level data resolved for '{col}'; skipped.")
+            continue
+        fig = _superplot_figure(roi_long, group_labels, col, tick_label_size)
+        if fig is None:
+            continue
+        if save:
+            save_fig(fig, experiment.fig_path, f"SuperPlot {col}" + suffix,
+                     subfolder=subfolder, verbose=False)
+        out[col] = fig
+    return out
+
+
+def plot_effect_forest(experiment, filtered_columns=None, by='conditions', factor=None,
+                       specificity=None, roi=None, control=None, alpha=0.05,
+                       max_items=30, effect_ci=True, n_resamples=2000, min_n=3,
+                       tick_label_size=20, save=True, column_strings=None,
+                       regex_string=None, exclude=''):
+    """Forest plot of animal-level effect sizes (Hedges g + bootstrap CI), one row per
+    marker x group-vs-``control``, ranked by |effect|. The inferential, significance-
+    marked variant is produced by ``pipeline.group_comparison``; this standalone view
+    is descriptive. Returns the figure (or a queue dict)."""
+    _roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(_roi_bases) > 1:
+        return {rb: plot_effect_forest(
+            experiment, filtered_columns=filtered_columns, by=by, factor=factor,
+            specificity=specificity, roi=rb, control=control, alpha=alpha,
+            max_items=max_items, effect_ci=effect_ci, n_resamples=n_resamples,
+            min_n=min_n, tick_label_size=tick_label_size, save=save,
+            column_strings=column_strings, regex_string=regex_string, exclude=exclude)
+            for rb in _roi_bases}
+    if is_specificity_queue(specificity):
+        return {spec: plot_effect_forest(
+            experiment, filtered_columns=filtered_columns, by=by, factor=factor,
+            specificity=spec, roi=roi, control=control, alpha=alpha,
+            max_items=max_items, effect_ci=effect_ci, n_resamples=n_resamples,
+            min_n=min_n, tick_label_size=tick_label_size, save=save,
+            column_strings=column_strings, regex_string=regex_string, exclude=exclude)
+            for spec in iter_specificities(specificity)}
+
+    _roi_base, scope_df, num_df, numeric_cols, groups = _gc_plot_prepare(
+        experiment, filtered_columns, column_strings, regex_string, exclude,
+        by, factor, specificity, roi)
+    if len(numeric_cols) < 1:
+        raise ValueError("plot_effect_forest: no numeric marker columns after filtering.")
+    control_label = _match_group_label([str(g[0]) for g in groups], control)
+    eff = _effect_sizes_vs_control(num_df, numeric_cols, groups, control_label,
+                                   effect_ci=effect_ci, n_resamples=n_resamples, min_n=min_n)
+    fig = _effect_forest_figure(eff, value_col=None, alpha=alpha,
+                                tick_label_size=tick_label_size, max_items=max_items)
+    if fig is None:
+        _log.hint("[plot_effect_forest] no finite effect sizes to plot.")
+        return None
+    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+    subfolder, suffix = build_subfolder(
+        plot_type='Effect Forest', factor=factor, specificity=specificity,
+        aliases=getattr(experiment, 'aliases', None), roi_base=_roi_base,
+        multi_roi=_multi_roi)
+    if save:
+        save_fig(fig, experiment.fig_path, "Effect Size Forest" + suffix,
+                 subfolder=subfolder, verbose=False)
+    return fig
+
+
+def plot_group_matrix(experiment, filtered_columns=None, by='conditions', factor=None,
+                      specificity=None, roi=None, control=None, alpha=0.05,
+                      effect_ci=False, n_resamples=2000, min_n=3, tick_label_size=20,
+                      save=True, column_strings=None, regex_string=None, exclude=''):
+    """Marker x (group-vs-``control``) heatmap of signed Hedges g — an at-a-glance map
+    of which markers move in which groups, in the gate-matrix idiom. The inferential,
+    asterisked variant is produced by ``pipeline.group_comparison``; this standalone
+    view is descriptive. Returns the figure (or a queue dict)."""
+    _roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(_roi_bases) > 1:
+        return {rb: plot_group_matrix(
+            experiment, filtered_columns=filtered_columns, by=by, factor=factor,
+            specificity=specificity, roi=rb, control=control, alpha=alpha,
+            effect_ci=effect_ci, n_resamples=n_resamples, min_n=min_n,
+            tick_label_size=tick_label_size, save=save, column_strings=column_strings,
+            regex_string=regex_string, exclude=exclude) for rb in _roi_bases}
+    if is_specificity_queue(specificity):
+        return {spec: plot_group_matrix(
+            experiment, filtered_columns=filtered_columns, by=by, factor=factor,
+            specificity=spec, roi=roi, control=control, alpha=alpha,
+            effect_ci=effect_ci, n_resamples=n_resamples, min_n=min_n,
+            tick_label_size=tick_label_size, save=save, column_strings=column_strings,
+            regex_string=regex_string, exclude=exclude)
+            for spec in iter_specificities(specificity)}
+
+    _roi_base, scope_df, num_df, numeric_cols, groups = _gc_plot_prepare(
+        experiment, filtered_columns, column_strings, regex_string, exclude,
+        by, factor, specificity, roi)
+    if len(numeric_cols) < 1:
+        raise ValueError("plot_group_matrix: no numeric marker columns after filtering.")
+    control_label = _match_group_label([str(g[0]) for g in groups], control)
+    eff = _effect_sizes_vs_control(num_df, numeric_cols, groups, control_label,
+                                   effect_ci=effect_ci, n_resamples=n_resamples, min_n=min_n)
+    fig = _stats_matrix_figure(eff, value_col=None, alpha=alpha, tick_label_size=tick_label_size)
+    if fig is None:
+        _log.hint("[plot_group_matrix] no finite effect sizes to plot.")
+        return None
+    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+    subfolder, suffix = build_subfolder(
+        plot_type='Group Matrix', factor=factor, specificity=specificity,
+        aliases=getattr(experiment, 'aliases', None), roi_base=_roi_base,
+        multi_roi=_multi_roi)
+    if save:
+        save_fig(fig, experiment.fig_path, "Group Difference Matrix" + suffix,
+                 subfolder=subfolder, verbose=False)
+    return fig
