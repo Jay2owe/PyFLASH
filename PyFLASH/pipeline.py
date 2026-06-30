@@ -3010,54 +3010,6 @@ def _ovw_effect_sizes(numeric_df, numeric_cols, groups, effect_control=None,
     return pd.DataFrame(rows, columns=columns), control_label
 
 
-def _ovw_effect_size_forest_figure(effect_sizes, tick_label_size, max_items):
-    """Forest-style plot of largest absolute Hedges g values."""
-    if effect_sizes is None or effect_sizes.empty:
-        return None
-    df = effect_sizes.copy()
-    df["hedges_g"] = pd.to_numeric(df["hedges_g"], errors="coerce")
-    df = df[np.isfinite(df["hedges_g"])]
-    if df.empty:
-        return None
-    df["abs_g"] = df["hedges_g"].abs()
-    df = df.sort_values("abs_g", ascending=False, kind="mergesort")
-    if max_items is not None and len(df) > int(max_items):
-        df = df.head(int(max_items))
-    df = df.iloc[::-1].reset_index(drop=True)
-    labels = [
-        f"{_ovw_short_label(row['group'], 16)} vs {_ovw_short_label(row['control'], 16)} | "
-        f"{_ovw_short_label(row['column'], 32)}"
-        for _, row in df.iterrows()
-    ]
-    groups = df["group"].astype(str).tolist()
-    palette = _ovw_group_palette(groups)
-    y = np.arange(len(df))
-    fig_h = min(max(4.2, 0.38 * len(df) + 1.8), 18.0)
-    fig, ax = plt.subplots(figsize=(10.5, fig_h))
-    for yi, row in df.iterrows():
-        x = float(row["hedges_g"])
-        low = row.get("hedges_g_ci_low", np.nan)
-        high = row.get("hedges_g_ci_high", np.nan)
-        color = palette[str(row["group"])]
-        if np.isfinite(low) and np.isfinite(high):
-            ax.plot([float(low), float(high)], [yi, yi],
-                    color=color, linewidth=1.4, alpha=0.82)
-        ax.scatter([x], [yi], s=42, color=color, zorder=3)
-    ax.axvline(0, color="#252525", linewidth=1.0)
-    ax.axvline(-0.8, color="#bdbdbd", linewidth=0.8, linestyle="--")
-    ax.axvline(0.8, color="#bdbdbd", linewidth=0.8, linestyle="--")
-    ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=max(7, int(tick_label_size) - 9))
-    ax.set_xlabel("Hedges g (group - control)",
-                  fontsize=max(9, int(tick_label_size) - 5))
-    ax.set_title("Effect size forest", fontsize=int(tick_label_size))
-    ax.grid(axis="x", alpha=0.25)
-    for spine in ("top", "right", "left"):
-        ax.spines[spine].set_visible(False)
-    fig.tight_layout()
-    return fig
-
-
 @montage_pipeline(title="Data Overview Pipeline")
 def data_overview(
     experiment,
@@ -3496,8 +3448,23 @@ def data_overview(
                 save_fig(vfig, fig_dir, f"Condition Variability{spec_tag}", montage=True)
                 plt.close(vfig)
         if plot_effect_sizes and include_effect_sizes and not effect_sizes.empty:
-            efig = _ovw_effect_size_forest_figure(
-                effect_sizes, tick_label_size, max_plot_items)
+            # Shared forest renderer; the overview variant colours each row by its
+            # group (palette) and labels rows "<group> vs <control> | <column>".
+            _es_groups = effect_sizes["group"].astype(str).tolist()
+            _es_palette = _ovw_group_palette(_es_groups)
+            efig = _effect_forest_figure(
+                effect_sizes, value_col=None, tick_label_size=tick_label_size,
+                max_items=max_plot_items,
+                ci_cols=("hedges_g_ci_low", "hedges_g_ci_high"),
+                labels=[
+                    f"{_ovw_short_label(r['group'], 16)} vs "
+                    f"{_ovw_short_label(r['control'], 16)} | "
+                    f"{_ovw_short_label(r['column'], 32)}"
+                    for _, r in effect_sizes.iterrows()
+                ],
+                colors=[_es_palette[g] for g in _es_groups],
+                xlabel="Hedges g (group - control)",
+            )
             if efig is not None:
                 save_fig(efig, fig_dir, f"Effect Size Forest{spec_tag}", montage=True)
                 plt.close(efig)

@@ -15895,8 +15895,9 @@ def _corr_pipeline_heatmap(value_df, sig_df, title, tick_label_size, *,
                     annot.iat[i, j] = "*"
 
     # Count-scale the tick font here (the shared renderer trusts the final
-    # value); the layout engine trims any residual crowding on dense matrices.
-    eff_tls = max(9, min(int(tick_label_size), int(560 / n)))
+    # value): keep dense pipeline matrices readable (<=12 pt by ~16 cols); the
+    # layout engine trims any residual crowding.
+    eff_tls = max(9, min(int(tick_label_size), int(130 / max(n, 1))))
     fig, _, _ = _render_value_matrix(
         value_df, cmap=cmap, vmin=vmin, vmax=vmax,
         colorbar_label=colorbar_label, title=title, annotations=annot,
@@ -18409,13 +18410,28 @@ def _superplot_figure(roi_long, order, marker, tick_label_size=20):
     return fig
 
 
-def _effect_forest_figure(df, value_col=None, alpha=0.05, tick_label_size=20, max_items=30):
+def _effect_forest_figure(df, value_col=None, alpha=0.05, tick_label_size=20, max_items=30,
+                          *, ci_cols=("ci_low", "ci_high"), labels=None, colors=None,
+                          xlabel="Hedges g (group - reference)"):
     """Forest of Hedges g (+ CI) per row of ``df`` (needs ``hedges_g``; optional
-    ``ci_low``/``ci_high``, ``comparison``). When ``value_col`` is given, rows with
-    ``value_col < alpha`` are marked significant."""
+    CI columns, ``comparison``). When ``value_col`` is given, rows with
+    ``value_col < alpha`` are marked significant (red).
+
+    The single forest renderer for the package. Callers may override the CI
+    column names (``ci_cols``), supply precomputed row ``labels``, or a per-row
+    ``colors`` sequence (e.g. the data-overview forest colours each row by its
+    group instead of by significance). ``labels``/``colors``, if given, must
+    align to ``df`` row-for-row before any filtering.
+    """
     d = df.copy()
     if "hedges_g" not in d.columns:
         return None
+    # Attach caller labels/colours up front so they ride along through the
+    # finite-filter, sort, and head() that follow.
+    if labels is not None:
+        d["_label"] = list(labels)
+    if colors is not None:
+        d["_color"] = list(colors)
     d["hedges_g"] = pd.to_numeric(d["hedges_g"], errors="coerce")
     d = d[np.isfinite(d["hedges_g"])]
     if d.empty:
@@ -18429,14 +18445,15 @@ def _effect_forest_figure(df, value_col=None, alpha=0.05, tick_label_size=20, ma
         sig = pd.to_numeric(d[value_col], errors="coerce") < float(alpha)
     else:
         sig = pd.Series(False, index=d.index)
+    lo_col, hi_col = ci_cols
     label_col = "comparison" if "comparison" in d.columns else None
     y = np.arange(len(d))
     fig, ax = plt.subplots(figsize=(10.5, min(max(4.2, 0.4 * len(d) + 1.8), 18.0)))
     for yi, (_, r) in enumerate(d.iterrows()):
         g = float(r["hedges_g"])
-        lo, hi = r.get("ci_low", np.nan), r.get("ci_high", np.nan)
+        lo, hi = r.get(lo_col, np.nan), r.get(hi_col, np.nan)
         is_sig = bool(sig.iloc[yi]) if len(sig) else False
-        color = "#c0392b" if is_sig else "#4878a8"
+        color = r["_color"] if colors is not None else ("#c0392b" if is_sig else "#4878a8")
         if np.isfinite(lo) and np.isfinite(hi):
             ax.plot([float(lo), float(hi)], [yi, yi], color=color, lw=1.4, alpha=0.85)
         ax.scatter([g], [yi], s=46, color=color, zorder=3,
@@ -18445,12 +18462,14 @@ def _effect_forest_figure(df, value_col=None, alpha=0.05, tick_label_size=20, ma
     ax.axvline(-0.8, color="#cccccc", ls="--", lw=0.8)
     ax.axvline(0.8, color="#cccccc", ls="--", lw=0.8)
     ax.set_yticks(y)
-    ax.set_yticklabels(
-        [f"{r['marker']} | {r[label_col]}" if label_col else str(r["marker"])
-         for _, r in d.iterrows()],
-        fontsize=max(7, int(tick_label_size) - 9))
-    ax.set_xlabel("Hedges g (group - reference)",
-                  fontsize=max(9, int(tick_label_size) - 5))
+    if labels is not None:
+        ytl = list(d["_label"])
+    elif label_col:
+        ytl = [f"{r['marker']} | {r[label_col]}" for _, r in d.iterrows()]
+    else:
+        ytl = [str(r["marker"]) for _, r in d.iterrows()]
+    ax.set_yticklabels(ytl, fontsize=max(7, int(tick_label_size) - 9))
+    ax.set_xlabel(xlabel, fontsize=max(9, int(tick_label_size) - 5))
     suff = f"  (* {value_col} < {alpha:g})" if (value_col is not None and value_col in df.columns) else ""
     ax.set_title("Effect size forest" + suff, fontsize=int(tick_label_size))
     ax.grid(axis="x", alpha=0.25)
