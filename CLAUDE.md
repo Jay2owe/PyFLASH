@@ -8,7 +8,7 @@ distribution is `PyFLASH-analysis`; the import package is `PyFLASH`.
 
 PyFLASH has an agentify-pattern control layer so an agent can make any plot from a
 natural-language request, and extend the package when a request needs a plot that
-doesn't exist yet. Six layers:
+doesn't exist yet. Eight layers:
 
 1. **Registry** — `PyFLASH/spec.py::PLOT_REGISTRY` (YAML short-name → `plot_*`).
 2. **Runner** — `.claude/skills/pyflash/scripts/pyflash_runner.py`: a thin JSON CLI
@@ -21,12 +21,18 @@ doesn't exist yet. Six layers:
 3. **Control skill** — `.claude/skills/pyflash/` (`SKILL.md` + `reference/*.md`): the
    loop that turns a request into a call, runs it, shows the PNG preview, prints the code.
    Drive it with **`/pyflash`**.
-4. **Self-extension skill** — `.claude/skills/pyflash-extend/`: how to add a capability
+4. **Reference refresh hook** — `.claude/settings.json` runs
+   `python scripts/update_pyflash_references.py --if-needed --quiet` after Claude
+   write/edit tools. The script refreshes the generated live-signature block in
+   `.claude/skills/pyflash/reference/plot-functions.md` and mirrors the Claude reference
+   files to `.codex/skills/pyflash/references/`. Agents still maintain the hand-written
+   teaching prose and catalog rows.
+5. **Self-extension skill** — `.claude/skills/pyflash-extend/`: how to add a capability
    when `/pyflash` can't (register/document an existing function, or add a new `plot_*`).
    Use **`/pyflash-extend`**. The detailed plot-implementation contract lives in the global
    `pyflash-add-plot` skill.
-5. **Orientation** — this section.
-6. **Describe layer** — `PyFLASH/report.py`: a guarded, opt-in collector that captures the
+6. **Orientation** — this section.
+7. **Describe layer** — `PyFLASH/report.py`: a guarded, opt-in collector that captures the
    descriptive + inferential numbers a plot already computes (per-group n/mean/SD by animal,
    test, p-values, effect sizes, correlation r/p) instead of discarding them. `stats.py`
    (`multipleComparisons`) and `plotting.py` (`regression_action`) emit into it when armed;
@@ -43,8 +49,26 @@ doesn't exist yet. Six layers:
    `describe_coverage`, and a 0-record non-exempt run returns a `describe_note`. When you
    add a plot that computes statistics, emit them (shared engine or `report.emit`) and mark
    it `DESCRIBE_COVERED` — see the `pyflash-add-plot` skill's describe-layer contract.
+8. **Montage layer** — `PyFLASH/pipeline_montage.py`: every analysis pipeline run writes,
+   on top of its many individual figures, one **overview montage** —
+   `00 - Overview Montage.png`, sorted to the top of the run's `fig_dir` — tiling the run's
+   most important graphs (coefficient + gate matrices, raw/adjusted matrices, missingness +
+   covariation maps, and the top regression scatter plots). Mechanism mirrors the describe
+   layer: an opt-in, inert-by-default capture collector taps `utils.save_fig` (the single
+   figure choke point) via an observer; figures flagged `save_fig(..., montage=True)` are the
+   headline panels, and a `capture_secondary(...)` block lets a pipeline pull its regressions
+   onto the montage while leaving p/q-value matrices off. The `@montage_pipeline` decorator
+   wraps each pipeline, builds the montage into `fig_dir`, and records `result["montage"]`;
+   it honours the per-call `montage=` toggle and `save=False`. A specificity *queue* is one
+   merged run sharing a single folder (each condition's outputs distinguished by a concise
+   filename tag, e.g. `_Dx.AD`), so it gets one combined montage spanning all conditions.
+   **Uniformity is enforced, not hoped for:** every name
+   in `pipeline.__all__` must wear `@montage_pipeline` (or be in `pipeline.MONTAGE_EXEMPT`) —
+   `tests/test_pipeline_montage.py` fails until it does. When you add a pipeline, give it a
+   `montage=True` parameter, wear the decorator, and tag its headline `save_fig` calls.
 
-`discover` is the source of truth for "what plots exist" — the docs self-heal against it.
+`discover` is the source of truth for "what plots exist" — the generated reference block
+self-heals against it through `scripts/update_pyflash_references.py`.
 Keep the registry in the package and the runner dumb; new `plot_*` functions are usable the
 moment they exist, no runner edit.
 Registered pipeline callables are supported the same way through `PLOT_REGISTRY`.
@@ -119,6 +143,10 @@ page-specific UI test file.
   `data_overview`): `PyFLASH/pipeline.py`.
 - Shared pipeline run-folder / manifest IO (one `run_dirs`/`slug`/
   `append_runs_index` for every pipeline): `PyFLASH/pipeline_io.py`.
+- Per-run overview montage (`@montage_pipeline` decorator, `save_fig`-tap capture
+  collector, `build_montage` grid builder): `PyFLASH/pipeline_montage.py`. Every
+  `pipeline.__all__` entry must wear the decorator or be `MONTAGE_EXEMPT`
+  (`tests/test_pipeline_montage.py` enforces it).
 - Outlier detection (`flag_outliers`, `iqr_bounds`, `mad_modified_z`), effect
   sizes, FDR, ICC: `PyFLASH/stats_extra.py`.
 - Outlier / manual exclusion for downstream analysis (`exclude_outliers`,

@@ -8,7 +8,7 @@ distribution is `PyFLASH-analysis`; the import package is `PyFLASH`.
 
 PyFLASH has an agentify-pattern control layer so an agent can make any plot from a
 natural-language request, and extend the package when a request needs a plot that
-doesn't exist yet. Five layers:
+doesn't exist yet. Six layers:
 
 1. **Registry** — `PyFLASH/spec.py::PLOT_REGISTRY` (YAML short-name → `plot_*`).
 2. **Runner** — `.claude/skills/pyflash/scripts/pyflash_runner.py`: a thin JSON CLI
@@ -21,13 +21,20 @@ doesn't exist yet. Five layers:
 3. **Control skill** — `.claude/skills/pyflash/` (`SKILL.md` + `reference/*.md`): the
    loop that turns a request into a call, runs it, shows the PNG preview, prints the code.
    Drive it with **`/pyflash`**.
-4. **Self-extension skill** — `.claude/skills/pyflash-extend/`: how to add a capability
+4. **Reference refresh hook** — `.claude/settings.json` runs
+   `python scripts/update_pyflash_references.py --if-needed --quiet` after Claude
+   write/edit tools. The script refreshes the generated live-signature block in
+   `.claude/skills/pyflash/reference/plot-functions.md` and mirrors the Claude reference
+   files to `.codex/skills/pyflash/references/`. Agents still maintain the hand-written
+   teaching prose and catalog rows.
+5. **Self-extension skill** — `.claude/skills/pyflash-extend/`: how to add a capability
    when `/pyflash` can't (register/document an existing function, or add a new `plot_*`).
    Use **`/pyflash-extend`**. The detailed plot-implementation contract lives in the global
    `pyflash-add-plot` skill.
-5. **Orientation** — this section.
+6. **Orientation** — this section.
 
-`discover` is the source of truth for "what plots exist" — the docs self-heal against it.
+`discover` is the source of truth for "what plots exist" — the generated reference block
+self-heals against it through `scripts/update_pyflash_references.py`.
 Keep the registry in the package and the runner dumb; new `plot_*` functions are usable the
 moment they exist, no runner edit.
 Registered pipeline callables are supported the same way through `PLOT_REGISTRY`.
