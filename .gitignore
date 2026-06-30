@@ -39,3 +39,11 @@ graphify-out/
 .swarm_logs/
 docs/plot-superplot/
 docs/pyflash-ui/
+
+# Local describe-layer run store. Dev scripts and docs can carry private
+# absolute paths, so ignore those dirs wholesale rather than vetting each file
+# (already-tracked files such as scripts/rebuild_graphify_ast.py and
+# docs/plotting_function_context.md stay tracked). Keeps the public branch clean.
+.runtime/
+scripts/
+docs/
