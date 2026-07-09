@@ -687,3 +687,123 @@ def test_sig_audit_matrix_renderer_status_and_columns():
     plt.close(fig)
     # empty / malformed frames render nothing.
     assert _ovw_sig_audit_matrix_figure(pd.DataFrame()) is None
+
+
+# ── Stage 05: audit transition axis ──────────────────────────────────────────
+def _split_flip_dataset(tmp_path):
+    """Balanced Condition x Sex where GAINED has opposite WT-vs-KO effects in F vs
+    M (cancels when pooled -> significant only within a sex) and STRONG has a real
+    condition effect in both sexes (stays significant)."""
+    rng = np.random.default_rng(0)
+    design = ([("WT", "F")] * 10 + [("WT", "M")] * 10
+              + [("KO", "F")] * 10 + [("KO", "M")] * 10)
+    n = len(design)
+    gained, strong = [], []
+    for c, s in design:
+        g = 10.0 + (3.0 if (s == "F") == (c == "WT") else 0.0)   # flips by sex
+        gained.append(g + rng.normal(0, 0.4))
+        strong.append(10.0 + (2.5 if c == "WT" else 0.0) + rng.normal(0, 0.4))
+    summary = pd.DataFrame({
+        "AnimalName": [f"S{i:02d}" for i in range(n)],
+        "Condition": [c for c, _ in design],
+        "Sex": [s for _, s in design],
+        "GAINED": gained, "STRONG": strong,
+    })
+    fig_path = str(tmp_path / "Python Figures")
+    data_path = str(tmp_path / "Data and Stats")
+    os.makedirs(fig_path, exist_ok=True)
+    os.makedirs(data_path, exist_ok=True)
+    return SimpleNamespace(
+        summary=summary, summaries={"SCN": summary},
+        fig_path=fig_path, data_path=data_path,
+        condition_list=[SimpleNamespace(name="WT"), SimpleNamespace(name="KO")])
+
+
+def test_audit_transitions_classifier():
+    from PyFLASH.pipeline import _ovw_audit_transitions
+    base = pd.DataFrame([
+        dict(marker="LOST", contrast="WT vs KO", p=0.01),
+        dict(marker="GAINED", contrast="WT vs KO", p=0.40),
+        dict(marker="BOTH", contrast="WT vs KO", p=0.01),
+        dict(marker="NEITHER", contrast="WT vs KO", p=0.40),
+    ])
+    cmp_ = pd.DataFrame([
+        dict(marker="LOST", contrast="WT vs KO", p=0.30),    # sig->ns  => lost
+        dict(marker="GAINED", contrast="WT vs KO", p=0.001),  # ns->sig  => gained
+        dict(marker="BOTH", contrast="WT vs KO", p=0.02),     # sig->sig => significant
+        dict(marker="NEITHER", contrast="WT vs KO", p=0.50),  # ns->ns   => not_sig
+    ])
+    joined, trans = _ovw_audit_transitions(base, cmp_, 0.05)
+    states = dict(zip(joined["marker"], joined["state_vs_baseline"]))
+    assert states == {"LOST": "lost", "GAINED": "gained",
+                      "BOTH": "significant", "NEITHER": "not_significant"}
+    assert set(trans["marker"]) == {"LOST", "GAINED"}
+    # status codes align with the renderer's STATUS_* (0/1/2/3).
+    assert dict(zip(joined["marker"], joined["status_code"])) == {
+        "LOST": 3, "GAINED": 2, "BOTH": 1, "NEITHER": 0}
+    # compare frame collapsed to the strongest p per cell (any-level significance).
+    multi = pd.DataFrame([
+        dict(marker="GAINED", contrast="WT vs KO", p=0.9),    # one level ns
+        dict(marker="GAINED", contrast="WT vs KO", p=0.001),  # another sig
+    ])
+    j2, _ = _ovw_audit_transitions(base[base.marker == "GAINED"], multi, 0.05)
+    assert j2.iloc[0]["state_vs_baseline"] == "gained"
+
+
+def test_audit_transitions_split_axis_end_to_end(tmp_path):
+    exp = _split_flip_dataset(tmp_path)
+    res = pipeline.data_overview(exp, by="conditions", audit_axis="split",
+                                 run_label="tr_split", save=True)
+    tr = res["significance_audit_transitions"]
+    assert not tr.empty
+    # GAINED cancels when pooled but is significant within a sex.
+    gained = tr[tr["marker"] == "GAINED"]
+    assert not gained.empty and (gained["state_vs_baseline"] == "gained").any()
+    assert res["n_audit_gained"] >= 1
+    # transition CSV lists exactly the gained/lost cells; figure rides the montage.
+    csv = os.path.join(res["data_dir"], "significance_audit_transitions.csv")
+    assert os.path.isfile(csv)
+    saved = pd.read_csv(csv)
+    assert set(saved["state_vs_baseline"]) <= {"gained", "lost"}
+    assert os.path.isfile(
+        os.path.join(res["fig_dir"], "Significance Audit Transitions.svg"))
+
+
+def test_audit_transitions_fdr_and_exclusions_axes(tmp_path):
+    exp = _split_flip_dataset(tmp_path)
+    valid = {"gained", "lost", "significant", "not_significant"}
+    for axis in ("fdr", "exclusions"):
+        res = pipeline.data_overview(
+            exp, by="conditions", audit_axis=axis, screen=(axis == "fdr"),
+            run_label=f"tr_{axis}", save=True)
+        states = res["significance_audit_transitions"]
+        # every classified cell is one of the four valid states.
+        if not states.empty:
+            assert set(states["state_vs_baseline"]) <= valid
+        # a valid transition matrix figure is produced for the axis.
+        assert os.path.isfile(
+            os.path.join(res["fig_dir"], "Significance Audit Transitions.svg"))
+
+
+def test_audit_transition_matrix_renders_four_states():
+    from PyFLASH.plotting import (
+        _ovw_audit_status_frame, _ovw_sig_audit_matrix_figure,
+        STATUS_NS, STATUS_SIG, STATUS_GAIN, STATUS_LOSS,
+    )
+    df = pd.DataFrame([
+        dict(marker="A", contrast="WT vs KO", status_code=STATUS_GAIN,
+             p=0.001, significant=True, alpha=0.05),
+        dict(marker="B", contrast="WT vs KO", status_code=STATUS_LOSS,
+             p=0.30, significant=False, alpha=0.05),
+        dict(marker="C", contrast="WT vs KO", status_code=STATUS_SIG,
+             p=0.001, significant=True, alpha=0.05),
+        dict(marker="D", contrast="WT vs KO", status_code=STATUS_NS,
+             p=0.40, significant=False, alpha=0.05),
+    ])
+    fr = _ovw_audit_status_frame(df, alpha=0.05)
+    # status codes come straight from status_code; all four present -> 4-state legend.
+    assert fr["present_codes"] == [STATUS_NS, STATUS_SIG, STATUS_GAIN, STATUS_LOSS]
+    fig = _ovw_sig_audit_matrix_figure(df, alpha=0.05)
+    assert fig is not None
+    import matplotlib.pyplot as plt
+    plt.close(fig)

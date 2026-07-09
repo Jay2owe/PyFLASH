@@ -9,6 +9,11 @@ from matplotlib import pyplot as plt
 
 from PyFLASH._logging import logger as _log
 from PyFLASH.dataframe import coerce_dataframe_input
+from PyFLASH.aliases import (
+    prefer_alias,
+    resolve_data_column_aliases,
+    resolve_split_filter_aliases,
+)
 from PyFLASH.modelling import (
     _fit_linear_models,
     _linear_model_reference_value,
@@ -284,18 +289,28 @@ def _pipeline_specificity_queue(func, experiment, specificity, kwargs, pipeline_
 def correlation(
     experiment,
     filtered_columns=None,
+    data_cols=None,
     against_columns=None,
+    against_data_cols=None,
     by="all",
     factor=None,
     specificity=None,
+    split_by=None,
+    filter_by=None,
     roi=None,
     save=True,
     column_strings=None,
     regex_string=None,
     exclude="",
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
     against_column_strings=None,
     against_regex_string=None,
     against_exclude="",
+    against_data_col_contains=None,
+    against_data_col_regex=None,
+    against_data_col_exclude=None,
     tests=("pearsonr", "spearmanr", "kendalltau"),
     require="and",
     gate="p",
@@ -329,6 +344,11 @@ def correlation(
     condition_col="Condition",
     factor_cols=None,
     animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
     dataframe_kwargs=None,
     _run_dirs=None,
     _tag_specificity=False,
@@ -409,12 +429,45 @@ def correlation(
     Returns a dict with the resolved run label, output directories, per-group
     counts, and the pairwise / selected-pair DataFrames.
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    against_columns, against_column_strings, against_regex_string, against_exclude = resolve_data_column_aliases(
+        filtered_columns=against_columns,
+        column_strings=against_column_strings,
+        regex_string=against_regex_string,
+        exclude=against_exclude,
+        data_cols=against_data_cols,
+        data_col_contains=against_data_col_contains,
+        data_col_regex=against_data_col_regex,
+        data_col_exclude=against_data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="all",
+    )
     experiment = coerce_dataframe_input(
         experiment,
         conditions=conditions,
         condition_col=condition_col,
         factor_cols=factor_cols,
         animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
         dataframe_kwargs=dataframe_kwargs,
     )
     if is_specificity_queue(specificity):
@@ -1652,6 +1705,7 @@ def adjusted_correlation(
     endpoints=None,
     *,
     filtered_columns=None,
+    data_cols=None,
     covariates=None,
     candidate_covariates=None,
     categorical="auto",
@@ -1662,11 +1716,16 @@ def adjusted_correlation(
     by="all",
     factor=None,
     specificity=None,
+    split_by=None,
+    filter_by=None,
     roi=None,
     save=True,
     column_strings=None,
     regex_string=None,
     exclude="",
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
     tests=("pearsonr", "spearmanr", "kendalltau"),
     require="and",
     gate="p",
@@ -1686,6 +1745,11 @@ def adjusted_correlation(
     condition_col="Condition",
     factor_cols=None,
     animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
     dataframe_kwargs=None,
     _run_dirs=None,
     _tag_specificity=False,
@@ -1706,6 +1770,44 @@ def adjusted_correlation(
     to save FDR q-value heatmaps too. The p-value and q-value CSV tables are always
     written. Asterisks on coefficient matrices always mark raw p-value significance.
     """
+    endpoints = prefer_alias(
+        endpoints,
+        data_cols,
+        current_name="endpoints",
+        alias_name="data_cols",
+    )
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=None,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="all",
+    )
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
+
     if is_specificity_queue(specificity):
         kwargs = dict(locals())
         kwargs.pop("experiment")
@@ -3559,21 +3661,195 @@ def _ovw_significance_audit(experiment, scope_df, num_df, numeric_cols, groups, 
     return df
 
 
+# state_vs_baseline -> integer status code the Stage-04 audit renderer colours
+# (0 not_significant / 1 significant / 2 gained / 3 lost; matches plotting.STATUS_*).
+_AUDIT_STATE_CODES = {
+    "not_significant": 0, "significant": 1, "gained": 2, "lost": 3,
+}
+
+
+def _ovw_audit_transitions(baseline_df, compare_df, alpha):
+    """Diff two audit frames on (marker, contrast); classify each cell's transition.
+
+    ``state_vs_baseline`` is ``significant`` (p<alpha in both), ``gained``
+    (significant only under the compare grouping — a split-specific effect the
+    pooled view masked), ``lost`` (significant only at baseline — a pooling
+    artefact / Simpson's-paradox risk), or ``not_significant``. The compare frame
+    is collapsed to the strongest (smallest) p per cell, so a "split" compare that
+    tested within several added-factor levels counts as significant when the effect
+    survives in *any* level. Returns ``(joined, transitions)`` where transitions
+    holds only the gained / lost cells.
+    """
+    key = ["marker", "contrast"]
+    if (baseline_df is None or compare_df is None
+            or baseline_df.empty or compare_df.empty):
+        return pd.DataFrame(), pd.DataFrame()
+    b = baseline_df[key + ["p"]].copy()
+    b["baseline_p"] = pd.to_numeric(b.pop("p"), errors="coerce")
+    c = compare_df[key + ["p"]].copy()
+    c["p"] = pd.to_numeric(c["p"], errors="coerce")
+    c = (c.groupby(key, as_index=False)["p"].min()
+         .rename(columns={"p": "compare_p"}))
+    j = b.merge(c, on=key, how="outer")
+    a = float(alpha)
+
+    def _state(row):
+        bp, cp = row["baseline_p"], row["compare_p"]
+        bsig = np.isfinite(bp) and bp < a
+        csig = np.isfinite(cp) and cp < a
+        if bsig and csig:
+            return "significant"
+        if csig and not bsig:
+            return "gained"
+        if bsig and not csig:
+            return "lost"
+        return "not_significant"
+
+    j["alpha"] = a
+    j["state_vs_baseline"] = j.apply(_state, axis=1)
+    j["status_code"] = j["state_vs_baseline"].map(_AUDIT_STATE_CODES).astype(int)
+    transitions = j[j["state_vs_baseline"].isin(("gained", "lost"))].copy()
+    return j, transitions
+
+
+def _ovw_audit_axis_transitions(experiment, scope_df, num_df, numeric_cols,
+                                main_audit, *, audit_axis, alpha, min_n,
+                                comparisons=None, control=None, specificity=None,
+                                added_factor="Sex", outlier_animals=None):
+    """Build the (baseline, compare) audit pair for ``audit_axis`` and diff them.
+
+    Axes: ``"split"`` (default) = pooled condition-only vs the same contrast tested
+    within each ``added_factor`` (e.g. Sex) level — "lost" flags a pooling artefact,
+    "gained" a split-specific effect; ``"fdr"`` = raw p vs FDR q (does it survive
+    multiplicity?); ``"exclusions"`` = all animals vs outlier-excluded (fragility).
+    Returns ``(joined_states, transitions, figure_df)`` where ``figure_df`` carries a
+    ``status_code`` column the Stage-04 renderer draws as the four-state matrix, or
+    three empty frames when the axis can't be built (e.g. no added factor).
+    """
+    axis = str(audit_axis).strip().lower() if audit_axis else ""
+
+    def _audit(groups):
+        return _ovw_significance_audit(
+            experiment, scope_df, num_df, numeric_cols, groups,
+            comparisons=comparisons, control=control, alpha=alpha,
+            screen=False, gate="p", min_n=min_n, run_both=False)
+
+    cond_groups = _corr_pipeline_groups(
+        experiment, scope_df, num_df, "conditions", None, specificity)
+    cond_groups = [g for g in (cond_groups or []) if len(g[1]) > 0]
+    if len(cond_groups) < 2:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    if axis == "fdr":
+        base = (main_audit if (main_audit is not None and not main_audit.empty)
+                else _audit(cond_groups))
+        if base is None or base.empty:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        base = base.copy()
+        qcol = pd.to_numeric(base["q"], errors="coerce") if "q" in base.columns else None
+        if qcol is None or not qcol.notna().any():
+            from PyFLASH.stats_extra import apply_fdr
+            keys = [f"{m}||{c}" for m, c in zip(base["marker"], base["contrast"])]
+            pv = pd.to_numeric(base["p"], errors="coerce")
+            valid = pv.notna().to_numpy()
+            fam = base["contrast"].astype(str).tolist()
+            fdr = apply_fdr([float(v) for v, ok in zip(pv, valid) if ok],
+                            families=[f for f, ok in zip(fam, valid) if ok],
+                            alpha=float(alpha))
+            qmap = dict(zip([k for k, ok in zip(keys, valid) if ok],
+                            fdr["p_adjusted"]))
+            base["q"] = [qmap.get(k, float("nan")) for k in keys]
+        baseline_df = base[["marker", "contrast", "p"]]
+        compare_df = base[["marker", "contrast", "q"]].rename(columns={"q": "p"})
+
+    elif axis == "exclusions":
+        baseline_df = _audit(cond_groups)
+        names = set()
+        if outlier_animals is not None and not getattr(outlier_animals, "empty", True):
+            col = ("AnimalName" if "AnimalName" in outlier_animals.columns
+                   else outlier_animals.columns[0])
+            names = set(outlier_animals[col].astype(str))
+        if names and "AnimalName" in scope_df.columns:
+            keep = scope_df.index[~scope_df["AnimalName"].astype(str).isin(names)]
+            excl_groups = [(lab, gidx.intersection(keep), spec)
+                           for (lab, gidx, spec) in cond_groups]
+            excl_groups = [g for g in excl_groups if len(g[1]) > 0]
+        else:
+            excl_groups = cond_groups
+        compare_df = (_audit(excl_groups) if len(excl_groups) >= 2
+                      else pd.DataFrame())
+        if baseline_df is None or baseline_df.empty:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        baseline_df = baseline_df[["marker", "contrast", "p"]]
+        if not compare_df.empty:
+            compare_df = compare_df[["marker", "contrast", "p"]]
+
+    else:  # "split" (default)
+        enriched = _enrich_df_grouping_columns(
+            scope_df, experiment, requested_by=added_factor)
+        if added_factor not in getattr(enriched, "columns", []):
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        levels = _ovw_ordered_levels(experiment, enriched, added_factor)
+        if len(levels) < 2:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        baseline_df = _audit(cond_groups)
+        if baseline_df is None or baseline_df.empty:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        baseline_df = baseline_df[["marker", "contrast", "p"]]
+        parts = []
+        for lvl in levels:
+            lvl_idx = num_df.index.intersection(
+                enriched.index[enriched[added_factor] == lvl])
+            grp = [(lab, gidx.intersection(lvl_idx), spec)
+                   for (lab, gidx, spec) in cond_groups]
+            grp = [g for g in grp if len(g[1]) > 0]
+            if len(grp) < 2:
+                continue
+            a_lvl = _audit(grp)
+            if a_lvl is not None and not a_lvl.empty:
+                parts.append(a_lvl[["marker", "contrast", "p"]])
+        if not parts:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        compare_df = pd.concat(parts, ignore_index=True)
+
+    joined, transitions = _ovw_audit_transitions(baseline_df, compare_df, alpha)
+    if joined.empty:
+        return joined, transitions, pd.DataFrame()
+
+    # figure frame: colour by transition status_code, ✱ where the compare view is
+    # significant (gained / surviving cells star; lost cells stay bare-amber). Carry
+    # the per-marker auto-selected test + concordance from the main audit.
+    fig_df = joined.rename(columns={"compare_p": "p"}).copy()
+    fig_df["significant"] = pd.to_numeric(fig_df["p"], errors="coerce") < float(alpha)
+    if main_audit is not None and not main_audit.empty:
+        meta = main_audit.drop_duplicates("marker").set_index("marker")
+        if "test" in meta.columns:
+            fig_df["test"] = fig_df["marker"].map(meta["test"])
+        if "concordant" in meta.columns:
+            fig_df["concordant"] = fig_df["marker"].map(meta["concordant"])
+    return joined, transitions, fig_df
+
+
 @montage_pipeline(title="Data Overview Pipeline")
 def data_overview(
     experiment,
     filtered_columns=None,
+    data_cols=None,
     by="all",
     factor=None,
     split_by=None,
     split_mode="cross",
     nest=False,
     specificity=None,
+    filter_by=None,
     roi=None,
     save=True,
     column_strings=None,
     regex_string=None,
     exclude="",
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
     include_inventory=True,
     include_group_counts=True,
     include_descriptives=True,
@@ -3585,6 +3861,7 @@ def data_overview(
     include_significance_audit=True,
     audit_comparisons=None,
     audit_control=None,
+    audit_axis="split",
     screen=False,
     gate="p",
     run_both=True,
@@ -3625,6 +3902,11 @@ def data_overview(
     condition_col="Condition",
     factor_cols=None,
     animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
     dataframe_kwargs=None,
     _run_dirs=None,
     _tag_specificity=False,
@@ -3719,12 +4001,35 @@ def data_overview(
     mirror the other pipelines. Outputs land in
     ``Python Figures/Data Overview Pipeline/<run>/``.
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    specificity = prefer_alias(
+        specificity,
+        filter_by,
+        current_name="specificity",
+        alias_name="filter_by",
+    )
+    from PyFLASH.aliases import normalize_filter_by
+    specificity = normalize_filter_by(specificity)
     experiment = coerce_dataframe_input(
         experiment,
         conditions=conditions,
         condition_col=condition_col,
         factor_cols=factor_cols,
         animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
         dataframe_kwargs=dataframe_kwargs,
     )
     if is_specificity_queue(specificity):
@@ -3924,6 +4229,38 @@ def data_overview(
             comparisons=audit_comparisons, control=audit_control, alpha=alpha,
             screen=screen, gate=gate, min_n=min_n, run_both=run_both)
 
+    # Transition view: does each mean difference survive a second look? Compare the
+    # pooled condition-only audit against a split (default condition x Sex), FDR, or
+    # outlier-excluded re-test, colouring each cell gained / lost / (not-)significant.
+    audit_transitions = pd.DataFrame()
+    audit_transition_states = pd.DataFrame()
+    audit_transition_fig = pd.DataFrame()
+    if (include_significance_audit and numeric_cols and audit_axis
+            and significance_audit is not None and not significance_audit.empty):
+        _added_factor = (split_by[1] if isinstance(split_by, (list, tuple))
+                         and len(split_by) >= 2 else "Sex")
+        audit_transition_states, audit_transitions, audit_transition_fig = \
+            _ovw_audit_axis_transitions(
+                experiment, scope_df, num_df, numeric_cols, significance_audit,
+                audit_axis=audit_axis, alpha=alpha, min_n=min_n,
+                comparisons=audit_comparisons, control=audit_control,
+                specificity=specificity, added_factor=_added_factor,
+                outlier_animals=outlier_animals)
+        if not audit_transitions.empty:
+            try:
+                from PyFLASH import report as _report
+                _report.emit({
+                    "headline": f"Significance-audit transitions ({audit_axis})",
+                    "kind": "audit_transitions",
+                    "audit_axis": str(audit_axis),
+                    "n_gained": int((audit_transitions["state_vs_baseline"]
+                                     == "gained").sum()),
+                    "n_lost": int((audit_transitions["state_vs_baseline"]
+                                   == "lost").sum()),
+                })
+            except Exception:
+                pass
+
     # ── write tables + figures ──────────────────────────────────────────────
     if save:
         _corr_makedirs(data_dir)
@@ -3979,6 +4316,13 @@ def data_overview(
             _corr_to_csv(
                 significance_audit,
                 os.path.join(data_dir, f"significance_audit{spec_tag}.csv"),
+                index=False,
+            )
+        if not audit_transitions.empty:
+            _corr_to_csv(
+                audit_transitions,
+                os.path.join(
+                    data_dir, f"significance_audit_transitions{spec_tag}.csv"),
                 index=False,
             )
 
@@ -4138,6 +4482,17 @@ def data_overview(
             if sfig is not None:
                 save_fig(sfig, fig_dir, f"Significance Audit{spec_tag}", montage=True)
                 plt.close(sfig)
+        if plot_significance_audit and not audit_transition_fig.empty:
+            # Same renderer, four-state colouring: gained (teal) / lost (amber) vs
+            # the baseline grouping. Shows whether each effect survives the split.
+            tfig = _ovw_sig_audit_matrix_figure(
+                audit_transition_fig, alpha=alpha, value_col="p",
+                tick_label_size=tick_label_size, max_items=max_plot_items,
+                title=f"Significance audit transitions ({audit_axis})")
+            if tfig is not None:
+                save_fig(tfig, fig_dir, f"Significance Audit Transitions{spec_tag}",
+                         montage=True)
+                plt.close(tfig)
         if plot_missingness:
             mfig = _ovw_missingness_figure(
                 scope_df, resolved_columns, tick_label_size,
@@ -4167,6 +4522,13 @@ def data_overview(
     else:
         n_audit_tests = 0
         n_audit_significant = 0
+    if audit_transitions is not None and not audit_transitions.empty:
+        _states = audit_transitions["state_vs_baseline"]
+        n_audit_gained = int((_states == "gained").sum())
+        n_audit_lost = int((_states == "lost").sum())
+    else:
+        n_audit_gained = 0
+        n_audit_lost = 0
 
     manifest = {
         "run_label": resolved_label,
@@ -4207,8 +4569,11 @@ def data_overview(
         "include_significance_audit": bool(include_significance_audit),
         "audit_screen": bool(screen),
         "audit_gate": gate,
+        "audit_axis": (str(audit_axis) if audit_axis else None),
         "n_audit_tests": n_audit_tests,
         "n_audit_significant": n_audit_significant,
+        "n_audit_gained": n_audit_gained,
+        "n_audit_lost": n_audit_lost,
         "alpha": float(alpha),
         "plots": {
             "group_counts": bool(plot_group_counts),
@@ -4259,6 +4624,7 @@ def data_overview(
     result["condition_variability"] = condition_variability
     result["effect_sizes"] = effect_sizes
     result["significance_audit"] = significance_audit
+    result["significance_audit_transitions"] = audit_transitions
     return result
 
 
@@ -4577,12 +4943,18 @@ def _gc_emit_record(metric, names, values, test, post_hoc, omnibus_p, tokens,
 def group_comparison(
     experiment,
     filtered_columns=None,
+    data_cols=None,
     column_strings=None,
     regex_string=None,
     exclude="",
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
     by="conditions",
     factor=None,
     specificity=None,
+    split_by=None,
+    filter_by=None,
     roi=None,
     comparisons=None,
     control=None,
@@ -4616,6 +4988,11 @@ def group_comparison(
     condition_col="Condition",
     factor_cols=None,
     animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
     dataframe_kwargs=None,
     _run_dirs=None,
     _tag_specificity=False,
@@ -4675,12 +5052,35 @@ def group_comparison(
       brackets; the results table, volcano, forest and stats matrix are
       authoritative for the selected ``comparisons``/``control`` contrasts.
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="conditions",
+    )
     experiment = coerce_dataframe_input(
         experiment,
         conditions=conditions,
         condition_col=condition_col,
         factor_cols=factor_cols,
         animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
         dataframe_kwargs=dataframe_kwargs,
     )
     if is_specificity_queue(specificity):
@@ -5804,9 +6204,12 @@ def _lm_emit_report(fit_result, adjusted_means_df, group_col, predictors):
 def linear_model(
     experiment,
     dependent_variables=None,
+    data_cols=None,
+    outcomes=None,
     predictors=None,
     *,
     group=None,
+    group_col=None,
     categorical="auto",
     reference_levels=None,
     interactions=None,
@@ -5814,6 +6217,7 @@ def linear_model(
     medication_mode="any",
     medication_min_count=2,
     specificity=None,
+    filter_by=None,
     roi=None,
     exclude=None,
     cov_type=None,
@@ -5841,18 +6245,52 @@ def linear_model(
     condition_col="Condition",
     factor_cols=None,
     animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_cols=None,
+    subject_col=None,
     dataframe_kwargs=None,
     _run_dirs=None,
     _tag_specificity=False,
     _slug_specificity=None,
 ):
     """Adjusted linear-model pipeline with coefficient and adjusted-mean plots."""
+    dependent_variables = prefer_alias(
+        dependent_variables,
+        data_cols,
+        current_name="dependent_variables",
+        alias_name="data_cols",
+    )
+    dependent_variables = prefer_alias(
+        dependent_variables,
+        outcomes,
+        current_name="dependent_variables/data_cols",
+        alias_name="outcomes",
+    )
+    group = prefer_alias(
+        group,
+        group_col,
+        current_name="group",
+        alias_name="group_col",
+    )
+    from PyFLASH.aliases import normalize_filter_by
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
     experiment = coerce_dataframe_input(
         experiment,
         conditions=conditions,
         condition_col=condition_col,
         factor_cols=factor_cols,
         animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
         dataframe_kwargs=dataframe_kwargs,
     )
     if is_specificity_queue(specificity):
@@ -6219,7 +6657,9 @@ def _rhythm_param_tests(df, param_cols, group_col, groups, *, screen, families, 
 def rhythm(
     experiment,
     column=None,
+    data_col=None,
     columns=None,
+    data_cols=None,
     time_col="Time",
     group_col=None,
     group_order=None,
@@ -6227,10 +6667,12 @@ def rhythm(
     period_free=False,
     method="pooled",
     animal_col=None,
+    subject_col=None,
     phase_col=None,
     param_cols=None,
     radius_col=None,
     specificity=None,
+    filter_by=None,
     screen=False,
     families="parameter",
     gate="p",
@@ -6275,6 +6717,32 @@ def rhythm(
     Returns a dict manifest (run label, dirs, counts, the phase test) with the
     computed tables attached.
     """
+    column = prefer_alias(
+        column,
+        data_col,
+        current_name="column",
+        alias_name="data_col",
+    )
+    columns = prefer_alias(
+        columns,
+        data_cols,
+        current_name="columns",
+        alias_name="data_cols",
+    )
+    animal_col = prefer_alias(
+        animal_col,
+        subject_col,
+        current_name="animal_col",
+        alias_name="subject_col",
+    )
+    from PyFLASH.aliases import normalize_filter_by
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
+
     if is_specificity_queue(specificity):
         kwargs = dict(locals())
         kwargs.pop("experiment")
