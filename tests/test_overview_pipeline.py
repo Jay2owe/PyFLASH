@@ -247,6 +247,7 @@ def test_data_overview_section_toggles_skip_work(tmp_path):
         include_outliers=False,
         include_covariation=False,
         include_condition_distributions=False,
+        include_significance_audit=False,
         include_effect_sizes=False,
         run_label="overview_inventory_only",
         save=True,
@@ -628,3 +629,61 @@ def test_significance_audit_writes_csv_and_emits_describe_record(tmp_path):
     # marker when the collector is armed -> a non-zero, non-empty describe run.
     assert len(records) > 0
     assert res["n_audit_tests"] > 0
+
+
+def test_significance_audit_figure_written_and_on_montage(tmp_path):
+    # Stage 04: the audit is on by default and renders a status-matrix figure that
+    # rides the overview montage.
+    exp = _overview_dataset(tmp_path)
+    res = pipeline.data_overview(exp, by="conditions", run_label="audit_fig",
+                                 save=True)
+    assert os.path.isfile(os.path.join(res["fig_dir"], "Significance Audit.svg"))
+    montage = res.get("montage")
+    assert montage and os.path.isfile(montage)
+    # SVG text stays editable per repo convention (svg.fonttype='none').
+    svg = open(os.path.join(res["fig_dir"], "Significance Audit.svg"),
+               encoding="utf-8").read()
+    assert "Significance audit" in svg
+
+    # plot_significance_audit=False suppresses only the figure, not the CSV.
+    res2 = pipeline.data_overview(exp, by="conditions",
+                                  plot_significance_audit=False,
+                                  run_label="audit_nofig", save=True)
+    assert not os.path.isfile(
+        os.path.join(res2["fig_dir"], "Significance Audit.svg"))
+    assert os.path.isfile(os.path.join(res2["data_dir"], "significance_audit.csv"))
+
+
+def test_sig_audit_matrix_renderer_status_and_columns():
+    from PyFLASH.plotting import (
+        _ovw_audit_status_frame, _ovw_sig_audit_matrix_figure,
+        STATUS_SIG, STATUS_NS,
+    )
+    df = pd.DataFrame([
+        dict(marker="IBA1", contrast="WT vs KO", test="Independent T-Test",
+             p=0.003, q=0.01, significant=True, concordant=True, alpha=0.05),
+        dict(marker="GFAP", contrast="WT vs KO", test="Mann-Whitney U",
+             p=0.07, q=0.20, significant=False, concordant=False, alpha=0.05),
+        dict(marker="CK1d", contrast="WT vs KO", test="Kruskal-Wallis",
+             p=0.90, q=0.90, significant=False, concordant=True, alpha=0.05),
+    ])
+    fr = _ovw_audit_status_frame(df, alpha=0.05)
+    # worst-first row order (smallest p on top); status codes; annotations.
+    assert fr["markers"][0] == "IBA1"
+    assert fr["status"][0][0] == STATUS_SIG
+    assert fr["status"][2][0] == STATUS_NS
+    assert fr["annot"][0][0] == "✱"        # star on significant cell
+    assert fr["annot"][1][0] == ".07"           # borderline p label
+    assert fr["test_tags"] == ["t", "U", "KW"]
+    assert fr["concord"] == ["✓", "⚠", "✓"]  # per-marker concordance
+    assert fr["present_codes"] == [STATUS_NS, STATUS_SIG]
+    # FDR sidebar summary present because a finite q column exists.
+    assert fr["fdr"] and fr["fdr"][0][1] == 1 and fr["fdr"][0][2] == 1
+
+    fig = _ovw_sig_audit_matrix_figure(df, alpha=0.05)
+    assert fig is not None
+    assert len(fig.axes) == 2                    # main matrix + FDR sidebar
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+    # empty / malformed frames render nothing.
+    assert _ovw_sig_audit_matrix_figure(pd.DataFrame()) is None

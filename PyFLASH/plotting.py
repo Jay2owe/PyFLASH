@@ -35,6 +35,7 @@ from matplotlib.ticker import LinearLocator
 from PyFLASH.iteration import Context, run
 from PyFLASH.config import Config, apply_matplotlib_fast_path
 apply_matplotlib_fast_path()  # apply path-simplify rcParams + ioff() once, lazily
+from PyFLASH.dataframe import coerce_dataframe_input
 from PyFLASH._logging import logger as _log
 from PyFLASH.experiment import _source_panel_order_rows
 from PyFLASH.image_io import read_image_array, resolve_image_worker_count, get_image_shape
@@ -11713,7 +11714,10 @@ def plot_mean_bars(experiment, filtered_columns=None,
                    column_strings=None, regex_string=None, exclude='',
                    save_normality=True, normality_dpi=96,
                    auto_style=True, style_cycle=None, legend=False,
-                   dry_run=False):
+                   dry_run=False,
+                   conditions=None, condition_col="Condition",
+                   factor_cols=None, animal_col="AnimalName",
+                   dataframe_kwargs=None):
     """
     Bar chart with individual data points for each column × condition.
 
@@ -11736,6 +11740,14 @@ def plot_mean_bars(experiment, filtered_columns=None,
     default. Set ``point_fill="group"``, ``point_edge="none"``, and tune
     ``point_size``/``point_linewidth`` for filled condition-coloured dots.
     """
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -12767,7 +12779,10 @@ def plot_regressions(experiment, x, y,
                      x_range=None, y_range=None,
                      xmin=None, xmax=None, ymin=None, ymax=None,
                      clip_fit_line=True, share_axes=True, margin=0.1,
-                     auto_style=True, style_cycle=None):
+                     auto_style=True, style_cycle=None,
+                     conditions=None, condition_col="Condition",
+                     factor_cols=None, animal_col="AnimalName",
+                     dataframe_kwargs=None):
     """
     Regression plot: one figure per condition/factor, or a combined overlay.
     Supports queued x/y inputs:
@@ -12800,6 +12815,14 @@ def plot_regressions(experiment, x, y,
     ``xmax`` / ``ymin`` / ``ymax`` or a registry entry with that bound set)
     are left untouched. Must be < 0.5. Pass ``margin=0`` to disable.
     """
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     x_range = _merge_axis_range(x_range, xmin, xmax)
     y_range = _merge_axis_range(y_range, ymin, ymax)
 
@@ -14141,7 +14164,10 @@ def plot_volcano(experiment, filtered_columns=None,
                  p_threshold=0.05,
                  label_points='significant',
                  save=True,
-                 column_strings=None, regex_string=None, exclude=''):
+                 column_strings=None, regex_string=None, exclude='',
+                 conditions=None, condition_col="Condition",
+                 factor_cols=None, animal_col="AnimalName",
+                 dataframe_kwargs=None):
     """
     Volcano plot of signed log(% change vs control) against -log10(p)
     across selected columns.
@@ -14155,6 +14181,14 @@ def plot_volcano(experiment, filtered_columns=None,
     - 'both'
     - 'none'
     """
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -14326,6 +14360,9 @@ def plot_radar(experiment, filtered_columns=None,
                radial_value_size=None,
                figsize=(8, 8),
                auto_style=True, style_cycle=None,
+               conditions=None, condition_col="Condition",
+               factor_cols=None, animal_col="AnimalName",
+               dataframe_kwargs=None,
                _scale_reference=None, _resolved_columns=None):
     """
     Radar/spider plot across selected summary columns.
@@ -14348,6 +14385,14 @@ def plot_radar(experiment, filtered_columns=None,
     100% of the plotted radius; pass radial_value_radii=None to disable them
     or provide custom fractional radii.
     """
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     radial_value_radii = _normalize_radar_radial_value_radii(radial_value_radii)
 
     # ROI queue mode - iterate over ROI bases
@@ -15330,10 +15375,21 @@ def plot_matrices(experiment, filtered_columns=None,
                   prefix_order=None, marker_order=None,
                   share_columns_across_panels=True,
                   triangle=None, show_diagonal=True,
-                  show_values=False, value_format=".2f"):
+                  show_values=False, value_format=".2f",
+                  conditions=None, condition_col="Condition",
+                  factor_cols=None, animal_col="AnimalName",
+                  dataframe_kwargs=None):
     """
     Correlation matrix: one figure per condition or factor value.
     """
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -18742,12 +18798,18 @@ _PARAM_DESCRIPTIONS = {
     'dry_run':              'Compute stats without rendering; returns a DataFrame summary.',
     'combine':              'Overlay all groups on one panel instead of separate figures.',
     'merge':                'Synonym for combine in some functions.',
+    'conditions':           'Optional PyFLASH conditionList when passing a raw pandas DataFrame directly.',
+    'condition_col':        'Column in a raw DataFrame that identifies the condition/group.',
+    'factor_cols':          'One or more factor columns in a raw DataFrame used to infer crossed conditions.',
+    'animal_col':           'Animal/subject/sample ID column in a raw DataFrame.',
+    'dataframe_kwargs':     'Advanced from_dataframe options such as colors, labels, ordering, or output paths.',
     # ── Marker-based functions ───────────────────────────────────────
     'marker':               'Marker name (e.g. "Iba1") or list of markers.',
     'markers':              'List of marker names to include (None = all).',
     'x_attr':               'Attribute suffix to plot (e.g. "Volume", "Count", "IntDen").',
     'x':                    'X-axis column name or marker attribute.',
     'y':                    'Y-axis column name or marker attribute.',
+    'z':                    'Z-axis column name for 3D scatter plots.',
     # ── Histogram / density ──────────────────────────────────────────
     'bins':                 'Number of histogram bins (default 30).',
     'binwidth':             'Fixed bin width (overrides bins if set).',
@@ -18772,6 +18834,8 @@ _PARAM_DESCRIPTIONS = {
                             "(min, max), or 'Z-score'.",
     'normalize_y':          "Y normalization mode: False, True (= 0-1 min-max), "
                             "(min, max), or 'Z-score'.",
+    'normalize_z':          "Z normalization mode for 3D scatter: False, True (= 0-1 min-max), "
+                            "(min, max), or 'Z-score'.",
     'x_range':              'Manual (min, max) for x-axis.',
     'y_range':              'Manual (min, max) for y-axis.',
     'z_range':              'Manual (min, max) for z-axis (3D scatter).',
@@ -18789,6 +18853,10 @@ _PARAM_DESCRIPTIONS = {
                             'independently and only when the view has less breathing room than '
                             'this target; we never shrink. Sides pinned by the caller or the '
                             'axis registry are left untouched. Must be < 0.5. Pass 0 to disable.',
+    'size_by':              'For 3D scatter, map a numeric summary column to point size.',
+    'size_factor':          'For 3D scatter, multiply size_by-derived point sizes.',
+    'elevation':            'For 3D scatter, camera elevation in degrees.',
+    'azimuth':              'For 3D scatter, camera azimuth in degrees.',
     # ── Volcano ──────────────────────────────────────────────────────
     'control':              'Name of the control condition for fold-change calculation.',
     'p_threshold':          'Significance threshold for highlighting (default 0.05).',
@@ -18862,6 +18930,33 @@ _PARAM_DESCRIPTIONS = {
     'predictor_order':          'Custom ordering for multivariable regression predictor-set labels.',
     'value':                    'Matrix value to colour, e.g. "r2", "adj_r2", "p", or "q".',
     'correction':               'P-value correction for matrix significance annotations: "fdr" or "none".',
+    'possible_predictors':      'Candidate feature columns for iterative_model_sweep; use explicit column names.',
+    'batch_or_df':              'Input for iterative_model_sweep: a PyFLASH batch-like object or a pandas DataFrame.',
+    'target':                   'Categorical class column to predict in iterative_model_sweep.',
+    'predictor_exclude':        'Substring exclusion applied when selecting candidate predictors for model sweeps.',
+    'excluded_predictors':      'Explicit predictor column names to remove from a model sweep.',
+    'max_features':             'Maximum feature-subset size to test during iterative model search.',
+    'repeat_features':          'Allow multiple predictors with the same marker/prefix in one subset.',
+    'model_preset':             'Classifier grid size for iterative_model_sweep: "ultra_compact", "compact", or "full".',
+    'model_families':           'Restrict iterative_model_sweep to named classifier families.',
+    'class_order':              'Explicit target-class order for classification model sweeps.',
+    'cv':                       'Cross-validation mode, e.g. "stratified5", "stratified2", or "loo".',
+    'scoring':                  'Ranking metric for model sweeps, e.g. "balanced_accuracy", "macro_f1", "accuracy", or "log_loss".',
+    'normalize_method':         'Feature normalization for model sweeps, usually "zscore".',
+    'search_strategy':          'Feature-subset strategy: "exhaustive" tests all subsets; "beam" keeps the best prior subsets.',
+    'beam_width':               'Number of top subsets carried forward at each level when search_strategy="beam".',
+    'top_n':                    'Number of top model rows used for saved summaries and feature recurrence.',
+    'permutations':             'Permutation count for testing the selected top model in iterative_model_sweep.',
+    'checkpoint_every':         'Write partial model-sweep scores after this many new scored models.',
+    'resume':                   'Resume an iterative_model_sweep from a matching partial checkpoint.',
+    'output_dir':               'Explicit output directory for model-sweep tables and figures.',
+    'plot':                     'Whether to save summary plots for iterative_model_sweep.',
+    'random_state':             'Random seed for reproducible model sweeps and classifiers.',
+    'fast_numeric':             'Use the optimized numeric-only scoring path when possible.',
+    'n_jobs':                   'Parallel scoring workers for iterative_model_sweep; -1 uses all cores.',
+    'parallel_backend':         'Parallel backend for model sweeps: "threads" or "processes".',
+    'parallel_batch_size':      'Number of candidate subsets batched per parallel scoring flush.',
+    'return_details':           'Return the full model-sweep result dict instead of only best model/features.',
     # ── Correlation pipeline ─────────────────────────────────────────
     'tests':                    'Correlation methods to run, e.g. ("pearsonr", "spearmanr", "kendalltau").',
     'require':                  'Combine methods with "and" (pair must pass every test) or "or" (any test).',
@@ -19730,6 +19825,244 @@ def _stats_matrix_figure(df, value_col=None, alpha=0.05, tick_label_size=20):
         colorbar_label="Hedges g (group - reference)",
         annotation_df=(pmat if annotate else None), annotation_alpha=alpha,
     )
+
+
+# ── Significance-audit status matrix (data_overview) ─────────────────────────
+# Integer status codes for the audit matrix. Stage 04 renders only NS / SIG; the
+# Stage 05 transition view reuses this table and adds GAINED / LOST. Keep the
+# mapping table-driven so extending the state set is two dict entries, never a
+# renderer rewrite.
+STATUS_NS = 0
+STATUS_SIG = 1
+STATUS_GAIN = 2
+STATUS_LOSS = 3
+_AUDIT_STATUS_COLORS = {
+    STATUS_NS: "#e6e6e6",    # light grey — no evidence of a mean difference
+    STATUS_SIG: "#c0392b",   # red — p < alpha
+    STATUS_GAIN: "#0e8f8f",  # teal — significant only after the split (Stage 05)
+    STATUS_LOSS: "#d98a17",  # amber — significant pooled, lost after split (Stage 05)
+}
+_AUDIT_STATUS_LABELS = {
+    STATUS_NS: "not significant",
+    STATUS_SIG: "significant",
+    STATUS_GAIN: "gained vs baseline",
+    STATUS_LOSS: "lost vs baseline",
+}
+# Auto-selected test name (as returned by multipleComparisons) -> compact tag.
+_AUDIT_TEST_TAGS = {
+    "Independent T-Test": "t",
+    "Student's T-Test": "t",
+    "Welch's T-Test": "tW",
+    "Mann-Whitney U": "U",
+    "One-Way ANOVA": "A",
+    "Two-Way ANOVA": "A2",
+    "Kruskal-Wallis": "KW",
+}
+
+
+def _audit_test_tag(name):
+    """Compact per-marker tag for the auto-selected test (e.g. ``t``, ``U``, ``KW``)."""
+    if name is None or (isinstance(name, float) and not np.isfinite(name)):
+        return ""
+    s = str(name).strip()
+    if not s or s in ("N/A", "Error", "nan"):
+        return ""
+    if s in _AUDIT_TEST_TAGS:
+        return _AUDIT_TEST_TAGS[s]
+    return "".join(w[0] for w in s.split() if w)[:3].upper() or s[:3]
+
+
+def _fmt_borderline_p(p):
+    """Short borderline p label like ``.07`` (leading zero dropped)."""
+    try:
+        s = f"{float(p):.2f}"
+    except Exception:
+        return ""
+    return s[1:] if s.startswith("0.") else s
+
+
+def _ovw_audit_status_frame(df, *, alpha=0.05, value_col="p",
+                            show_borderline=True, max_items=None):
+    """Pivot a Stage-03 significance-audit frame into the matrix the renderer draws.
+
+    Returns a dict with markers (row order, worst-first by smallest p so a
+    ``max_items`` truncation drops healthy markers not findings), contrasts
+    (column order), an integer ``status`` matrix (:data:`STATUS_NS` / ``STATUS_SIG``,
+    or a precomputed ``status_code`` column when present — Stage 05's transitions),
+    an aligned ``annot`` text matrix (``✱`` on p<alpha cells, a borderline p label
+    on alpha<=p<2*alpha cells), per-marker ``test_tags`` and ``concord`` (✓/⚠), the
+    set of status codes actually present (drives the legend), and a per-contrast
+    ``fdr`` summary (raw-p-pass -> q-pass / n) when a finite ``q`` column exists.
+    """
+    if df is None or getattr(df, "empty", True):
+        return None
+    if "marker" not in df.columns or "contrast" not in df.columns:
+        return None
+    d = df.copy()
+    d["marker"] = d["marker"].astype(str)
+    d["contrast"] = d["contrast"].astype(str)
+    d["_p"] = pd.to_numeric(d.get(value_col, d.get("p")), errors="coerce")
+    d["_sig"] = d["_p"] < float(alpha)
+    if "status_code" in d.columns:
+        d["_code"] = pd.to_numeric(d["status_code"], errors="coerce")
+    else:
+        d["_code"] = np.where(d["_sig"].fillna(False).to_numpy(),
+                              STATUS_SIG, STATUS_NS)
+
+    contrasts = list(dict.fromkeys(d["contrast"]))
+    order = (d.groupby("marker")["_p"].min()
+             .sort_values(na_position="last").index.tolist())
+    if max_items:
+        order = order[:int(max_items)]
+    markers = order
+    mi = {m: i for i, m in enumerate(markers)}
+    ci = {c: j for j, c in enumerate(contrasts)}
+
+    status = np.full((len(markers), len(contrasts)), STATUS_NS, dtype=int)
+    annot = [["" for _ in contrasts] for _ in markers]
+    for _, r in d.iterrows():
+        if r["marker"] not in mi or r["contrast"] not in ci:
+            continue
+        i, j = mi[r["marker"]], ci[r["contrast"]]
+        code = r["_code"]
+        status[i, j] = int(code) if np.isfinite(code) else STATUS_NS
+        if bool(r["_sig"]) and np.isfinite(r["_p"]):
+            annot[i][j] = "✱"  # ✱
+        elif show_borderline and np.isfinite(r["_p"]) and \
+                float(alpha) <= float(r["_p"]) < 2.0 * float(alpha):
+            annot[i][j] = _fmt_borderline_p(r["_p"])
+
+    test_tags, concord = [], []
+    for m in markers:
+        sub = d[d["marker"] == m]
+        tests = sub["test"].dropna().astype(str) if "test" in sub.columns else []
+        test_tags.append(_audit_test_tag(tests.iloc[0]) if len(tests) else "")
+        if "concordant" in sub.columns:
+            cc = pd.to_numeric(sub["concordant"].map(
+                {True: 1, False: 0}).astype("float"), errors="coerce")
+            if cc.notna().any():
+                concord.append("✓" if bool((cc == 1).all()) else "⚠")
+            else:
+                concord.append("")
+        else:
+            concord.append("")
+
+    fdr = []
+    if "q" in d.columns and pd.to_numeric(d["q"], errors="coerce").notna().any():
+        q = pd.to_numeric(d["q"], errors="coerce")
+        for c in contrasts:
+            sub = d[d["contrast"] == c]
+            qsub = q[sub.index]
+            n = int(sub["_p"].notna().sum())
+            raw_pass = int((sub["_p"] < float(alpha)).sum())
+            q_pass = int((qsub < float(alpha)).sum())
+            fdr.append((c, raw_pass, q_pass, n))
+
+    present = sorted(set(int(v) for v in np.unique(status)))
+    return {"markers": markers, "contrasts": contrasts, "status": status,
+            "annot": annot, "test_tags": test_tags, "concord": concord,
+            "fdr": fdr, "present_codes": present}
+
+
+def _ovw_sig_audit_matrix_figure(df, *, alpha=0.05, value_col="p",
+                                 tick_label_size=20, show_borderline=True,
+                                 max_items=30, title=None):
+    """Render the significance-audit status matrix (markers x contrasts).
+
+    Cells are coloured by significance status (:data:`_AUDIT_STATUS_COLORS`);
+    ``✱`` marks p<alpha cells and borderline (alpha<=p<2*alpha) cells print the
+    numeric p. A leading per-marker test-tag column names the auto-selected test,
+    a trailing ✓/⚠ column flags parametric-vs-non-parametric concordance, and an
+    FDR-check sidebar (when a ``q`` column exists) tallies raw-p vs q passes per
+    contrast. The status mapping is table-driven so Stage 05's transition view
+    reuses this renderer by supplying a ``status_code`` column. Returns ``None``
+    when there is nothing to draw.
+    """
+    frame = _ovw_audit_status_frame(df, alpha=alpha, value_col=value_col,
+                                    show_borderline=show_borderline,
+                                    max_items=max_items)
+    if frame is None or not frame["markers"] or not frame["contrasts"]:
+        return None
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+    from matplotlib.patches import Patch
+
+    markers, contrasts = frame["markers"], frame["contrasts"]
+    status, annot = frame["status"], frame["annot"]
+    ny, nx = len(markers), len(contrasts)
+    has_fdr = bool(frame["fdr"])
+
+    lab = max(7, int(tick_label_size) - 6)
+    fig_w = max(6.0, 1.15 * nx + 4.2)
+    fig_h = max(3.6, 0.5 * ny + 2.4)
+    if has_fdr:
+        fig, (ax, ax_fdr) = plt.subplots(
+            1, 2, figsize=(fig_w + 3.0, fig_h),
+            gridspec_kw={"width_ratios": [max(nx, 3), 2.4], "wspace": 0.08})
+    else:
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        ax_fdr = None
+
+    cmap = ListedColormap([_AUDIT_STATUS_COLORS[c] for c in (0, 1, 2, 3)])
+    norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], cmap.N)
+    ax.imshow(status, cmap=cmap, norm=norm, aspect="auto")
+
+    ax.set_xticks(np.arange(-0.5, nx, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, ny, 1), minor=True)
+    ax.grid(which="minor", color="white", linewidth=1.5)
+    ax.tick_params(which="minor", length=0)
+    ax.set_xticks(range(nx))
+    ax.set_xticklabels([str(c)[:24] for c in contrasts], rotation=35,
+                       ha="right", fontsize=lab)
+    ax.set_yticks(range(ny))
+    ax.set_yticklabels([str(m)[:28] for m in markers], fontsize=lab)
+
+    for i in range(ny):
+        for j in range(nx):
+            t = annot[i][j]
+            if not t:
+                continue
+            star = t == "✱"
+            ax.text(j, i, t, ha="center", va="center",
+                    fontsize=lab if star else max(6, lab - 3),
+                    fontweight="bold" if star else "normal",
+                    color="white" if status[i, j] == STATUS_SIG else "#222222")
+
+    # test-tag column (left) + concordance column (right), inside the axes
+    left_x, right_x = -1.15, nx - 0.5 + 0.55
+    ax.set_xlim(-1.7, nx - 0.5 + 1.1)
+    for i, (tag, cc) in enumerate(zip(frame["test_tags"], frame["concord"])):
+        if tag:
+            ax.text(left_x, i, tag, ha="center", va="center",
+                    fontsize=max(6, lab - 2), color="#333333", style="italic")
+        if cc:
+            ax.text(right_x, i, cc, ha="center", va="center", fontsize=lab,
+                    color="#2e7d32" if cc == "✓" else "#b8860b")
+    ax.text(left_x, -0.85, "test", ha="center", va="center",
+            fontsize=max(6, lab - 2), color="#333333", fontweight="bold")
+    ax.text(right_x, -0.85, "conc", ha="center", va="center",
+            fontsize=max(6, lab - 2), color="#333333", fontweight="bold")
+
+    ax.set_title(title or "Significance audit", fontsize=int(tick_label_size),
+                 fontweight="bold", pad=14)
+
+    handles = [Patch(facecolor=_AUDIT_STATUS_COLORS[c], edgecolor="#999999",
+                     label=_AUDIT_STATUS_LABELS[c]) for c in frame["present_codes"]]
+    handles.append(Patch(facecolor="none", edgecolor="none",
+                         label="✱ p<α   ✓/⚠ concordant"))
+    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.0, -0.16),
+              ncol=min(3, len(handles)), frameon=False, fontsize=max(6, lab - 2))
+
+    if ax_fdr is not None:
+        ax_fdr.axis("off")
+        lines = [f"FDR check (raw p / q, α={alpha:g})", ""]
+        for (c, raw_pass, q_pass, n) in frame["fdr"]:
+            lines.append(f"{str(c)[:18]}:  {raw_pass}→{q_pass} / {n}")
+        ax_fdr.text(0.0, 1.0, "\n".join(lines), ha="left", va="top",
+                    fontsize=max(6, lab - 2), family="monospace",
+                    transform=ax_fdr.transAxes)
+
+    fig.tight_layout()
+    return fig
 
 
 def _volcano_table_figure(sub, value_col, alpha, title, tick_label_size=20):

@@ -52,6 +52,7 @@ from PyFLASH.plotting import (
     _superplot_figure,
     _effect_forest_figure,
     _stats_matrix_figure,
+    _ovw_sig_audit_matrix_figure,
     _volcano_table_figure,
     _resolve_marker_roi_long,
     _animal_group_map_from_groups,
@@ -3581,7 +3582,7 @@ def data_overview(
     include_covariation=True,
     include_condition_distributions=True,
     include_effect_sizes=True,
-    include_significance_audit=False,
+    include_significance_audit=True,
     audit_comparisons=None,
     audit_control=None,
     screen=False,
@@ -3608,6 +3609,7 @@ def data_overview(
     plot_condition_fingerprint=True,
     plot_condition_variability=True,
     plot_effect_sizes=True,
+    plot_significance_audit=True,
     condition_distribution_plot="raincloud",
     fingerprint_stat="median",
     variability_stat="cv_pct",
@@ -3808,6 +3810,7 @@ def data_overview(
             "plot_condition_fingerprint": bool(plot_condition_fingerprint),
             "plot_condition_variability": bool(plot_condition_variability),
             "plot_effect_sizes": bool(plot_effect_sizes),
+            "plot_significance_audit": bool(plot_significance_audit),
             "condition_distribution_plot": str(condition_distribution_plot),
             "fingerprint_stat": str(fingerprint_stat),
             "variability_stat": str(variability_stat),
@@ -3985,6 +3988,7 @@ def data_overview(
             plot_condition_distributions, plot_condition_distribution_zscores,
             plot_condition_fingerprint, plot_condition_variability,
             plot_effect_sizes, plot_missingness, plot_covariation,
+            plot_significance_audit,
         )):
             _corr_makedirs(fig_dir)
         figure_numeric_cols = _ovw_numeric_figure_columns(numeric_cols, inventory)
@@ -4120,6 +4124,20 @@ def data_overview(
             if efig is not None:
                 save_fig(efig, fig_dir, f"Effect Size Forest{spec_tag}", montage=True)
                 plt.close(efig)
+        if (plot_significance_audit and include_significance_audit
+                and significance_audit is not None
+                and not significance_audit.empty):
+            # Inferential sibling of the effect-size forest: a markers x contrasts
+            # status matrix (auto-selected test tag, ✱ / borderline-p, ✓/⚠
+            # concordance, FDR sidebar). Rides the overview montage.
+            audit_value_col = "q" if str(gate).lower() == "fdr" else "p"
+            sfig = _ovw_sig_audit_matrix_figure(
+                significance_audit, alpha=alpha, value_col=audit_value_col,
+                tick_label_size=tick_label_size, max_items=max_plot_items,
+                title="Significance audit (mean comparisons)")
+            if sfig is not None:
+                save_fig(sfig, fig_dir, f"Significance Audit{spec_tag}", montage=True)
+                plt.close(sfig)
         if plot_missingness:
             mfig = _ovw_missingness_figure(
                 scope_df, resolved_columns, tick_label_size,
@@ -4204,6 +4222,7 @@ def data_overview(
             "condition_fingerprint": bool(plot_condition_fingerprint),
             "condition_variability": bool(plot_condition_variability),
             "effect_sizes": bool(plot_effect_sizes),
+            "significance_audit": bool(plot_significance_audit),
             "condition_distribution_plot": str(condition_distribution_plot),
             "fingerprint_stat": str(fingerprint_stat),
             "variability_stat": str(variability_stat),
