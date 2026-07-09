@@ -87,6 +87,27 @@ def read_json(path):
         return json.load(fh)
 
 
+def sha256_file(path, *, chunk=1 << 20, max_bytes=None):
+    """Streaming SHA256 of a file (hex), or ``None`` if it can't be hashed.
+
+    Reads in ``chunk``-sized blocks so a large pickle isn't slurped into memory.
+    Returns ``None`` (never raises) when the path is missing/unreadable or, when
+    ``max_bytes`` is set, larger than that cap — callers record the reason so
+    provenance stays best-effort and never breaks a run.
+    """
+    try:
+        p = windows_extended_path(path)
+        if max_bytes is not None and os.path.getsize(p) > int(max_bytes):
+            return None
+        h = hashlib.sha256()
+        with open(p, "rb") as fh:
+            for block in iter(lambda: fh.read(chunk), b""):
+                h.update(block)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
 # ── run-folder resolution ────────────────────────────────────────────────────
 def data_root(experiment):
     """Resolve the root for generated pipeline tables.

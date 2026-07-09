@@ -807,3 +807,72 @@ def test_audit_transition_matrix_renders_four_states():
     assert fig is not None
     import matplotlib.pyplot as plt
     plt.close(fig)
+
+
+# ── Stage 06: provenance / reproducibility bundle ────────────────────────────
+def test_provenance_json_written(tmp_path):
+    import json
+    exp = _overview_dataset(tmp_path)
+    res = pipeline.data_overview(exp, run_label="prov", save=True)
+    prov_path = os.path.join(res["data_dir"], "provenance.json")
+    assert os.path.isfile(prov_path)
+    prov = json.load(open(prov_path, encoding="utf-8"))
+    assert prov["pyflash_version"]                       # package version resolved
+    assert set(prov["versions"]) == {"numpy", "pandas", "scipy"}
+    assert prov["n_animals"] == len(exp.summary)
+    assert "git_commit" in prov                          # present (str or None)
+    assert prov["params"]["audit_axis"] == "split"       # resolved params captured
+    # fixture has no source pickle path -> explicit null with a reason, not a crash.
+    assert prov["source"] is None
+    assert "source_note" in prov
+    assert res["provenance"]["n_animals"] == len(exp.summary)
+
+
+def test_provenance_source_hash_matches(tmp_path):
+    import json
+    from PyFLASH import pipeline_io
+    src = tmp_path / "batch.pkl"
+    src.write_bytes(b"pyflash-source-bytes" * 500)
+    exp = _overview_dataset(tmp_path)
+    exp.source_path = str(src)
+    res = pipeline.data_overview(exp, run_label="prov_hash", save=True)
+    prov = json.load(open(os.path.join(res["data_dir"], "provenance.json"),
+                          encoding="utf-8"))
+    assert prov["source"]["path"] == str(src)
+    assert prov["source"]["sha256"] == pipeline_io.sha256_file(str(src))
+    assert prov["source"]["bytes"] == src.stat().st_size
+
+
+def test_provenance_survives_bad_source_path(tmp_path):
+    # A source path that doesn't exist must not break the run (best-effort).
+    import json
+    exp = _overview_dataset(tmp_path)
+    exp.source_path = str(tmp_path / "does_not_exist.pkl")
+    res = pipeline.data_overview(exp, run_label="prov_bad", save=True)
+    assert res["column_inventory"] is not None            # run still succeeded
+    prov = json.load(open(os.path.join(res["data_dir"], "provenance.json"),
+                          encoding="utf-8"))
+    assert prov["source"] is None and "source_note" in prov
+
+
+def test_sig_audit_bundle_assembled(tmp_path):
+    import json
+    from PyFLASH import pipeline_io
+    exp = _overview_dataset(tmp_path)
+    res = pipeline.data_overview(exp, by="conditions",
+                                 include_significance_audit=True,
+                                 run_label="bundle", save=True)
+    bundle = res["sig_audit_bundle"]
+    assert bundle and os.path.isdir(bundle)
+    der = os.path.join(bundle, "data", "der", "significance_audit.csv")
+    assert os.path.isfile(der)
+    assert os.path.isfile(os.path.join(bundle, "README.md"))
+    summary = json.load(open(os.path.join(bundle, "summary.json"), encoding="utf-8"))
+    assert summary["fdr_method"] == "benjamini-hochberg"
+    assert summary["provenance"]["pyflash_version"]
+    # sources.csv hashes match the actual der files.
+    sources = pd.read_csv(os.path.join(bundle, "data", "sources.csv"))
+    for _, row in sources.iterrows():
+        actual = pipeline_io.sha256_file(
+            os.path.join(bundle, "data", "der", row["copied_file_name"]))
+        assert row["sha256"] == actual

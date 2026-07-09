@@ -10,6 +10,7 @@ from matplotlib import pyplot as plt
 from PyFLASH._logging import logger as _log
 from PyFLASH.dataframe import coerce_dataframe_input
 from PyFLASH.aliases import (
+    normalize_filter_by,
     prefer_alias,
     resolve_data_column_aliases,
     resolve_split_filter_aliases,
@@ -3830,6 +3831,151 @@ def _ovw_audit_axis_transitions(experiment, scope_df, num_df, numeric_cols,
     return joined, transitions, fig_df
 
 
+def _git_commit_or_none():
+    """Best-effort short-circuit git HEAD SHA of the package repo, else ``None``."""
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+            timeout=5, cwd=os.path.dirname(os.path.abspath(__file__)))
+        return (out.stdout.strip() or None) if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _ovw_provenance(experiment, resolved_params, data_dir, *,
+                    hash_source=True, hash_max_mb=1024):
+    """Best-effort per-run reproducibility record -> ``provenance.json``.
+
+    Captures PyFLASH + interpreter + numpy/pandas/scipy versions, a best-effort git
+    commit, the source pickle path + sha256 (with size/mtime, hash capped by
+    ``hash_max_mb`` so a 288 MB pickle can't stall a run), N animals, and the
+    resolved analysis parameters. Never raises — a hashing / version / path error
+    records a ``null`` (with a reason) instead of breaking an otherwise-good run.
+    """
+    from datetime import datetime
+    rec = {"created": None, "pyflash_version": None, "python": None,
+           "versions": {}, "git_commit": None, "source": None,
+           "n_animals": None, "params": None}
+    try:
+        rec["created"] = datetime.now().isoformat(timespec="seconds")
+        import platform
+        import importlib.metadata as _im
+
+        def _v(pkg):
+            try:
+                return _im.version(pkg)
+            except Exception:
+                return None
+        rec["pyflash_version"] = _v("PyFLASH-analysis")
+        rec["python"] = platform.python_version()
+        rec["versions"] = {p: _v(p) for p in ("numpy", "pandas", "scipy")}
+    except Exception:
+        pass
+    rec["git_commit"] = _git_commit_or_none()
+    try:
+        summ = getattr(experiment, "summary", None)
+        rec["n_animals"] = int(len(summ)) if summ is not None else None
+    except Exception:
+        pass
+    try:
+        rec["params"] = dict(resolved_params)
+    except Exception:
+        rec["params"] = None
+
+    src = None
+    for attr in ("source_path", "pickle_path", "pkl_file", "_source_path",
+                 "path", "source"):
+        cand = getattr(experiment, attr, None)
+        if isinstance(cand, str) and cand:
+            src = cand
+            break
+    if src and _pio.isfile(src):
+        info = {"path": src, "sha256": None, "bytes": None, "mtime": None}
+        try:
+            xp = _pio.windows_extended_path(src)
+            info["bytes"] = int(os.path.getsize(xp))
+            info["mtime"] = datetime.fromtimestamp(
+                os.path.getmtime(xp)).isoformat(timespec="seconds")
+        except Exception:
+            pass
+        if hash_source:
+            info["sha256"] = _pio.sha256_file(
+                src, max_bytes=int(hash_max_mb) * (1 << 20))
+            if info["sha256"] is None:
+                info["sha256_note"] = "unhashed (missing, unreadable, or > hash_max_mb)"
+        rec["source"] = info
+    else:
+        rec["source"] = None
+        rec["source_note"] = "source pickle path unavailable on the experiment object"
+
+    try:
+        _pio.write_json(rec, os.path.join(data_dir, "provenance.json"))
+    except Exception:
+        pass
+    return rec
+
+
+def _ovw_sig_audit_bundle(experiment, data_dir, significance_audit,
+                          audit_transitions, manifest, provenance):
+    """Assemble a portable ``sig_audit/`` bundle mirroring the reference layout.
+
+    ``data/der/*.csv`` (audit + transition tables), ``data/sources.csv`` (each der
+    table with its sha256), ``summary.json`` (alpha / FDR method / axis / N / test
+    rule + the run provenance) and ``README.md``. Best-effort; returns the bundle
+    directory or ``None`` on any failure so it can never break the run.
+    """
+    try:
+        bundle = os.path.join(data_dir, "sig_audit")
+        der = os.path.join(bundle, "data", "der")
+        _pio.makedirs(der)
+        tables = {"significance_audit.csv": significance_audit}
+        if audit_transitions is not None and not audit_transitions.empty:
+            tables["significance_audit_transitions.csv"] = audit_transitions
+        rows = []
+        for name, frame in tables.items():
+            p = os.path.join(der, name)
+            _corr_to_csv(frame, p, index=False)
+            rows.append({
+                "copied_file_name": name,
+                "copied_path": os.path.join("data", "der", name),
+                "bytes": int(os.path.getsize(_pio.windows_extended_path(p))),
+                "sha256": _pio.sha256_file(p),
+            })
+        _corr_to_csv(pd.DataFrame(rows),
+                     os.path.join(bundle, "data", "sources.csv"), index=False)
+        summary = {
+            "alpha": manifest.get("alpha"),
+            "p_adjust_method": "benjamini-hochberg",
+            "fdr_method": "benjamini-hochberg",
+            "audit_axis": manifest.get("audit_axis"),
+            "n_audit_tests": manifest.get("n_audit_tests"),
+            "n_audit_significant": manifest.get("n_audit_significant"),
+            "n_audit_gained": manifest.get("n_audit_gained"),
+            "n_audit_lost": manifest.get("n_audit_lost"),
+            "test_selection": ("auto: normality -> parametric / non-parametric "
+                               "via multipleComparisons"),
+            "provenance": provenance,
+        }
+        _pio.write_json(summary, os.path.join(bundle, "summary.json"))
+        readme = (
+            "# Significance-audit bundle\n\n"
+            "Self-contained, reproducible export of the `data_overview` significance "
+            "audit.\n\n"
+            "- `data/der/` — the audit + transition tables.\n"
+            "- `data/sources.csv` — each table with its SHA256.\n"
+            "- `summary.json` — alpha, FDR method, audit axis, audit Ns, the "
+            "test-selection rule, and the run provenance (versions, git commit, "
+            "source hash).\n"
+        )
+        with open(_pio.windows_extended_path(os.path.join(bundle, "README.md")),
+                  "w", encoding="utf-8") as fh:
+            fh.write(readme)
+        return bundle
+    except Exception:
+        return None
+
+
 @montage_pipeline(title="Data Overview Pipeline")
 def data_overview(
     experiment,
@@ -4017,7 +4163,6 @@ def data_overview(
         current_name="specificity",
         alias_name="filter_by",
     )
-    from PyFLASH.aliases import normalize_filter_by
     specificity = normalize_filter_by(specificity)
     experiment = coerce_dataframe_input(
         experiment,
@@ -4597,6 +4742,35 @@ def data_overview(
         },
         "reused": False,
     }
+    # Reproducibility: a best-effort provenance record every run + a portable
+    # sig_audit/ bundle when the audit ran. Both never raise (they must not break
+    # an otherwise-successful run); recorded in the manifest so the run is
+    # self-describing six months later.
+    provenance_record = None
+    sig_audit_bundle = None
+    if save and data_dir:
+        resolved_params = {
+            "by": by, "factor": factor, "split_by": split_by,
+            "split_mode": split_mode, "nest": nest, "roi": roi,
+            "alpha": float(alpha), "min_n": int(min_n),
+            "include_significance_audit": bool(include_significance_audit),
+            "audit_axis": (str(audit_axis) if audit_axis else None),
+            "screen": bool(screen), "gate": str(gate),
+            "outlier_methods": list(outlier_methods),
+            "covariation_method": str(covariation_method),
+            "covariation_threshold": float(covariation_threshold),
+            "n_columns": manifest.get("n_columns"),
+            "run_label": manifest.get("run_label"),
+        }
+        provenance_record = _ovw_provenance(experiment, resolved_params, data_dir)
+        if include_significance_audit and not significance_audit.empty:
+            sig_audit_bundle = _ovw_sig_audit_bundle(
+                experiment, data_dir, significance_audit, audit_transitions,
+                manifest, provenance_record)
+    manifest["provenance"] = (
+        os.path.join(data_dir, "provenance.json")
+        if provenance_record and data_dir else None)
+    manifest["sig_audit_bundle"] = sig_audit_bundle
     if save and write_manifest:
         _corr_write_json(manifest, manifest_path)
         _ovw_append_runs_index(experiment, manifest)
@@ -4625,6 +4799,8 @@ def data_overview(
     result["effect_sizes"] = effect_sizes
     result["significance_audit"] = significance_audit
     result["significance_audit_transitions"] = audit_transitions
+    result["provenance"] = provenance_record
+    result["sig_audit_bundle"] = sig_audit_bundle
     return result
 
 
@@ -6273,7 +6449,6 @@ def linear_model(
         current_name="group",
         alias_name="group_col",
     )
-    from PyFLASH.aliases import normalize_filter_by
     specificity = prefer_alias(
         specificity,
         normalize_filter_by(filter_by),
@@ -6735,7 +6910,6 @@ def rhythm(
         current_name="animal_col",
         alias_name="subject_col",
     )
-    from PyFLASH.aliases import normalize_filter_by
     specificity = prefer_alias(
         specificity,
         normalize_filter_by(filter_by),
