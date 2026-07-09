@@ -36,6 +36,44 @@ from PyFLASH.spec import (
 from PyFLASH.ui import figures, services
 
 
+def _load_local_pyflash_runner(module_name):
+    runner_path = (
+        Path(__file__).resolve().parents[1]
+        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
+    )
+    if not runner_path.exists():
+        pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
+    spec = importlib.util.spec_from_file_location(module_name, runner_path)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    return runner
+
+
+def _patch_runner_for_fake_plot(monkeypatch, runner, tmp_path):
+    import PyFLASH
+
+    pkl_path = tmp_path / "human.pkl"
+    pkl_path.write_text("fake pickle placeholder", encoding="utf-8")
+    fig_root = tmp_path / "Results" / "Python Figures"
+    fig_root.mkdir(parents=True)
+    batch = types.SimpleNamespace(fig_path=str(fig_root), experiment_list=[])
+
+    monkeypatch.setattr(runner, "resolve_pickle", lambda _batch: str(pkl_path))
+    monkeypatch.setattr(PyFLASH, "load_state", lambda _path: batch)
+    monkeypatch.setattr(runner, "_install_save_fig_hook", lambda: None)
+
+    def fake_plot(_target, **_kwargs):
+        (fig_root / "plot.png").write_bytes(b"fake png")
+        return None
+
+    monkeypatch.setattr(
+        runner,
+        "_resolve_function_target",
+        lambda _name: (fake_plot, "PyFLASH.plotting", "plot_fake"),
+    )
+    return pkl_path, fig_root, batch
+
+
 # ── available_plots ─────────────────────────────────────────────────────────
 
 
@@ -132,6 +170,163 @@ def test_pyflash_runner_safe_run_id_cannot_escape_store():
     assert all(len(runner._safe_run_id("z" * n)) <= 64 for n in (63, 64, 65, 200))
 
 
+def test_pyflash_runner_appends_reproducibility_notebook(tmp_path):
+    runner_path = (
+        Path(__file__).resolve().parents[1]
+        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
+    )
+    if not runner_path.exists():
+        pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
+    spec = importlib.util.spec_from_file_location("pyflash_runner_notebook", runner_path)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+
+    fig_root = tmp_path / "Results" / "Python Figures"
+    fig_root.mkdir(parents=True)
+    batch = types.SimpleNamespace(fig_path=str(fig_root))
+    req = {
+        "batch": "human",
+        "func": "plot_mean_bars",
+        "kwargs": {"factor": "Diagnosis", "save": True},
+        "project": "Human Amyloid",
+        "user_request": "Make human diagnosis bars",
+    }
+    result = {
+        "ok": True,
+        "func": "plot_mean_bars",
+        "outputs": [str(fig_root / "bars.svg")],
+        "previews": [str(tmp_path / "preview.png")],
+        "equivalent_script": "from PyFLASH import load_state\nplotting.plot_mean_bars(batch)",
+        "results_summary": {"run_id": "run_1"},
+        "results_json": str(tmp_path / "run_1.results.json"),
+        "results_md": str(tmp_path / "run_1.results.md"),
+        "digest": "deterministic digest text",
+    }
+
+    notebook, notebook_run_id = runner._append_reproducibility_notebook(
+        req, tmp_path / "human.pkl", result, batch, batch
+    )
+
+    assert notebook == tmp_path / "Results" / "PyFLASH Notebooks" / "human_amyloid.ipynb"
+    assert notebook_run_id == "run_1"
+    data = json.loads(notebook.read_text(encoding="utf-8"))
+    sources = "\n".join(str(cell["source"]) for cell in data["cells"])
+    assert data["nbformat"] == 4
+    assert "Make human diagnosis bars" in sources
+    assert "PyFLASH source:" in sources
+    assert "plotting.plot_mean_bars(batch)" in sources
+    assert "preview.png" in sources
+    assert "run_1" in sources
+    assert "deterministic digest text" in sources
+
+    second = dict(result)
+    second["results_summary"] = {"run_id": "run_2"}
+    runner._append_reproducibility_notebook(req, tmp_path / "human.pkl", second, batch, batch)
+    updated = json.loads(notebook.read_text(encoding="utf-8"))
+    updated_sources = "\n".join(str(cell["source"]) for cell in updated["cells"])
+    assert len(updated["cells"]) > len(data["cells"])
+    assert "run_1" in updated_sources
+    assert "run_2" in updated_sources
+
+
+def test_pyflash_runner_notebook_path_override(tmp_path):
+    runner = _load_local_pyflash_runner("pyflash_runner_notebook_override")
+
+    fig_root = tmp_path / "Results" / "Python Figures"
+    fig_root.mkdir(parents=True)
+    batch = types.SimpleNamespace(fig_path=str(fig_root))
+    result = {
+        "ok": True,
+        "func": "plot_mean_bars",
+        "outputs": [],
+        "previews": [],
+        "equivalent_script": "plotting.plot_mean_bars(batch)",
+        "results_summary": {"run_id": "run_explicit"},
+    }
+
+    explicit_file = tmp_path / "custom_project.ipynb"
+    req = {
+        "batch": "human",
+        "func": "plot_mean_bars",
+        "notebook_path": str(explicit_file),
+    }
+    notebook, notebook_run_id = runner._append_reproducibility_notebook(
+        req, tmp_path / "human.pkl", result, batch, batch
+    )
+    assert notebook == explicit_file
+    assert notebook_run_id == "run_explicit"
+
+    req_dir = {
+        "batch": "human",
+        "func": "plot_mean_bars",
+        "project": "Custom Folder Project",
+        "notebook_path": str(tmp_path / "notebooks"),
+    }
+    notebook_dir, _ = runner._append_reproducibility_notebook(
+        req_dir, tmp_path / "human.pkl", result, batch, batch
+    )
+    assert notebook_dir == tmp_path / "notebooks" / "custom_folder_project.ipynb"
+
+
+def test_pyflash_runner_run_request_reports_notebook_fields(tmp_path, monkeypatch):
+    runner = _load_local_pyflash_runner("pyflash_runner_run_request_notebook")
+    _pkl_path, fig_root, _batch = _patch_runner_for_fake_plot(
+        monkeypatch, runner, tmp_path
+    )
+
+    result = runner.run_request(
+        {
+            "id": "runreq1",
+            "batch": "human",
+            "func": "plot_fake",
+            "kwargs": {"save": True},
+            "project": "Run Request",
+            "user_request": "make a fake plot",
+            "describe": False,
+        },
+        cache=None,
+    )
+
+    assert result["ok"] is True
+    assert result["notebook"] == str(
+        tmp_path / "Results" / "PyFLASH Notebooks" / "run_request.ipynb"
+    )
+    assert result["notebook_run_id"] == "runreq1"
+    assert result["notebook_project"] == "run_request"
+    assert str(fig_root / "plot.png") in result["outputs"]
+
+    notebook = json.loads(Path(result["notebook"]).read_text(encoding="utf-8"))
+    sources = "\n".join(str(cell["source"]) for cell in notebook["cells"])
+    assert "make a fake plot" in sources
+    assert "plotting.plot_fake(batch, save=True)" in sources
+
+
+def test_pyflash_runner_run_request_fails_on_notebook_error(tmp_path, monkeypatch):
+    runner = _load_local_pyflash_runner("pyflash_runner_notebook_failure")
+    _patch_runner_for_fake_plot(monkeypatch, runner, tmp_path)
+
+    def fail_notebook(*_args, **_kwargs):
+        raise RuntimeError("notebook disk full")
+
+    monkeypatch.setattr(runner, "_append_reproducibility_notebook", fail_notebook)
+
+    result = runner.run_request(
+        {
+            "id": "runreq2",
+            "batch": "human",
+            "func": "plot_fake",
+            "kwargs": {"save": True},
+            "project": "Run Request",
+            "describe": False,
+        },
+        cache=None,
+    )
+
+    assert result["ok"] is False
+    assert result["notebook_error"] == "RuntimeError: notebook disk full"
+    assert "RuntimeError" in result["notebook_traceback"]
+
+
 def test_pyflash_runner_describe_status_for_func():
     runner_path = (
         Path(__file__).resolve().parents[1]
@@ -151,6 +346,8 @@ def test_pyflash_runner_describe_status_for_func():
     assert runner._describe_status_for_func("plot_images") == "exempt"
     assert runner._describe_status_for_func("correlation_pipeline") == "covered"
     assert runner._describe_status_for_func("PyFLASH.pipeline.correlation") == "covered"
+    assert runner._describe_status_for_func("linear_model_pipeline") == "covered"
+    assert runner._describe_status_for_func("PyFLASH.pipeline.linear_model") == "covered"
     assert runner._describe_status_for_func("not_a_real_plot") == "unclassified"
 
 
@@ -168,14 +365,19 @@ def test_pyflash_runner_discover_includes_registered_pipeline_signatures():
     discovered = runner.discover()
     corr = discovered["registered_callables"]["correlation_pipeline"]
     adjusted = discovered["registered_callables"]["adjusted_correlation_pipeline"]
+    linear = discovered["registered_callables"]["linear_model_pipeline"]
 
     assert corr["target"] == "PyFLASH.pipeline.correlation"
     assert "gate='p'" in corr["signature"]
     assert "value_matrices='p'" in corr["signature"]
     assert adjusted["target"] == "PyFLASH.pipeline.adjusted_correlation"
     assert "value_matrices='p'" in adjusted["signature"]
+    assert linear["target"] == "PyFLASH.pipeline.linear_model"
+    assert "dependent_variables=None" in linear["signature"]
+    assert "group=None" in linear["signature"]
     assert "correlation_pipeline" not in discovered["undocumented"]
     assert "adjusted_correlation_pipeline" not in discovered["undocumented"]
+    assert "linear_model_pipeline" not in discovered["undocumented"]
 
 
 def test_pyflash_reference_updater_is_current():

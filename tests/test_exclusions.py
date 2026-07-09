@@ -281,7 +281,7 @@ def test_adjusted_correlation_writes_runs_index(tmp_path):
         max_adjusted_regressions=0, run_label="adj_idx", save=True, verbose=False)
 
     index_path = os.path.join(
-        data_path, "Adjusted Correlation Pipeline", "_runs_index.csv")
+        fig_path, "Adjusted Correlation Pipeline", "_runs_index.csv")
     assert os.path.isfile(index_path)
     idx = pd.read_csv(index_path)
     assert "adj_idx" in set(idx["run_label"].astype(str))

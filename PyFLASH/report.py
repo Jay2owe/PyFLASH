@@ -422,6 +422,123 @@ def _correlation_headline(record) -> str:
     return f"{y} vs {x}{grp_txt}: {r_txt}{tail}"
 
 
+def build_multivariable_regression_record(
+    *,
+    predictor_set=None,
+    predictors=None,
+    y=None,
+    group=None,
+    n=None,
+    r2=None,
+    adj_r2=None,
+    f=None,
+    p=None,
+    q=None,
+    df_model=None,
+    df_resid=None,
+    coefficients=None,
+    rank_deficient=None,
+):
+    """Build a Tier-1 record for one multi-predictor regression model."""
+    if isinstance(predictors, str):
+        pred_list = [predictors]
+    else:
+        pred_list = list(predictors or [])
+    coeffs = {}
+    if isinstance(coefficients, dict):
+        coeffs = {str(k): _f(v) for k, v in coefficients.items()}
+    record = {
+        "kind": "multivariable_regression",
+        "predictor_set": _s(predictor_set),
+        "predictors": [_s(v) for v in pred_list],
+        "y": _s(y),
+        "group": _s(group),
+        "n": _i(n),
+        "r2": _f(r2),
+        "adj_r2": _f(adj_r2),
+        "f": _f(f),
+        "p": _f(p),
+        "q": _f(q),
+        "df_model": _i(df_model),
+        "df_resid": _i(df_resid),
+        "coefficients": coeffs,
+        "rank_deficient": bool(rank_deficient) if rank_deficient is not None else None,
+    }
+    record["headline"] = _multivariable_regression_headline(record)
+    return coerce(record)
+
+
+def _multivariable_regression_headline(record) -> str:
+    y = record.get("y") or "y"
+    pred = record.get("predictor_set")
+    if not pred:
+        pred = " + ".join([p for p in record.get("predictors", []) if p]) or "predictors"
+    grp = record.get("group")
+    grp_txt = f" [{grp}]" if grp else ""
+    r2 = record.get("r2")
+    r2_txt = f"R2={r2:.3g}" if r2 is not None else "R2=n/a"
+    p_txt = f"p={_fmt_p(record.get('p'))}" if record.get("p") is not None else None
+    q_txt = f"q={_fmt_p(record.get('q'))}" if record.get("q") is not None else None
+    tail = "; ".join([x for x in (p_txt, q_txt) if x])
+    return f"{y} ~ {pred}{grp_txt}: {r2_txt}" + (f"; {tail}" if tail else "")
+
+
+def build_linear_model_record(
+    *,
+    dependent_variable=None,
+    formula=None,
+    group=None,
+    predictors=None,
+    n=None,
+    r2=None,
+    adj_r2=None,
+    f=None,
+    p=None,
+    coefficients=None,
+    adjusted_means=None,
+):
+    """Build a Tier-1 record for one adjusted linear model."""
+    coeffs = {}
+    if isinstance(coefficients, dict):
+        coeffs = {str(k): coerce(v) for k, v in coefficients.items()}
+    means = {}
+    if isinstance(adjusted_means, dict):
+        means = {str(k): coerce(v) for k, v in adjusted_means.items()}
+    pred_list = list(predictors or [])
+    record = {
+        "kind": "linear_model",
+        "dependent_variable": _s(dependent_variable),
+        "formula": _s(formula),
+        "group": _s(group),
+        "predictors": [_s(v) for v in pred_list],
+        "n": _i(n),
+        "r2": _f(r2),
+        "adj_r2": _f(adj_r2),
+        "f": _f(f),
+        "p": _f(p),
+        "coefficients": coeffs,
+        "adjusted_means": means,
+    }
+    record["headline"] = _linear_model_headline(record)
+    return coerce(record)
+
+
+def _linear_model_headline(record) -> str:
+    y = record.get("dependent_variable") or "dependent variable"
+    group = record.get("group")
+    group_txt = f" by {group}" if group else ""
+    adj = record.get("adj_r2")
+    r2 = record.get("r2")
+    r_txt = (
+        f"adjusted R2={adj:.3g}" if adj is not None
+        else f"R2={r2:.3g}" if r2 is not None
+        else "R2=n/a"
+    )
+    p = record.get("p")
+    p_txt = f"; model p={_fmt_p(p)}" if p is not None else ""
+    return f"{y}{group_txt}: {r_txt}{p_txt}"
+
+
 def summarize_return(ret):
     """Coerce a plot/pipeline return value into a bounded JSON summary, or None.
 

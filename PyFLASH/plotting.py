@@ -45,6 +45,9 @@ from PyFLASH.stats import (
     runITTest,
     mwu_multiple_comparisons,
     stats_cache_key,
+    get_annotation,
+    plot_comparison_lines_from_figdata,
+    _annotate_stats_summary,
 )
 from PyFLASH.export import convert_name, convert_raw_name, convert_behavior_name
 from PyFLASH.utils import (
@@ -526,7 +529,7 @@ def _resolve_filtered_columns(experiment, filtered_columns=None,
     else:
         if column_strings is None and regex_string is None:
             # Default behavior: consider all summary columns.
-            resolved = experiment.summary.columns.tolist()
+            resolved = source_df.columns.tolist()
         else:
             resolved = get_columns(
                 source_df,
@@ -694,6 +697,360 @@ def _prepare_rect_numeric_df(df, y_columns, x_columns,
         x_was_categorical[col] = bool(as_cat)
 
     return out, valid_y, valid_x, dropped_y, dropped_x, x_was_categorical
+
+
+def _normalize_multivariable_predictor_sets(predictors, source_df):
+    """Normalize predictor-set specifications to labelled column lists."""
+    if predictors is None:
+        raise ValueError(
+            "predictors is required. Use a mapping like "
+            "{'Month': ['month_sin', 'month_cos'], 'Season': ['season_sin', 'season_cos']}."
+        )
+    if isinstance(predictors, Mapping):
+        raw_items = list(predictors.items())
+    else:
+        if isinstance(predictors, str):
+            raise ValueError(
+                "predictors must be a mapping of label -> columns, not a single string."
+            )
+        raw_items = []
+        try:
+            iterator = list(predictors)
+        except TypeError as exc:
+            raise ValueError("predictors must be a mapping or iterable of predictor sets.") from exc
+        for item in iterator:
+            if isinstance(item, Mapping):
+                raw_items.extend(list(item.items()))
+                continue
+            if (
+                isinstance(item, (list, tuple))
+                and len(item) == 2
+                and isinstance(item[0], str)
+                and not isinstance(item[1], str)
+            ):
+                raw_items.append((item[0], item[1]))
+                continue
+            raw_items.append((None, item))
+
+    resolved_sets = []
+    seen_labels = set()
+    missing = []
+    for raw_label, raw_cols in raw_items:
+        if isinstance(raw_cols, str):
+            raw_col_list = [raw_cols]
+        else:
+            try:
+                raw_col_list = list(raw_cols)
+            except TypeError:
+                raw_col_list = [raw_cols]
+        resolved_cols = []
+        for col in raw_col_list:
+            mapped = resolve_column_key(source_df, col)
+            if mapped is None:
+                missing.append(str(col))
+                continue
+            if mapped not in resolved_cols:
+                resolved_cols.append(mapped)
+        if len(resolved_cols) == 0:
+            continue
+        label = str(raw_label).strip() if raw_label is not None else ""
+        if not label:
+            label = " + ".join([get_display_name(c, minimal=True) for c in resolved_cols])
+        if label in seen_labels:
+            raise ValueError(f"Duplicate predictor-set label: {label!r}")
+        seen_labels.add(label)
+        resolved_sets.append({"label": label, "columns": resolved_cols})
+
+    if missing:
+        missing_preview = ", ".join(missing[:5])
+        raise ValueError(f"No columns matched predictor name(s): {missing_preview}")
+    if len(resolved_sets) == 0:
+        raise ValueError("No valid predictor sets were resolved.")
+    return resolved_sets
+
+
+def _apply_predictor_set_order(predictor_sets, requested_order):
+    if requested_order is None:
+        return list(predictor_sets)
+    labels = [p["label"] for p in predictor_sets]
+    ordered_labels = _apply_requested_order(labels, requested_order)
+    by_label = {p["label"]: p for p in predictor_sets}
+    return [by_label[label] for label in ordered_labels if label in by_label]
+
+
+def _coerce_regression_numeric_series(series):
+    s = series.copy()
+    try:
+        mask = s.astype(str).str.contains("NOT_INCLUDED_IN_EXPERIMENT", na=False)
+        mask = mask | is_excluded_mask(s)
+        s = s.mask(mask, np.nan)
+    except Exception:
+        pass
+    return _to_numeric_excluding_not_included(s)
+
+
+def _effective_multivariable_min_n(n_predictors, min_n):
+    required = int(n_predictors) + 2
+    if min_n is None:
+        return required
+    try:
+        return max(required, int(min_n))
+    except (TypeError, ValueError):
+        raise ValueError("min_n must be None or an integer.")
+
+
+def _fit_multivariable_regression_model(df, y_col, predictor_cols, min_n=None):
+    predictor_cols = list(predictor_cols)
+    n_predictors = len(predictor_cols)
+    min_required = _effective_multivariable_min_n(n_predictors, min_n)
+    result = {
+        "n": 0,
+        "r2": np.nan,
+        "adj_r2": np.nan,
+        "f": np.nan,
+        "p": np.nan,
+        "q": np.nan,
+        "df_model": np.nan,
+        "df_resid": np.nan,
+        "coefficients": {},
+        "rank": np.nan,
+        "rank_deficient": False,
+        "min_n": min_required,
+    }
+    needed = [y_col] + predictor_cols
+    if any(col not in df.columns for col in needed):
+        return result
+
+    work = pd.DataFrame(index=df.index)
+    for col in needed:
+        work[col] = _coerce_regression_numeric_series(df[col])
+    work = work.dropna(subset=needed)
+    n = int(len(work))
+    result["n"] = n
+    if n < min_required or n_predictors < 1:
+        return result
+
+    y = work[y_col].to_numpy(dtype=float)
+    x_pred = work[predictor_cols].to_numpy(dtype=float)
+    design = np.column_stack([np.ones(n, dtype=float), x_pred])
+    try:
+        beta, residuals, rank, _ = np.linalg.lstsq(design, y, rcond=None)
+    except Exception:
+        return result
+
+    rank = int(rank)
+    df_model = int(max(0, rank - 1))
+    df_resid = int(n - rank)
+    result["rank"] = rank
+    result["rank_deficient"] = bool(rank < design.shape[1])
+    result["df_model"] = df_model
+    result["df_resid"] = df_resid
+    coeffs = {"Intercept": float(beta[0])}
+    coeffs.update({col: float(beta[i + 1]) for i, col in enumerate(predictor_cols)})
+    result["coefficients"] = coeffs
+
+    fitted = design @ beta
+    resid = y - fitted
+    sse = float(np.sum(resid ** 2))
+    y_centered = y - float(np.mean(y))
+    tss = float(np.sum(y_centered ** 2))
+    eps = np.finfo(float).eps
+    if not np.isfinite(tss) or tss <= eps or df_model <= 0:
+        return result
+
+    r2 = 1.0 - (sse / tss)
+    result["r2"] = float(max(min(r2, 1.0), -np.inf))
+    if df_resid > 0:
+        result["adj_r2"] = float(1.0 - ((1.0 - result["r2"]) * (n - 1) / df_resid))
+
+    if df_resid <= 0:
+        return result
+    explained = max(tss - sse, 0.0)
+    ms_model = explained / df_model
+    ms_error = sse / df_resid
+    if ms_error <= eps:
+        f_stat = np.inf if explained > eps else 0.0
+        p_value = 0.0 if explained > eps else 1.0
+    else:
+        f_stat = ms_model / ms_error
+        try:
+            from scipy import stats as sp_stats
+            p_value = float(sp_stats.f.sf(f_stat, df_model, df_resid))
+        except Exception:
+            p_value = np.nan
+    result["f"] = float(f_stat)
+    result["p"] = float(p_value)
+    return result
+
+
+def _adjust_pvalues_bh(p_values):
+    arr = np.asarray(p_values, dtype=float)
+    q = np.full(arr.shape, np.nan, dtype=float)
+    valid = np.isfinite(arr)
+    if not np.any(valid):
+        return q
+    valid_idx = np.where(valid)[0]
+    vals = arr[valid]
+    order = np.argsort(vals)
+    ranked = vals[order] * len(vals) / np.arange(1, len(vals) + 1, dtype=float)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    ranked = np.clip(ranked, 0.0, 1.0)
+    q[valid_idx[order]] = ranked
+    return q
+
+
+def _normalize_multivariable_matrix_value(value):
+    key = str(value or "r2").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "r2": "r2",
+        "r_squared": "r2",
+        "rsquared": "r2",
+        "adj_r2": "adj_r2",
+        "adjusted_r2": "adj_r2",
+        "adjusted_r_squared": "adj_r2",
+        "p": "p",
+        "p_value": "p",
+        "pvalue": "p",
+        "q": "q",
+        "q_value": "q",
+        "qvalue": "q",
+    }
+    if key not in aliases:
+        raise ValueError("value must be one of: 'r2', 'adj_r2', 'p', or 'q'.")
+    return aliases[key]
+
+
+def _normalize_regression_correction(correction):
+    key = str(correction or "none").strip().lower().replace("-", "_").replace(" ", "_")
+    if key in {"fdr", "bh", "benjamini_hochberg", "benjaminihochberg"}:
+        return "fdr"
+    if key in {"none", "raw", "p"}:
+        return "none"
+    raise ValueError("correction must be 'fdr' or 'none'.")
+
+
+def _multivariable_value_label(value_key):
+    return {
+        "r2": "Model R2",
+        "adj_r2": "Adjusted R2",
+        "p": "Model p-value",
+        "q": "FDR q-value",
+    }[value_key]
+
+
+def _multivariable_heatmap_limits(value_key):
+    if value_key in {"r2", "adj_r2", "p", "q"}:
+        return 0.0, 1.0
+    return None, None
+
+
+def _compute_multivariable_regression_grid(
+    panel_df,
+    y_columns,
+    predictor_sets,
+    *,
+    min_n=None,
+    value_key="r2",
+    correction_key="fdr",
+    alpha=0.05,
+    emit_records=False,
+    group_name=None,
+):
+    labels = [p["label"] for p in predictor_sets]
+    value_mat = pd.DataFrame(index=list(y_columns), columns=labels, dtype=float)
+    p_mat = pd.DataFrame(index=list(y_columns), columns=labels, dtype=float)
+    q_mat = pd.DataFrame(index=list(y_columns), columns=labels, dtype=float)
+    annot = pd.DataFrame("", index=list(y_columns), columns=labels, dtype=object)
+    model_entries = []
+
+    for y_col in y_columns:
+        for pred in predictor_sets:
+            label = pred["label"]
+            result = _fit_multivariable_regression_model(
+                panel_df, y_col, pred["columns"], min_n=min_n
+            )
+            entry = {
+                "key": f"{y_col} ~ {label}",
+                "y": y_col,
+                "predictor_set": label,
+                "predictors": list(pred["columns"]),
+                "result": result,
+            }
+            model_entries.append(entry)
+            p_mat.loc[y_col, label] = result.get("p", np.nan)
+
+    q_values = _adjust_pvalues_bh([entry["result"].get("p", np.nan) for entry in model_entries])
+    for entry, q_value in zip(model_entries, q_values):
+        result = entry["result"]
+        result["q"] = float(q_value) if np.isfinite(q_value) else np.nan
+        y_col = entry["y"]
+        label = entry["predictor_set"]
+        q_mat.loc[y_col, label] = result["q"]
+        value_mat.loc[y_col, label] = result.get(value_key, np.nan)
+        star_basis = result["q"] if correction_key == "fdr" else result.get("p", np.nan)
+        if np.isfinite(star_basis) and float(star_basis) <= float(alpha):
+            annot.loc[y_col, label] = _get_annotation(float(star_basis), ns="")
+
+    if emit_records:
+        try:
+            import PyFLASH.report as _report
+            active = _report.is_active()
+        except Exception:
+            _report = None
+            active = False
+        if active:
+            for entry in model_entries:
+                result = entry["result"]
+                if not (np.isfinite(result.get("r2", np.nan)) or np.isfinite(result.get("p", np.nan))):
+                    continue
+                try:
+                    _report.emit(_report.build_multivariable_regression_record(
+                        predictor_set=entry["predictor_set"],
+                        predictors=entry["predictors"],
+                        y=entry["y"],
+                        group=group_name,
+                        n=result.get("n"),
+                        r2=result.get("r2"),
+                        adj_r2=result.get("adj_r2"),
+                        f=result.get("f"),
+                        p=result.get("p"),
+                        q=result.get("q"),
+                        df_model=result.get("df_model"),
+                        df_resid=result.get("df_resid"),
+                        coefficients=result.get("coefficients"),
+                        rank_deficient=result.get("rank_deficient"),
+                    ))
+                except Exception:
+                    pass
+
+    models = {}
+    for entry in model_entries:
+        payload = dict(entry["result"])
+        payload["predictor_set"] = entry["predictor_set"]
+        payload["predictors"] = list(entry["predictors"])
+        models[entry["key"]] = payload
+    return {
+        "values": value_mat,
+        "p": p_mat,
+        "q": q_mat,
+        "annotations": annot,
+        "models": models,
+    }
+
+
+def _drop_empty_multivariable_axes(grid):
+    values = grid["values"]
+    keep_y = [idx for idx in values.index if values.loc[idx].notna().any()]
+    keep_x = [col for col in values.columns if values[col].notna().any()]
+    dropped_y = [idx for idx in values.index if idx not in keep_y]
+    dropped_x = [col for col in values.columns if col not in keep_x]
+    trimmed = {}
+    for key, obj in grid.items():
+        if hasattr(obj, "loc") and getattr(obj, "ndim", None) == 2:
+            trimmed[key] = obj.loc[keep_y, keep_x]
+        else:
+            trimmed[key] = obj
+    return trimmed, dropped_y, dropped_x
 
 
 def _specificity_path_parts(specificity):
@@ -1828,10 +2185,12 @@ def _representative_figure_dir(source, image_df: pd.DataFrame, marker_order) -> 
 
 
 def _representative_filter_dir_name(filter_value) -> str | None:
+    if filter_value is None:
+        return None
     values = [
         strip_name(str(value)).strip()
         for value in _flatten_specificity_values([filter_value])
-        if str(value).strip() != ""
+        if value is not None and str(value).strip() != ""
     ]
     values = [value for value in values if value != ""]
     if len(values) == 0:
@@ -6282,7 +6641,7 @@ def plot_representative_images(source, markers=None,
             image_df=filtered_df,
             marker_order=marker_order,
             export_dir_override=figure_dir,
-            write_csv=False,
+            write_csv=True,
         )
         block_desc = str(block_by).strip()
         save_name = "representative_images"
@@ -10968,6 +11327,10 @@ def matrix_action(ctx: Context, state: dict,
                   drop_duplicate_columns=True,
                   enforce_shared_columns=False,
                   shared_columns=None,
+                  triangle=None,
+                  show_diagonal=True,
+                  show_values=False,
+                  value_format=".2f",
                   **kwargs):
     """Plot a correlation matrix for one condition/factor."""
     ax = state['ax']
@@ -11048,21 +11411,26 @@ def matrix_action(ctx: Context, state: dict,
     corr = df.corr(method=_correlation_pandas_method(correlation))
     coeff_label = f"{_correlation_display_name(correlation)} coefficient"
 
-    # Significance stars (upper triangle) + the correlations result dict. The
-    # shared renderer draws the stars; we only decide which cells carry them.
+    triangle_mode = _normalize_matrix_triangle(triangle)
+
+    # Significance stars + the correlations result dict. The shared renderer
+    # draws the stars; we only decide which visible duplicate cell carries them.
     results = {}
     cols = list(corr.columns)
     annot = pd.DataFrame("", index=cols, columns=cols, dtype=object)
     for i, c1 in enumerate(cols):
-        for j, c2 in enumerate(cols):
-            if i < j:
-                valid = df[[c1, c2]].dropna()
-                if len(valid) > 1:
-                    coefficient, p_value = _compute_correlation(valid[c1], valid[c2], correlation)
-                    star = _get_annotation(p_value, ns='')
-                    if star:
+        for j in range(i + 1, len(cols)):
+            c2 = cols[j]
+            valid = df[[c1, c2]].dropna()
+            if len(valid) > 1:
+                coefficient, p_value = _compute_correlation(valid[c1], valid[c2], correlation)
+                star = _get_annotation(p_value, ns='')
+                if star:
+                    if triangle_mode == 'lower':
+                        annot.iat[j, i] = star
+                    else:
                         annot.iat[i, j] = star
-                    results[f'{c1} vs {c2}'] = (p_value, coefficient)
+                results[f'{c1} vs {c2}'] = (p_value, coefficient)
 
     # Title the matrix with its group only (short, so it stays prominent at any
     # matrix size), matching plot_rect_matrices' panel titles; the correlation
@@ -11078,7 +11446,9 @@ def matrix_action(ctx: Context, state: dict,
     _, _, heatmap = _render_value_matrix(
         corr, ax=ax, fig=fig, cmap='coolwarm', vmin=-1, vmax=1,
         colorbar_label=coeff_label, title=_title, annotations=annot,
-        tick_label_size=tick_label_size)
+        tick_label_size=tick_label_size, triangle=triangle_mode,
+        show_diagonal=show_diagonal, show_values=show_values,
+        value_format=value_format)
 
     return {'heatmap': heatmap, 'correlations': results}
 
@@ -11097,10 +11467,72 @@ def _get_annotation(p, ns='ns'):
     return ns
 
 
+def _normalize_matrix_triangle(triangle):
+    """Normalize matrix triangle display mode."""
+    if triangle is None:
+        return 'full'
+    val = str(triangle).strip().lower().replace('-', '_').replace(' ', '_')
+    if val in ('', 'none', 'full', 'all', 'both', 'square'):
+        return 'full'
+    if val in ('lower', 'bottom', 'below', 'below_diagonal'):
+        return 'lower'
+    if val in ('upper', 'top', 'above', 'above_diagonal'):
+        return 'upper'
+    raise ValueError("triangle must be one of None/'full', 'lower', or 'upper'.")
+
+
+def _matrix_visibility_mask(ny, nx, triangle='full', show_diagonal=True):
+    """Return a boolean seaborn mask where True cells are hidden."""
+    triangle = _normalize_matrix_triangle(triangle)
+    mask = np.zeros((ny, nx), dtype=bool)
+    for i in range(ny):
+        for j in range(nx):
+            if triangle == 'lower' and j > i:
+                mask[i, j] = True
+            elif triangle == 'upper' and i > j:
+                mask[i, j] = True
+            if not bool(show_diagonal) and i == j:
+                mask[i, j] = True
+    return mask
+
+
+def _format_matrix_value(value, value_format=".2f"):
+    """Format a matrix cell value for optional in-cell labels."""
+    if value is None or not np.isfinite(value):
+        return ""
+    if callable(value_format):
+        return str(value_format(value))
+    fmt = str(value_format)
+    try:
+        if "{" in fmt:
+            return fmt.format(value)
+        return format(float(value), fmt)
+    except Exception:
+        return f"{float(value):.2f}"
+
+
+def _matrix_variant_label(triangle='full', show_diagonal=True, show_values=False):
+    """Filename/title label for non-default matrix rendering options."""
+    parts = []
+    triangle = _normalize_matrix_triangle(triangle)
+    if triangle == 'lower':
+        parts.append("Lower Triangle")
+    elif triangle == 'upper':
+        parts.append("Upper Triangle")
+    if not bool(show_diagonal):
+        parts.append("No Diagonal")
+    if bool(show_values):
+        parts.append("Values")
+    return " ".join(parts)
+
+
 def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
                          vmin=None, vmax=None, colorbar_label=None, title=None,
                          annotations=None, tick_label_size=20, square=True,
-                         linewidths=0.5, minimal_labels=True):
+                         linewidths=0.5, minimal_labels=True,
+                         triangle=None, show_diagonal=True,
+                         show_values=False, value_format=".2f",
+                         nan_text=None, show_colorbar=True):
     """Render a value matrix in PyFLASH's house "perfect matrix" style.
 
     One shared renderer for every PyFLASH correlation-family matrix
@@ -11124,6 +11556,14 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
     tick_label_size : int
         Final tick-label font. Callers pre-scale this to their column count;
         this renderer trusts it and does not re-shrink (avoids double-shrinking).
+    triangle : {"full", "lower", "upper"}, optional
+        Mask one side of a matrix. Rectangular callers use row/column position.
+    show_diagonal : bool
+        Keep diagonal cells visible. Useful with lower/upper triangle views.
+    show_values : bool
+        Draw formatted matrix values in visible finite cells.
+    value_format : str or callable
+        Format for ``show_values``. Accepts Python format specs such as ".2f".
 
     Returns
     -------
@@ -11136,6 +11576,11 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
     xcols = list(matrix.columns)
     ny, nx = len(ycols), len(xcols)
     n = max(nx, ny, 1)
+    triangle = _normalize_matrix_triangle(triangle)
+    visibility_mask = _matrix_visibility_mask(
+        ny, nx, triangle=triangle, show_diagonal=show_diagonal,
+    )
+    seaborn_mask = visibility_mask if np.any(visibility_mask) else None
 
     if ax is None:
         fig_side = min(max(5.4, n * 0.46), 34.0)
@@ -11153,56 +11598,92 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
     cbar_label_fs = int(max(18, min(30, _fig_scale * 1.55)))
     cbar_tick_fs = int(max(18, min(26, _fig_scale * 1.25)))
     star_fs = min(25, max(8, int(220 / n)))
+    value_fs = min(20, max(8, int(180 / n)))
 
     # Square heatmap WITHOUT seaborn's colorbar - seaborn's colorbar spans the
     # full axes height, taller than the (square-shrunk) matrix. Build it manually
     # sized to the matrix's real height so the legend matches the squares exactly.
     heatmap = sns.heatmap(matrix, annot=False, cmap=cmap, linewidths=linewidths,
-                          ax=ax, vmin=vmin, vmax=vmax, square=square, cbar=False)
-    try:
-        ax.apply_aspect()  # lock the box so get_position() is the matrix
-        pos = ax.get_position()
-        cax = fig.add_axes([pos.x1 + 0.014, pos.y0, 0.036, pos.height])
-        cbar = fig.colorbar(ax.collections[0], cax=cax)
-        cbar.ax.tick_params(labelsize=cbar_tick_fs, width=1.6, length=6)
+                          ax=ax, vmin=vmin, vmax=vmax, square=square,
+                          cbar=False, mask=seaborn_mask)
+    if show_colorbar:
         try:
-            cbar.outline.set_visible(False)
+            ax.apply_aspect()  # lock the box so get_position() is the matrix
+            pos = ax.get_position()
+            cax = fig.add_axes([pos.x1 + 0.014, pos.y0, 0.036, pos.height])
+            cbar = fig.colorbar(ax.collections[0], cax=cax)
+            cbar.ax.tick_params(labelsize=cbar_tick_fs, width=1.6, length=6)
+            try:
+                cbar.outline.set_visible(False)
+            except Exception:
+                pass
+            if colorbar_label:
+                # Caption sits just above the colorbar, aligned with it; the gap from
+                # the top tick number is vertical (y > 1).
+                cbar.ax.text(0.0, 1.03, colorbar_label, transform=cbar.ax.transAxes,
+                             ha="left", va="bottom", fontsize=cbar_label_fs,
+                             fontweight="bold")
         except Exception:
             pass
-        if colorbar_label:
-            # Caption sits just above the colorbar, aligned with it; the gap from
-            # the top tick number is vertical (y > 1).
-            cbar.ax.text(0.0, 1.03, colorbar_label, transform=cbar.ax.transAxes,
-                         ha="left", va="bottom", fontsize=cbar_label_fs,
-                         fontweight="bold")
-    except Exception:
-        pass
+    else:
+        try:
+            ax.apply_aspect()  # lock the box so get_position() is the matrix
+        except Exception:
+            pass
 
     if title:
         ax.set_title(title, fontsize=title_fs, fontweight="bold", pad=16)
 
-    # Per-cell annotations (e.g. significance stars). The caller decides which
-    # cells carry text by leaving the rest empty / NaN.
-    if annotations is not None:
-        if hasattr(annotations, "reindex"):
-            grid = annotations.reindex(index=ycols, columns=xcols)
-            _get_cell = lambda i, j: grid.iat[i, j]
+    annotation_grid = None
+    if annotations is not None and hasattr(annotations, "reindex"):
+        annotation_grid = annotations.reindex(index=ycols, columns=xcols)
+
+    def _annotation_at(i, j):
+        if annotations is None:
+            return ""
+        if annotation_grid is not None:
+            txt = annotation_grid.iat[i, j]
         else:
-            _get_cell = lambda i, j: annotations[i][j]
-        for i in range(ny):
-            for j in range(nx):
-                try:
-                    txt = _get_cell(i, j)
-                except Exception:
-                    continue
-                if txt is None:
-                    continue
-                if isinstance(txt, float) and not np.isfinite(txt):
-                    continue
-                txt = str(txt).strip()
-                if not txt:
-                    continue
-                ax.text(j + 0.5, i + 0.6, txt, ha="center", va="center",
+            txt = annotations[i][j]
+        if txt is None:
+            return ""
+        if isinstance(txt, float) and not np.isfinite(txt):
+            return ""
+        return str(txt).strip()
+
+    # Draw optional values first, then significance stars. When both are present
+    # in a cell the star moves upward so it never sits on top of the number.
+    for i in range(ny):
+        for j in range(nx):
+            if visibility_mask[i, j]:
+                continue
+            try:
+                value = matrix.iat[i, j]
+            except Exception:
+                value = np.nan
+            annotation_text = ""
+            try:
+                annotation_text = _annotation_at(i, j)
+            except Exception:
+                annotation_text = ""
+            value_is_finite = value is not None and np.isfinite(value)
+            if bool(show_values) and value_is_finite:
+                value_txt = _format_matrix_value(value, value_format)
+                if value_txt:
+                    value_y = i + (0.64 if annotation_text else 0.5)
+                    ax.text(j + 0.5, value_y, value_txt,
+                            ha="center", va="center",
+                            fontsize=value_fs, color="black",
+                            fontweight="bold")
+            elif nan_text and not value_is_finite:
+                ax.text(j + 0.5, i + 0.5, str(nan_text),
+                        ha="center", va="center",
+                        fontsize=max(8, int(value_fs * 0.9)),
+                        color="#7A7A7A", fontweight="bold")
+            if annotation_text:
+                star_y = i + (0.27 if bool(show_values) and value_is_finite else 0.6)
+                ax.text(j + 0.5, star_y, annotation_text,
+                        ha="center", va="center",
                         fontsize=star_fs, color="black", fontweight="bold")
 
     labels_x = [get_display_name(c, minimal=minimal_labels) for c in xcols]
@@ -11548,6 +12029,24 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 # is present consistently across columns.
                 ax.yaxis.set_major_locator(LinearLocator(numticks=5))
 
+        marker_name = col.split('_')[0] if '_' in col else col
+        subfolder, suffix = build_subfolder(
+            plot_type='Bars',
+            marker=marker_name if marker_name != col else None,
+            factor=factor, specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+            roi_base=_roi_base, multi_roi=_multi_roi,
+        )
+        figure_root = (
+            getattr(experiment, "fig_path", None)
+            or getattr(experiment, "data_path", None)
+            or "."
+        )
+        stats_output_dir = (
+            os.path.join(figure_root, subfolder)
+            if subfolder is not None else figure_root
+        )
+
         if len(col_dfs) >= 2:
             safe_col_name = _artifact_name(col)
             stats_name = safe_col_name if spec_tag is None else f"{safe_col_name}__{spec_tag}"
@@ -11604,6 +12103,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                     save_normality=save_normality,
                     normality_dpi=normality_dpi,
                     cache_key=_sc_key,
+                    output_dir=stats_output_dir,
                 )
                 if test_used == "Error":
                     stats_error = posthoc_used
@@ -11618,7 +12118,8 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 )
 
             if stats_error is not None: 
-                error_path = os.path.join(experiment.data_path, "Stats_Errors.csv")
+                os.makedirs(stats_output_dir, exist_ok=True)
+                error_path = os.path.join(stats_output_dir, "Stats_Errors.csv")
                 write_header = not os.path.exists(error_path)
                 with open(error_path, "a", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
@@ -11634,14 +12135,6 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 ax.set_ylim(ymax=ymax)
                 ax.yaxis.set_major_locator(LinearLocator(numticks=5))
 
-        marker_name = col.split('_')[0] if '_' in col else col
-        subfolder, suffix = build_subfolder(
-            plot_type='Bars',
-            marker=marker_name if marker_name != col else None,
-            factor=factor, specificity=specificity,
-            aliases=getattr(experiment, 'aliases', None),
-            roi_base=_roi_base, multi_roi=_multi_roi,
-        )
         if save:
             save_fig(fig, experiment.fig_path, _artifact_name(col) + suffix, subfolder=subfolder, verbose=False)
         saved_columns_log.append(col)
@@ -14835,7 +15328,9 @@ def plot_matrices(experiment, filtered_columns=None,
                   marker=None, specificity=None, roi=None, save=True,
                   column_strings=None, regex_string=None, exclude='',
                   prefix_order=None, marker_order=None,
-                  share_columns_across_panels=True):
+                  share_columns_across_panels=True,
+                  triangle=None, show_diagonal=True,
+                  show_values=False, value_format=".2f"):
     """
     Correlation matrix: one figure per condition or factor value.
     """
@@ -14854,6 +15349,8 @@ def plot_matrices(experiment, filtered_columns=None,
                 column_strings=column_strings, regex_string=regex_string, exclude=exclude,
                 prefix_order=prefix_order, marker_order=marker_order,
                 share_columns_across_panels=share_columns_across_panels,
+                triangle=triangle, show_diagonal=show_diagonal,
+                show_values=show_values, value_format=value_format,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -14874,6 +15371,10 @@ def plot_matrices(experiment, filtered_columns=None,
                 prefix_order=prefix_order,
                 marker_order=marker_order,
                 share_columns_across_panels=share_columns_across_panels,
+                triangle=triangle,
+                show_diagonal=show_diagonal,
+                show_values=show_values,
+                value_format=value_format,
                 specificity=spec,
                 roi=roi,
                 save=save,
@@ -14884,6 +15385,10 @@ def plot_matrices(experiment, filtered_columns=None,
         return queued_outputs
 
     corr_label = _correlation_filename_label(correlation)
+    triangle_mode = _normalize_matrix_triangle(triangle)
+    variant_label = _matrix_variant_label(
+        triangle_mode, show_diagonal=show_diagonal, show_values=show_values,
+    )
 
     matrix_source_df = experiment.summary
     if marker is not None:
@@ -15029,7 +15534,8 @@ def plot_matrices(experiment, filtered_columns=None,
             roi_base=_roi_base, multi_roi=_multi_roi,
         )
         if save:
-            title = f'{name} {corr_label} Correlation Matrix'
+            variant = f" {variant_label}" if variant_label else ""
+            title = f'{name} {corr_label}{variant} Correlation Matrix'
             if marker is not None:
                 title = f'{marker} {title}'
             save_fig(fig, experiment.fig_path, title + suffix, subfolder=subfolder)
@@ -15046,6 +15552,10 @@ def plot_matrices(experiment, filtered_columns=None,
         drop_duplicate_columns=drop_duplicate_columns_for_action,
         enforce_shared_columns=bool(share_columns_across_panels),
         shared_columns=resolved_columns,
+        triangle=triangle_mode,
+        show_diagonal=show_diagonal,
+        show_values=show_values,
+        value_format=value_format,
         specificity_filter=specificity,
         roi_base=_roi_base,
     )
@@ -16054,7 +16564,7 @@ def plot_matrix_differences(
     )
     label = run_label or _corr_matrix_difference_label(methods, resolved_comparisons, factor, by)
     fig_dir = os.path.join(experiment.fig_path, "Matrix Differences", strip_name(label))
-    data_dir = os.path.join(_corr_pipeline_data_root(experiment), "Matrix Differences", strip_name(label))
+    data_dir = fig_dir
 
     diff = _corr_render_matrix_differences(
         experiment,
@@ -16162,6 +16672,443 @@ def plot_correlation_pipeline(
     return _correlation_pipeline(experiment, **kwargs)
 
 
+def plot_multivariable_regression_matrix(
+    experiment,
+    filtered_columns=None,
+    predictors=None,
+    by='conditions',
+    factor=None,
+    specificity=None,
+    roi=None,
+    save=True,
+    column_strings=None,
+    regex_string=None,
+    exclude='',
+    min_n=None,
+    value='r2',
+    correction='fdr',
+    alpha=0.05,
+    tick_label_size=20,
+    conditions=None,
+    combine_conditions=True,
+    column_order=None,
+    predictor_order=None,
+    share_columns_across_panels=True,
+    blank_panel_on_nan=False,
+):
+    """
+    Rectangular heatmaps where each cell is a joint regression model:
+    outcome ~ predictor_1 + predictor_2 + ...
+
+    `predictors` is a mapping from displayed predictor-set name to one or more
+    summary columns, for example:
+        {"Month": ["month_sin", "month_cos"],
+         "Season": ["season_sin", "season_cos"]}
+    """
+    # ROI queue mode - iterate over ROI bases.
+    _roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(_roi_bases) > 1:
+        _queued = {}
+        for _rb in _roi_bases:
+            _queued[_rb] = plot_multivariable_regression_matrix(
+                experiment,
+                filtered_columns=filtered_columns,
+                predictors=predictors,
+                by=by,
+                factor=factor,
+                specificity=specificity,
+                roi=_rb,
+                save=save,
+                column_strings=column_strings,
+                regex_string=regex_string,
+                exclude=exclude,
+                min_n=min_n,
+                value=value,
+                correction=correction,
+                alpha=alpha,
+                tick_label_size=tick_label_size,
+                conditions=conditions,
+                combine_conditions=combine_conditions,
+                column_order=column_order,
+                predictor_order=predictor_order,
+                share_columns_across_panels=share_columns_across_panels,
+                blank_panel_on_nan=blank_panel_on_nan,
+            )
+        return _queued
+    _roi_base = _roi_bases[0]
+    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+
+    if _is_specificity_queue(specificity):
+        queued_outputs = {}
+        for spec in _iter_specificities(specificity):
+            queued_outputs[spec] = plot_multivariable_regression_matrix(
+                experiment,
+                filtered_columns=filtered_columns,
+                predictors=predictors,
+                by=by,
+                factor=factor,
+                specificity=spec,
+                roi=roi,
+                save=save,
+                column_strings=column_strings,
+                regex_string=regex_string,
+                exclude=exclude,
+                min_n=min_n,
+                value=value,
+                correction=correction,
+                alpha=alpha,
+                tick_label_size=tick_label_size,
+                conditions=conditions,
+                combine_conditions=combine_conditions,
+                column_order=column_order,
+                predictor_order=predictor_order,
+                share_columns_across_panels=share_columns_across_panels,
+                blank_panel_on_nan=blank_panel_on_nan,
+            )
+        return queued_outputs
+
+    value_key = _normalize_multivariable_matrix_value(value)
+    correction_key = _normalize_regression_correction(correction)
+    try:
+        alpha = float(alpha)
+    except (TypeError, ValueError):
+        raise ValueError("alpha must be a number between 0 and 1.")
+    if not np.isfinite(alpha) or alpha <= 0 or alpha > 1:
+        raise ValueError("alpha must be a number between 0 and 1.")
+
+    summary = _filtered_summary_for_specificity(experiment, specificity, roi_base=_roi_base)
+    y_columns = _resolve_filtered_columns(
+        experiment,
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        source_df=summary,
+    )
+    predictor_sets = _normalize_multivariable_predictor_sets(predictors, summary)
+    predictor_sets = _apply_predictor_set_order(predictor_sets, predictor_order)
+    if len(predictor_sets) == 0:
+        raise ValueError("No predictor sets remained after ordering.")
+
+    # If outcomes were discovered broadly, do not also test the predictor columns
+    # as outcomes. Explicit filtered_columns are left untouched.
+    if filtered_columns is None:
+        predictor_columns = {col for pred in predictor_sets for col in pred["columns"]}
+        y_columns = [col for col in y_columns if col not in predictor_columns]
+    y_columns = _apply_requested_order(y_columns, column_order)
+    if len(y_columns) == 0:
+        raise ValueError("No outcome columns resolved for multivariable regression matrix.")
+
+    condition_label_map = {
+        c.name: getattr(c, "label", c.name)
+        for c in getattr(experiment, "condition_list", [])
+    }
+    condition_color_map = {
+        c.name: getattr(c, "color", "black")
+        for c in getattr(experiment, "condition_list", [])
+    }
+    factor_label_map = {}
+    factor_dict = getattr(getattr(experiment, "condition_list", None), "factorDict", {})
+    if isinstance(factor_dict, dict) and factor in factor_dict:
+        for item in factor_dict[factor]:
+            if hasattr(item, "name"):
+                factor_label_map[str(item.name)] = getattr(item, "label", item.name)
+
+    panels = []
+    if factor is not None:
+        if factor not in summary.columns:
+            raise ValueError(f"Factor '{factor}' not found in summary.")
+        vals = summary[factor].dropna().unique().tolist()
+        ordered = []
+        for cond in getattr(experiment, "condition_list", []):
+            match = next((v for v in vals if str(v) in str(cond.name)), None)
+            if match is not None and match not in ordered:
+                ordered.append(match)
+        for v in vals:
+            if v not in ordered:
+                ordered.append(v)
+
+        def _factor_display(v):
+            key = str(v)
+            if key in factor_label_map:
+                return factor_label_map[key]
+            match = next(
+                (getattr(c, "label", c.name)
+                 for c in getattr(experiment, "condition_list", [])
+                 if key in str(c.name)),
+                key,
+            )
+            return match
+
+        panels = [
+            ('factor', str(v), summary[summary[factor] == v], _factor_display(v))
+            for v in ordered
+            if len(summary[summary[factor] == v]) > 0
+        ]
+    elif by == 'conditions':
+        cond_order = [c.name for c in getattr(experiment, "condition_list", [])]
+        if conditions is not None:
+            wanted = set(conditions)
+            cond_order = [c for c in cond_order if c in wanted]
+        for cond_name in cond_order:
+            cdf = summary[summary['Condition'] == cond_name]
+            if len(cdf) > 0:
+                panels.append((
+                    'condition',
+                    cond_name,
+                    cdf,
+                    condition_label_map.get(cond_name, cond_name),
+                ))
+    else:
+        panels = [('all', 'Combined', summary, 'Combined')]
+
+    if len(panels) == 0:
+        raise ValueError("No panels to plot after condition/factor/specificity filtering.")
+
+    panel_y_columns = list(y_columns)
+    panel_predictor_sets = list(predictor_sets)
+    if bool(share_columns_across_panels) and not bool(blank_panel_on_nan):
+        y_keep_sets = []
+        x_keep_sets = []
+        for _, _, panel_df, _ in panels:
+            grid = _compute_multivariable_regression_grid(
+                panel_df,
+                y_columns,
+                predictor_sets,
+                min_n=min_n,
+                value_key=value_key,
+                correction_key=correction_key,
+                alpha=alpha,
+                emit_records=False,
+            )
+            trimmed, _, _ = _drop_empty_multivariable_axes(grid)
+            y_keep_sets.append(set(trimmed["values"].index))
+            x_keep_sets.append(set(trimmed["values"].columns))
+        if len(y_keep_sets) > 0:
+            shared_y_set = set.intersection(*y_keep_sets)
+            panel_y_columns = [c for c in y_columns if c in shared_y_set]
+        if len(x_keep_sets) > 0:
+            shared_x_set = set.intersection(*x_keep_sets)
+            panel_predictor_sets = [
+                p for p in predictor_sets if p["label"] in shared_x_set
+            ]
+
+    if len(panel_y_columns) == 0 or len(panel_predictor_sets) == 0:
+        raise ValueError(
+            "No shared valid outcome/predictor-set combinations across panels after "
+            "NaN/sentinel/model filtering. Try disabling share_columns_across_panels "
+            "or relaxing filters."
+        )
+
+    n_panels = len(panels)
+    state = {}
+    _init_progress_state(state, func_name='plot_multivariable_regression_matrix', total=n_panels)
+    outputs = {}
+    max_y = max(1, len(panel_y_columns))
+    max_x = max(1, len(panel_predictor_sets))
+    panel_h = min(20.0, max(3.6, 0.44 * max_y + 1.9))
+    panel_w = min(6.0, max(1.2, panel_h * (max_x / max(1, max_y))))
+    rect_tick_fs = max(7, min(int(tick_label_size), int(130 / max(max_x, max_y))))
+
+    fig, axes = plt.subplots(
+        1,
+        n_panels,
+        figsize=(panel_w * n_panels, panel_h),
+        squeeze=False,
+    )
+    panel_fig_axes = [(fig, axes[0][i], i == n_panels - 1) for i in range(n_panels)]
+    first_mappable = None
+    vmin, vmax = _multivariable_heatmap_limits(value_key)
+    value_label = _multivariable_value_label(value_key)
+
+    for i, (kind, panel_name, panel_df, panel_display_name) in enumerate(panels):
+        _progress_start_item(state, panel_name)
+        fig, ax, _show_cbar = panel_fig_axes[i]
+        active_y_columns = list(panel_y_columns)
+        active_predictor_sets = list(panel_predictor_sets)
+        grid = _compute_multivariable_regression_grid(
+            panel_df,
+            active_y_columns,
+            active_predictor_sets,
+            min_n=min_n,
+            value_key=value_key,
+            correction_key=correction_key,
+            alpha=alpha,
+            emit_records=True,
+            group_name=str(panel_display_name),
+        )
+        dropped_y, dropped_x = [], []
+        if not bool(blank_panel_on_nan) and not bool(share_columns_across_panels):
+            grid, dropped_y, dropped_x = _drop_empty_multivariable_axes(grid)
+        elif not bool(blank_panel_on_nan):
+            # Shared-axis mode already filtered globally.
+            all_y = set(grid["values"].index)
+            all_x = set(grid["values"].columns)
+            dropped_y = [c for c in y_columns if c not in all_y]
+            dropped_x = [p["label"] for p in predictor_sets if p["label"] not in all_x]
+
+        value_mat = grid["values"]
+        annotations = grid["annotations"]
+        valid_y = list(value_mat.index)
+        valid_x = list(value_mat.columns)
+
+        title_text = "\n".join([t for t in str(panel_display_name).split("-") if t != ""])
+        if kind == 'condition':
+            title_color = condition_color_map.get(panel_name, "black")
+        else:
+            title_color = next(
+                (getattr(c, "color", "black")
+                 for c in getattr(experiment, "condition_list", [])
+                 if str(panel_name) in str(c.name)),
+                "black",
+            )
+
+        if len(valid_y) == 0 or len(valid_x) == 0:
+            ax.text(
+                0.5, 0.5,
+                "No valid models for this panel\n(after NaN/sentinel/model filtering).",
+                ha='center', va='center', transform=ax.transAxes,
+            )
+            ax.set_axis_off()
+            ax.set_title(
+                title_text,
+                fontsize=max(14, int(tick_label_size * 1.15)),
+                pad=14,
+                color=title_color,
+            )
+            outputs[panel_name] = {
+                'models': {},
+                'dropped_y': dropped_y,
+                'dropped_predictors': dropped_x,
+            }
+            _progress_finish_item(state, panel_name)
+            continue
+
+        hm = sns.heatmap(
+            value_mat,
+            annot=False,
+            fmt=".2f",
+            cmap='coolwarm',
+            linewidths=0.5,
+            ax=ax,
+            vmin=vmin,
+            vmax=vmax,
+            cbar=False,
+            square=False,
+        )
+        try:
+            ax.set_box_aspect(max(1, len(valid_y)) / max(1, len(valid_x)))
+        except Exception:
+            pass
+        if first_mappable is None and len(hm.collections) > 0:
+            first_mappable = hm.collections[0]
+
+        n_for_star = max(1, max(len(valid_x), len(valid_y)))
+        star_fs = min(28, max(9, int(220 / n_for_star)))
+        for yi, y_col in enumerate(valid_y):
+            for xi, x_col in enumerate(valid_x):
+                star = str(annotations.loc[y_col, x_col]).strip()
+                if star:
+                    ax.text(
+                        xi + 0.5, yi + 0.64, star,
+                        ha='center', va='center',
+                        fontsize=star_fs, color='black', fontweight='bold',
+                    )
+
+        if bool(blank_panel_on_nan):
+            nan_fs = max(8, int(star_fs * 0.82))
+            for yi, y_col in enumerate(valid_y):
+                for xi, x_col in enumerate(valid_x):
+                    if pd.isna(value_mat.loc[y_col, x_col]):
+                        ax.text(
+                            xi + 0.5, yi + 0.5, "NaN",
+                            ha='center', va='center',
+                            fontsize=nan_fs, color="#7A7A7A", fontweight='bold',
+                        )
+
+        x_labels = [get_display_name(c, minimal=True) for c in valid_x]
+        y_labels = [get_display_name(c, minimal=True) for c in valid_y]
+        x_tick_pos = np.arange(len(valid_x), dtype=float) + 0.5
+        y_tick_pos = np.arange(len(valid_y), dtype=float) + 0.5
+        ax.set_xticks(x_tick_pos)
+        ax.set_yticks(y_tick_pos)
+        ax.set_xticklabels(x_labels, rotation=60, ha='right', fontsize=rect_tick_fs)
+        if i == 0:
+            ax.set_yticklabels(y_labels, rotation=0, ha='right', fontsize=rect_tick_fs)
+        else:
+            ax.set_yticks([])
+            ax.set_ylabel("")
+            ax.tick_params(axis='y', left=False)
+        ax.set_title(
+            title_text,
+            fontsize=max(14, int(tick_label_size * 1.15)),
+            pad=14,
+            color=title_color,
+        )
+
+        outputs[panel_name] = {
+            'models': grid["models"],
+            'values': value_mat,
+            'p_values': grid["p"],
+            'q_values': grid["q"],
+            'dropped_y': dropped_y if not bool(blank_panel_on_nan) else [],
+            'dropped_predictors': dropped_x if not bool(blank_panel_on_nan) else [],
+        }
+        _progress_finish_item(state, panel_name)
+
+    big_fig = panel_fig_axes[0][0]
+    big_fig.subplots_adjust(left=0.06, right=0.92, wspace=0.02)
+    if first_mappable is not None:
+        try:
+            last_ax = panel_fig_axes[-1][1]
+            last_pos = last_ax.get_position()
+            cbar_pad = 0.008
+            cbar_width = 0.024
+            cbar_height_frac = 0.72
+            cbar_height = last_pos.height * cbar_height_frac
+            cbar_y0 = last_pos.y0 + (last_pos.height - cbar_height) / 2.0
+            cax = big_fig.add_axes([
+                min(0.985 - cbar_width, last_pos.x1 + cbar_pad),
+                cbar_y0,
+                cbar_width,
+                cbar_height,
+            ])
+            cbar = big_fig.colorbar(first_mappable, cax=cax)
+            cbar.ax.tick_params(
+                labelsize=max(11, int(tick_label_size * 1.05)),
+                width=1.2,
+                length=5,
+            )
+            try:
+                cbar.outline.set_visible(False)
+            except Exception:
+                pass
+            cbar.ax.text(
+                1.03, 1.04, value_label,
+                transform=cbar.ax.transAxes,
+                ha='left', va='bottom',
+                fontsize=max(13, int(tick_label_size * 1.15)),
+                fontweight='normal',
+            )
+        except Exception:
+            pass
+    if save:
+        subfolder, suffix = build_subfolder(
+            plot_type='Multivariable Regression', marker='Matrices',
+            factor=factor if factor is not None else str(by).rstrip('s'),
+            specificity=specificity,
+            aliases=getattr(experiment, 'aliases', None),
+            roi_base=_roi_base, multi_roi=_multi_roi,
+        )
+        panel_names = " and ".join([p[1] for p in panels[:3]])
+        if len(panels) > 3:
+            panel_names += " and more"
+        title = f"Multivariable Regression Matrix ({panel_names})"
+        save_fig(big_fig, experiment.fig_path, title + suffix, subfolder=subfolder)
+    plt.close(big_fig)
+    return outputs
+
+
 def plot_rect_matrices(
     experiment,
     filtered_columns=None,
@@ -16186,6 +17133,10 @@ def plot_rect_matrices(
     against_order=None,
     share_columns_across_panels=True,
     blank_panel_on_nan=False,
+    triangle=None,
+    show_diagonal=True,
+    show_values=False,
+    value_format=".2f",
 ):
     """
     Rectangular correlation heatmaps (Y columns vs X columns), optionally
@@ -16217,6 +17168,8 @@ def plot_rect_matrices(
                 column_order=column_order, against_order=against_order,
                 share_columns_across_panels=share_columns_across_panels,
                 blank_panel_on_nan=blank_panel_on_nan,
+                triangle=triangle, show_diagonal=show_diagonal,
+                show_values=show_values, value_format=value_format,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -16249,6 +17202,10 @@ def plot_rect_matrices(
                 against_order=against_order,
                 share_columns_across_panels=share_columns_across_panels,
                 blank_panel_on_nan=blank_panel_on_nan,
+                triangle=triangle,
+                show_diagonal=show_diagonal,
+                show_values=show_values,
+                value_format=value_format,
             )
         return queued_outputs
 
@@ -16373,6 +17330,10 @@ def plot_rect_matrices(
     correlation = _normalize_correlation_method(correlation)
     corr_label = _correlation_filename_label(correlation)
     coeff_label = f"{corr_label} coefficient"
+    triangle_mode = _normalize_matrix_triangle(triangle)
+    variant_label = _matrix_variant_label(
+        triangle_mode, show_diagonal=show_diagonal, show_values=show_values,
+    )
 
     outputs = {}
     max_y = max(1, len(panel_y_columns))
@@ -16473,9 +17434,18 @@ def plot_rect_matrices(
         corr_results = {}
         for y_col in valid_y:
             for x_col in valid_x:
-                pair = num_df[[y_col, x_col]].dropna()
+                y_series = num_df[y_col]
+                x_series = num_df[x_col]
+                if isinstance(y_series, pd.DataFrame):
+                    y_series = y_series.iloc[:, 0]
+                if isinstance(x_series, pd.DataFrame):
+                    x_series = x_series.iloc[:, -1]
+                pair = pd.concat(
+                    [y_series.rename("__y"), x_series.rename("__x")],
+                    axis=1,
+                ).dropna()
                 if len(pair) > 1:
-                    coefficient, p_value = _compute_correlation(pair[y_col], pair[x_col], correlation)
+                    coefficient, p_value = _compute_correlation(pair["__y"], pair["__x"], correlation)
                     corr_mat.loc[y_col, x_col] = coefficient
                     p_mat.loc[y_col, x_col] = p_value
                     corr_results[f'{y_col} vs {x_col}'] = (
@@ -16486,18 +17456,37 @@ def plot_rect_matrices(
                     corr_mat.loc[y_col, x_col] = np.nan
                     p_mat.loc[y_col, x_col] = np.nan
 
-        hm = sns.heatmap(
+        annot = pd.DataFrame("", index=valid_y, columns=valid_x, dtype=object)
+        for yi, y_col in enumerate(valid_y):
+            for xi, x_col in enumerate(valid_x):
+                p_val = p_mat.loc[y_col, x_col]
+                if pd.isna(p_val):
+                    continue
+                star = _get_annotation(float(p_val), ns='')
+                if star:
+                    annot.iat[yi, xi] = star
+
+        _, _, hm = _render_value_matrix(
             corr_mat,
-            annot=False,
-            fmt=".2f",
-            cmap='coolwarm',
-            linewidths=0.5,
             ax=ax,
+            fig=fig,
+            cmap='coolwarm',
             vmin=-1,
             vmax=1,
-            cbar=False,
+            colorbar_label=coeff_label,
+            title=title_text,
+            annotations=annot,
+            tick_label_size=rect_tick_fs,
             square=False,
+            linewidths=0.5,
+            triangle=triangle_mode,
+            show_diagonal=show_diagonal,
+            show_values=show_values,
+            value_format=value_format,
+            nan_text=("NaN" if bool(blank_panel_on_nan) else None),
+            show_colorbar=False,
         )
+        ax.title.set_color(title_color)
         # Keep cells square without forcing large inter-panel whitespace.
         try:
             ax.set_box_aspect(max(1, len(valid_y)) / max(1, len(valid_x)))
@@ -16505,60 +17494,13 @@ def plot_rect_matrices(
             pass
         if first_mappable is None and len(hm.collections) > 0:
             first_mappable = hm.collections[0]
-
-        # Significance stars.
-        n_for_star = max(1, max(len(valid_x), len(valid_y)))
-        star_fs = min(28, max(9, int(220 / n_for_star)))
-        for yi, y_col in enumerate(valid_y):
-            for xi, x_col in enumerate(valid_x):
-                p_val = p_mat.loc[y_col, x_col]
-                if pd.isna(p_val):
-                    continue
-                star = _get_annotation(float(p_val), ns='')
-                if star != '':
-                    ax.text(
-                        xi + 0.5, yi + 0.64, star,
-                        ha='center', va='center',
-                        fontsize=star_fs, color='black', fontweight='bold',
-                    )
-
-        if bool(blank_panel_on_nan):
-            nan_fs = max(8, int(star_fs * 0.82))
-            for yi, y_col in enumerate(valid_y):
-                for xi, x_col in enumerate(valid_x):
-                    if pd.isna(corr_mat.loc[y_col, x_col]):
-                        ax.text(
-                            xi + 0.5, yi + 0.5, "NaN",
-                            ha='center', va='center',
-                            fontsize=nan_fs, color="#7A7A7A", fontweight='bold',
-                        )
-
-        x_labels = []
-        for c in valid_x:
-            disp = get_display_name(c, minimal=True)
-            x_labels.append(disp)
-        y_labels = [get_display_name(c, minimal=True) for c in valid_y]
-
-        # Keep tick/label cardinality explicit to avoid FixedLocator mismatches
-        # when matplotlib prunes ticks on dense/small axes.
-        x_tick_pos = np.arange(len(valid_x), dtype=float) + 0.5
-        y_tick_pos = np.arange(len(valid_y), dtype=float) + 0.5
-        ax.set_xticks(x_tick_pos)
-        ax.set_yticks(y_tick_pos)
-
-        ax.set_xticklabels(x_labels, rotation=60, ha='right', fontsize=rect_tick_fs)
         if i == 0:
-            ax.set_yticklabels(y_labels, rotation=0, ha='right', fontsize=rect_tick_fs)
+            for label in ax.get_yticklabels():
+                label.set_fontsize(rect_tick_fs)
         else:
             ax.set_yticks([])
             ax.set_ylabel("")
             ax.tick_params(axis='y', left=False)
-        ax.set_title(
-            title_text,
-            fontsize=max(14, int(tick_label_size * 1.15)),
-            pad=14,
-            color=title_color,
-        )
 
         out_dy = global_dropped_y + [c for c in dropped_y if c not in global_dropped_y]
         out_dx = global_dropped_x + [c for c in dropped_x if c not in global_dropped_x]
@@ -16620,7 +17562,8 @@ def plot_rect_matrices(
         panel_names = " and ".join([p[1] for p in panels[:3]])
         if len(panels) > 3:
             panel_names += " and more"
-        title = f"Rectangular {corr_label} Correlation Matrix ({panel_names})"
+        variant = f" {variant_label}" if variant_label else ""
+        title = f"Rectangular {corr_label}{variant} Correlation Matrix ({panel_names})"
         save_fig(big_fig, experiment.fig_path, title + suffix, subfolder=subfolder)
     plt.close(big_fig)
     return outputs
@@ -17812,7 +18755,7 @@ _PARAM_DESCRIPTIONS = {
     'bin_edges':            'Explicit array of bin edges.',
     'share_bins':           'Use identical bin edges across all panels.',
     'kde':                  'Overlay a kernel density estimate curve.',
-    'alpha':                'Transparency of bars/fills (0-1).',
+    'alpha':                'Transparency for visual elements, or the significance threshold for statistical matrices.',
     'stat':                 'Y-axis statistic: "count", "proportion", "density".',
     'invert_x':             'Flip the x-axis direction.',
     'ymax':                 'Manual upper limit for y-axis.',
@@ -17885,16 +18828,45 @@ _PARAM_DESCRIPTIONS = {
     'marker_order':         'Custom ordering of markers.',
     'share_columns_across_panels': 'Use same columns in every panel (default True).',
     'drop_duplicate_columns':      'Remove duplicate column entries.',
+    'triangle':             'Matrix display mask: None/"full" for all cells, "lower" for lower-left, or "upper" for upper-right.',
+    'show_diagonal':        'Show self-correlation diagonal cells in matrix views. Set False for slope/triangle matrices.',
+    'show_values':          'Write formatted numeric matrix values inside visible cells.',
+    'value_format':         'Format for in-cell matrix numbers, e.g. ".2f" or "{:.3f}".',
     # ── Rectangular matrices ─────────────────────────────────────────
     'against_columns':          'Columns for the second axis (rows vs columns).',
     'against_column_strings':   'Substring filter for second-axis columns.',
     'against_regex_string':     'Regex filter for second-axis columns.',
     'against_exclude':          'Exclude filter for second-axis columns.',
+    'dependent_variables':      'Outcome columns modelled by linear_model_pipeline, e.g. ["Totalcounts", "Amplitude"].',
+    'predictors':               'Predictor/covariate columns. For linear_model_pipeline these adjust the group effect; for multivariable matrices this is a mapping of predictor-set labels to columns.',
+    'group':                    'Primary grouping column for linear_model_pipeline adjusted means, e.g. "Diagnosis".',
+    'categorical':              'Categorical predictors for linear models. "auto" detects text/bool columns; group is treated as categorical.',
+    'reference_levels':         'Reference category levels for categorical model terms, e.g. {"Diagnosis": "Control"}.',
+    'interactions':             'Model interaction terms, e.g. [("Diagnosis", "Sex")] or formula strings.',
+    'medication_columns':       'Free-text medication columns converted to model predictor flags.',
+    'medication_mode':          'Medication flag mode: "any", "tokens", or "both".',
+    'medication_min_count':     'Minimum token count before a medication-specific flag is added.',
+    'cov_type':                 'Statsmodels covariance type for linear models, e.g. "HC3"; None uses ordinary standard errors.',
+    'cov_kwds':                 'Keyword arguments passed to the statsmodels covariance estimator.',
+    'fdr_method':               'False-discovery correction method for model coefficient p-values.',
+    'fdr_family':               'Coefficient FDR family: "all", "dependent_variable", or "none".',
+    'adjusted_means':           'For linear_model_pipeline, compute model-predicted group means at a common covariate profile.',
+    'covariate_profile':        'Adjusted-mean profile: "mean_mode" for one common subject, "reference_grid"/"emm" for estimated marginal means, or "observed" for marginal standardization over observed rows.',
+    'adjusted_mean_weights':    'For reference-grid adjusted means, weight categorical covariate combinations equally or by observed sample frequency: "equal" or "observed".',
+    'adjusted_mean_p_adjust':   'Multiple-comparison correction for adjusted-mean contrasts, e.g. "holm", "fdr_bh", "bonferroni", or "none".',
+    'adjusted_mean_p_family':   'Family for adjusted-mean contrast correction: "dependent_variable" or "all".',
+    'plot_adjusted_means':      'Save adjusted mean point/errorbar plots for each dependent variable.',
+    'plot_coefficients':        'Save a coefficient forest plot for the fitted linear models.',
+    'coefficient_gate':         'P-value column used to highlight coefficient forest terms: "p" or "fdr".',
+    'max_coefficient_terms':    'Maximum coefficient terms shown in the coefficient forest plot.',
+    'predictor_order':          'Custom ordering for multivariable regression predictor-set labels.',
+    'value':                    'Matrix value to colour, e.g. "r2", "adj_r2", "p", or "q".',
+    'correction':               'P-value correction for matrix significance annotations: "fdr" or "none".',
     # ── Correlation pipeline ─────────────────────────────────────────
     'tests':                    'Correlation methods to run, e.g. ("pearsonr", "spearmanr", "kendalltau").',
     'require':                  'Combine methods with "and" (pair must pass every test) or "or" (any test).',
     'gate':                     'Significance basis for selecting pairs: "p" (raw p-values, default) or "fdr" (q-values).',
-    'min_n':                    'Minimum paired observations required to test a correlation (default 3).',
+    'min_n':                    'Minimum complete observations required for a correlation or regression model.',
     'max_regressions':          'Cap on regression plots for surviving pairs; None plots all.',
     'value_matrices':           'Which p/q matrix heatmaps to save: "p" (default), "q", "both", or "none". CSVs always include both.',
     'plot_pvalue_matrices':     'Legacy override for saving raw p-value matrix heatmaps for each test.',
@@ -17995,6 +18967,18 @@ _PARAM_DESCRIPTIONS = {
     'point_linewidth':      'Mean bars: linewidth for overlaid data-point edges.',
     'enforce_shared_columns': 'Force all panels to use the same column set.',
     'shared_columns':       'Explicit list of columns to share across panels.',
+    # ── Rhythm / circadian ───────────────────────────────────────────
+    'column':               'For plot_cosinor, the metric column to fit a rhythm to (e.g. an intensity or activity column).',
+    'time_col':             'Column holding the time axis (e.g. "Time" with ZT labels, or "Month"); coerced to numbers.',
+    'group_col':            'Column that splits the data into groups to overlay (e.g. "Genotype", "Diagnosis"). None = one rhythm.',
+    'period':               'Cycle length in the units of time_col: 24 for a daily rhythm, 12 for a seasonal (monthly) one.',
+    'period_free':          'Fit the period freely (free-running tau) instead of fixing it (default False).',
+    'time_map':             'Map categorical time labels to numbers, e.g. {"ZT0": 0, "ZT6": 6}; trailing digits are used otherwise.',
+    'night_shade':          'For plot_cosinor: (start, end) hours to shade as night, or "auto" (ZT12-24 for a 24 h period).',
+    'phase_col':            'For plot_acrophase_clock, the circular time column (acrophase / onset / L5 start), in hours.',
+    'radius_col':           'For plot_acrophase_clock, a column used as the radius (e.g. amplitude) to make a phase x amplitude scatter. Without it, radius is meaningless and groups are shown by colour on one ring.',
+    'group_order':          'Explicit ordering of the groups (fixes colour/legend order, e.g. ["Control","MCI","Dementia"]).',
+    'show_points':          'Overlay the per-timepoint mean +/- SEM points on the cosinor curve (default True).',
 }
 
 
@@ -18360,6 +19344,246 @@ def plot_timecourse(batch, column, time_col="Time", group_col="Genotype",
         save_fig(fig, _stat_plot_save_path(batch, save_path),
                  strip_name(save_name or f"{column}_timecourse"), verbose=False)
     return (fig, fits) if return_data else fig
+
+
+def _linear_model_adjusted_means_figure(
+    adjusted_means,
+    dependent_variable,
+    group,
+    *,
+    group_order=None,
+    group_color_map=None,
+    group_label_map=None,
+    group_style_map=None,
+    comparisons=None,
+    source=None,
+    alpha=0.05,
+    tick_label_size=20,
+    bottom_ticks=False,
+    bottom_tick_labels=True,
+    auto_style=True,
+    style_cycle=None,
+    comparison_p_col=None,
+):
+    """Draw model-predicted group means with point/CI styling and stats."""
+    df = pd.DataFrame(adjusted_means).copy()
+    if df.empty:
+        return None
+    df = df[df["dependent_variable"].astype(str).eq(str(dependent_variable))]
+    if df.empty:
+        return None
+    order = [str(g) for g in (group_order or [])]
+    present = [str(g) for g in df["group"].tolist()]
+    order = [g for g in order if g in present] + [g for g in present if g not in order]
+    df["_order"] = df["group"].astype(str).map({g: i for i, g in enumerate(order)})
+    df = df.sort_values("_order", kind="mergesort")
+
+    y = pd.to_numeric(df["adjusted_mean"], errors="coerce").to_numpy(float)
+    lo = pd.to_numeric(df["ci_low"], errors="coerce").to_numpy(float)
+    hi = pd.to_numeric(df["ci_high"], errors="coerce").to_numpy(float)
+    x = np.arange(len(df), dtype=float)
+    group_names = df["group"].astype(str).tolist()
+
+    source_colors = {}
+    source_styles = {}
+    source_labels = {}
+    if source is not None:
+        if str(group) == "Condition":
+            for cond in getattr(source, "condition_list", []) or []:
+                name = str(getattr(cond, "name", cond))
+                source_colors[name] = getattr(cond, "color", "#4C78A8")
+                source_styles[name] = getattr(cond, "style", "fill")
+                source_labels[name] = str(getattr(cond, "label", name))
+        factor_dict = getattr(getattr(source, "condition_list", None), "factorDict", {})
+        if isinstance(factor_dict, dict) and group in factor_dict:
+            for cond in factor_dict.get(group, []) or []:
+                name = str(getattr(cond, "name", cond))
+                source_colors[name] = getattr(cond, "color", "#4C78A8")
+                source_styles[name] = getattr(cond, "style", "fill")
+                source_labels[name] = str(getattr(cond, "label", name))
+
+    cmap = {str(k): v for k, v in (group_color_map or {}).items()}
+    colors = {g: cmap.get(g, source_colors.get(g, "#4C78A8")) for g in group_names}
+    explicit_styles = {g: source_styles.get(g, "fill") for g in group_names}
+    if group_style_map is not None:
+        styles = {str(k): v for k, v in group_style_map.items()}
+    elif auto_style and (source_colors or cmap):
+        styles = _resolve_group_styles(group_names, colors, explicit_styles, style_cycle=style_cycle)
+    else:
+        styles = {g: "fill" for g in group_names}
+    labels = {str(k): str(v) for k, v in (group_label_map or {}).items()}
+    for g in group_names:
+        labels.setdefault(g, source_labels.get(g, g))
+
+    fig, ax = plt.subplots(figsize=(max(1, len(df)) * 2 / 3, 5))
+    scatter = None
+    ci_width = 0.12
+    for idx, group_name, mean, ci_lo, ci_hi in zip(x, group_names, y, lo, hi):
+        color = colors.get(group_name, "#4C78A8")
+        style = styles.get(group_name, "fill")
+        render = _style_render(style)
+        line_style = render.get("linestyle", "-")
+        if np.isfinite(ci_lo) and np.isfinite(ci_hi):
+            ax.plot([idx, idx], [ci_lo, ci_hi], color=color, zorder=2.5,
+                    lw=2.5, linestyle=line_style)
+            ax.plot([idx - ci_width, idx + ci_width], [ci_hi, ci_hi],
+                    color=color, zorder=2.6, lw=2.5, linestyle=line_style)
+            ax.plot([idx - ci_width, idx + ci_width], [ci_lo, ci_lo],
+                    color=color, zorder=2.6, lw=2.5, linestyle=line_style)
+        scatter = sns.swarmplot(
+            x=[idx], y=[mean], size=9, color="white", edgecolor=color,
+            linewidth=3, label=labels.get(group_name, group_name),
+            clip_on=False, zorder=3, ax=ax,
+        )
+
+    set_display_name(
+        ax, dependent_variable, compact_per=True,
+        fontdict={'weight': 'normal'}, size=25,
+    )
+    ax.legend().set_visible(False)
+    sns.despine(trim=False, ax=ax)
+    ax.set_xticks(x)
+    ax.set_xticklabels([labels.get(g, g) for g in group_names], rotation=60, ha="right")
+    ax.tick_params(
+        axis="x",
+        which="both",
+        bottom=bool(bottom_ticks),
+        top=False,
+        labelbottom=bool(bottom_tick_labels),
+    )
+    ax.tick_params(axis="y", labelsize=tick_label_size)
+
+    finite_tops = []
+    for mean, ci_hi in zip(y, hi):
+        if np.isfinite(mean):
+            finite_tops.append(float(mean))
+        if np.isfinite(ci_hi):
+            finite_tops.append(float(ci_hi))
+    ymax = None
+    if finite_tops:
+        ymax = round_up_to_nearest_5(max(finite_tops))
+        if ymax > 0:
+            ax.set_ylim(ymax=ymax)
+            ax.yaxis.set_major_locator(LinearLocator(numticks=5))
+
+    comp_df = pd.DataFrame(comparisons).copy() if comparisons is not None else pd.DataFrame()
+    if not comp_df.empty and "dependent_variable" in comp_df.columns:
+        comp_df = comp_df[
+            comp_df["dependent_variable"].astype(str).eq(str(dependent_variable))
+        ].copy()
+    if not comp_df.empty:
+        comp_df["_sort"] = comp_df["comparison"].astype(str).map(
+            {f"{a + 1}-{b + 1}": i for i, (a, b) in enumerate(
+                (pair for gap in range(1, len(group_names))
+                 for pair in [(first, first + gap) for first in range(0, len(group_names) - gap)])
+            )}
+        )
+        comp_df = comp_df.sort_values("_sort", kind="mergesort")
+        comp_tokens = comp_df["comparison"].astype(str).tolist()
+        p_col = comparison_p_col
+        if p_col is None:
+            p_col = "p_adjusted" if "p_adjusted" in comp_df.columns else "p_value"
+        if p_col not in comp_df.columns:
+            p_col = "p_value"
+        p_values = pd.to_numeric(comp_df[p_col], errors="coerce").tolist()
+        annotations = [get_annotation(p, "ns") if np.isfinite(p) else "ns" for p in p_values]
+        plot_comparison_lines_from_figdata(
+            scatter, None, ax,
+            annotations=annotations,
+            comparisons=comp_tokens,
+            errobar_width=0.12,
+            lw=2,
+            max_override=ymax,
+            group_values=[pd.Series([v]) for v in y],
+            group_positions=x.tolist(),
+            group_colors=[colors.get(g, "black") for g in group_names],
+            draw_error_bars=False,
+        )
+        post_hoc = "Adjusted mean contrasts"
+        if p_col == "p_adjusted" and "p_adjust_method" in comp_df.columns:
+            methods = [
+                str(m) for m in comp_df["p_adjust_method"].dropna().unique()
+                if str(m).strip().lower() not in {"", "none", "nan"}
+            ]
+            if methods:
+                post_hoc = f"{post_hoc} ({methods[0]})"
+        _annotate_stats_summary(
+            ax=ax,
+            test="Linear model",
+            post_hoc=post_hoc,
+            overall=(np.nan, None),
+            comparisons=comp_tokens,
+            pairwise_pvalues=p_values,
+            condition_list=group_names,
+            factor_list=None,
+            effect_strings=None,
+        )
+        if ymax is not None and ymax > 0:
+            ax.set_ylim(ymax=ymax)
+            ax.yaxis.set_major_locator(LinearLocator(numticks=5))
+
+    return fig
+
+
+def _linear_model_coefficient_forest_figure(
+    coefficients,
+    *,
+    alpha=0.05,
+    gate="p",
+    tick_label_size=20,
+    max_terms=60,
+):
+    """Draw a coefficient forest plot for fitted linear models."""
+    df = pd.DataFrame(coefficients).copy()
+    if df.empty or "term" not in df.columns:
+        return None
+    df = df[df["term"].astype(str).ne("Intercept")].copy()
+    if df.empty:
+        return None
+    gate_col = "q_value" if str(gate).lower() in {"fdr", "q", "q_value"} else "p_value"
+    if gate_col not in df.columns:
+        gate_col = "p_value"
+    df["_gate"] = pd.to_numeric(df.get(gate_col), errors="coerce")
+    df["_abs_estimate"] = pd.to_numeric(df["estimate"], errors="coerce").abs()
+    df = df.sort_values(["_gate", "_abs_estimate"], ascending=[True, False], kind="mergesort")
+    omitted = max(0, len(df) - int(max_terms))
+    if omitted:
+        df = df.iloc[:int(max_terms)].copy()
+    df = df.iloc[::-1].copy()
+
+    est = pd.to_numeric(df["estimate"], errors="coerce").to_numpy(float)
+    lo = pd.to_numeric(df["ci_low"], errors="coerce").to_numpy(float)
+    hi = pd.to_numeric(df["ci_high"], errors="coerce").to_numpy(float)
+    y = np.arange(len(df), dtype=float)
+    lower = np.where(np.isfinite(est) & np.isfinite(lo), est - lo, 0.0)
+    upper = np.where(np.isfinite(est) & np.isfinite(hi), hi - est, 0.0)
+    sig = pd.to_numeric(df.get(gate_col), errors="coerce").to_numpy(float) < float(alpha)
+    colors = np.where(sig, "#C43C39", "#606060")
+    labels = [
+        f"{r.dependent_variable}: {r.term}"
+        for r in df.itertuples(index=False)
+    ]
+
+    fig_h = max(4.5, min(18.0, 0.34 * len(df) + 1.8))
+    fig, ax = plt.subplots(figsize=(9.0, fig_h))
+    ax.axvline(0, color="#B8B8B8", linewidth=1.2, zorder=0)
+    ax.errorbar(
+        est, y, xerr=np.vstack([lower, upper]), fmt="none",
+        ecolor="#303030", elinewidth=1.5, capsize=3, zorder=2,
+    )
+    ax.scatter(est, y, s=58, c=colors, edgecolors="black", linewidths=0.6, zorder=3)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.tick_params(axis="both", labelsize=max(8, min(int(tick_label_size), 14)))
+    ax.set_xlabel("Model coefficient")
+    ax.set_title(f"Linear model coefficients ({gate_col}, alpha={float(alpha):g})")
+    if omitted:
+        ax.text(
+            0.99, 0.01, f"{omitted} further term(s) omitted",
+            transform=ax.transAxes, ha="right", va="bottom", style="italic",
+        )
+    fig.tight_layout()
+    return fig
 
 
 # ── Group-comparison plot primitives ─────────────────────────────────────────
@@ -18823,3 +20047,271 @@ def plot_group_matrix(experiment, filtered_columns=None, by='conditions', factor
         save_fig(fig, experiment.fig_path, "Group Difference Matrix" + suffix,
                  subfolder=subfolder, verbose=False)
     return fig
+
+
+# ── Rhythm / circadian plots ─────────────────────────────────────────────────
+# Standalone plot functions for the rhythm module (PyFLASH.pipeline.rhythm reuses
+# these cores, per PREFERENCES.md §8). They read a subject-level frame (an
+# experiment ``.summary`` or a plain DataFrame), so they serve FLASH exports and
+# external CSVs (human actigraphy) alike. plot_cosinor is period-generic (24 h
+# daily, 12 mo seasonal, free-running tau); plot_acrophase_clock treats a peak
+# time as circular.
+_RHYTHM_NIGHT = "#0b1e3b"
+
+
+def _resolve_rhythm_frame(source):
+    """Return the subject-level DataFrame from an experiment ``.summary`` or a df."""
+    df = getattr(source, "summary", None)
+    if isinstance(df, pd.DataFrame):
+        return df
+    if isinstance(source, pd.DataFrame):
+        return source
+    raise ValueError(
+        "rhythm plots need an experiment with a .summary DataFrame, or a DataFrame.")
+
+
+def _emit_rhythm_record(kind, headline, payload):
+    """Best-effort describe-layer emit for rhythm plots (no-op unless armed)."""
+    try:
+        import PyFLASH.report as report
+
+        if report.is_active():
+            rec = {"kind": kind, "headline": headline}
+            rec.update(payload)
+            report.emit(rec)
+    except Exception:
+        pass
+
+
+def _cosinor_axes(ax, df, value, time_col, group_col, period, period_free,
+                  palette, show_points, time_map, night_shade):
+    """Draw per-group cosinor fits + per-timepoint mean/SEM onto ``ax``.
+
+    Returns ``{group: fit_dict}`` (fit is None where the fit failed).
+    """
+    from PyFLASH.stats_extra import fit_cosinor, _resolve_numeric_time
+
+    work = df.copy()
+    work["_t"] = _resolve_numeric_time(work[time_col], time_map)
+    work["_v"] = pd.to_numeric(work[value], errors="coerce")
+    work = work.dropna(subset=["_t", "_v"])
+    if work.empty:
+        raise ValueError("plot_cosinor: no numeric (time, value) rows; pass time_map?")
+
+    if group_col and group_col in work.columns:
+        work["_grp"] = work[group_col].astype(str)
+    else:
+        work["_grp"] = "all"
+    groups = list(dict.fromkeys(work["_grp"]))
+
+    if night_shade:
+        ax.axvspan(night_shade[0], night_shade[1], color=_RHYTHM_NIGHT, alpha=0.06, zorder=0)
+    colors = _categorical_colors(groups, palette)
+    x0 = float(work["_t"].min())
+    # Draw the fitted curve across the full data span (>= one period), so a
+    # free-running or multi-cycle series shows the whole cosine, not just the
+    # first nominal period.
+    tt = np.linspace(x0, max(x0 + period, float(work["_t"].max())), 300)
+    fits = {}
+    for g in groups:
+        sub = work[work["_grp"] == g]
+        c = colors[g]
+        if show_points:
+            agg = sub.groupby("_t")["_v"].agg(["mean", "sem"]).reset_index()
+            ax.errorbar(agg["_t"], agg["mean"], yerr=agg["sem"].fillna(0.0),
+                        fmt="o", color=c, capsize=4, ms=7, lw=2, zorder=3)
+        try:
+            f = fit_cosinor(sub["_t"].to_numpy(), sub["_v"].to_numpy(), period, period_free)
+            p = f["p"]
+            star = ("***" if p < .001 else "**" if p < .01 else "*" if p < .05 else "ns")
+            ax.plot(tt, f["predict"](tt), color=c, lw=2.6, zorder=2,
+                    label=f"{g}: amp={f['amplitude']:.1f}, peak {f['acrophase']:.1f}, "
+                          f"R²={f['r_squared']:.2f} {star}")
+            fits[g] = f
+        except Exception as exc:
+            _log.hint(f"[plot_cosinor] fit failed for group '{g}': {exc}")
+            ax.plot([], [], color=c, label=f"{g} (fit failed)")
+            fits[g] = None
+    ax.set_xlabel(str(time_col))
+    ax.set_ylabel(str(value))
+    ax.legend(frameon=False, fontsize=9, title=(None if group_col == "_grp" else group_col))
+    return fits
+
+
+def plot_cosinor(experiment, column, time_col="Time", group_col=None, period=24.0,
+                 period_free=False, specificity=None, time_map=None, palette=None,
+                 show_points=True, night_shade="auto", title=None, save=True,
+                 save_path=None, save_name=None, subfolder=None, montage=False,
+                 dpi=600, return_data=False):
+    """Cosinor rhythm plot: per-timepoint mean ± SEM with a fitted cosine per group.
+
+    Period-generic: ``period=24`` for a daily rhythm, ``12`` for a circannual
+    (seasonal) one; ``period_free=True`` fits a free-running period. Reads a
+    subject-level frame (``experiment.summary`` or a DataFrame). The legend reports
+    amplitude, peak time (acrophase), R² and a rhythmicity star (zero-amplitude
+    F-test). ``night_shade='auto'`` shades ZT12–24 for a 24 h period.
+    Returns the figure (or ``(fig, {group: fit})`` when ``return_data=True``).
+    """
+    if is_specificity_queue(specificity):
+        return {spec: plot_cosinor(
+            experiment, column, time_col=time_col, group_col=group_col, period=period,
+            period_free=period_free, specificity=spec, time_map=time_map, palette=palette,
+            show_points=show_points, night_shade=night_shade, title=title, save=save,
+            save_path=save_path, save_name=save_name, subfolder=subfolder,
+            montage=montage, dpi=dpi, return_data=return_data)
+            for spec in iter_specificities(specificity)}
+
+    df = filter_df_by_specificity(_resolve_rhythm_frame(experiment), specificity).copy()
+    for needed in (column, time_col):
+        if needed not in df.columns:
+            raise ValueError(f"plot_cosinor: column {needed!r} not found.")
+    if night_shade == "auto":
+        night_shade = (12, 24) if abs(float(period) - 24.0) < 1e-6 else None
+
+    fig, ax = plt.subplots(figsize=(8, 5.5), layout="constrained")
+    fits = _cosinor_axes(ax, df, column, time_col, group_col, float(period), period_free,
+                         palette, show_points, time_map, night_shade)
+    ax.set_title(title or f"Cosinor rhythm — {column}")
+
+    _emit_rhythm_record("cosinor", f"Cosinor {column} (period={period})", {
+        "column": str(column), "period": float(period), "time_col": str(time_col),
+        "group_col": (None if group_col in (None, "_grp") else str(group_col)),
+        "groups": {g: {"amplitude": f["amplitude"], "acrophase": f["acrophase"],
+                       "mesor": f["mesor"], "r_squared": f["r_squared"], "p_rhythm": f["p"]}
+                   for g, f in fits.items() if f}})
+
+    if save:
+        save_fig(fig, _stat_plot_save_path(experiment, save_path),
+                 strip_name(save_name or f"{column}_cosinor"),
+                 subfolder=subfolder, verbose=False, montage=montage)
+    return (fig, fits) if return_data else fig
+
+
+def _acrophase_clock_axes(ax, df, phase_col, group_col, period, radius_col, palette,
+                          group_order=None):
+    """Draw a circular per-subject phase plot onto a polar ``ax``.
+
+    Every subject is a point at its phase, coloured by group. The radius carries a
+    real value only when ``radius_col`` is given (phase × that value, e.g.
+    amplitude); otherwise all subjects sit in ONE outer band (radius is not
+    meaningful — groups are told apart by colour, not by ring) and each group's mean
+    resultant vector is drawn from the centre (its length = phase concentration).
+    Returns a stats dict (per-group circular stats + the between-group test).
+    """
+    from PyFLASH.stats_extra import circular_stats, watson_williams, rayleigh_test
+
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+    nticks = 8 if abs(period - 24) < 1e-6 else min(int(period), 12)
+    ax.set_xticks(np.linspace(0, 2 * np.pi, nticks, endpoint=False))
+    if abs(period - 24) < 1e-6:
+        ax.set_xticklabels([f"{h:02d}:00" for h in range(0, 24, 24 // nticks)])
+    else:
+        ax.set_xticklabels([f"{v:.0f}" for v in np.linspace(0, period, nticks, endpoint=False)])
+
+    work = df.copy()
+    work["_ph"] = pd.to_numeric(work[phase_col], errors="coerce")
+    work = work.dropna(subset=["_ph"])
+    if group_col and group_col in work.columns:
+        work["_grp"] = work[group_col].astype(str)
+    else:
+        work["_grp"] = "all"
+    groups = list(dict.fromkeys(work["_grp"]))
+    if group_order:
+        ordered = [str(g) for g in group_order if str(g) in groups]
+        groups = ordered + [g for g in groups if g not in ordered]
+    colors = _categorical_colors(groups, palette)
+    w = 2.0 * np.pi / period
+    rng = np.random.default_rng(0)
+    has_radius = bool(radius_col and radius_col in work.columns)
+
+    stats = {"period": period, "groups": {}}
+    for g in groups:
+        sub = work[work["_grp"] == g]
+        theta = (sub["_ph"].to_numpy(float) * w) % (2 * np.pi)
+        c = colors[g]
+        if has_radius:
+            rr = pd.to_numeric(sub[radius_col], errors="coerce").to_numpy(float)
+            ok = np.isfinite(rr)
+            ax.scatter(theta[ok], rr[ok], s=44, color=c, alpha=0.75,
+                       edgecolor="white", linewidth=0.6, zorder=3, label=g)
+        else:
+            # One shared band for every group; a little radial jitter only so
+            # coincident phases don't overprint. Radius has no meaning here.
+            ax.scatter(theta, rng.uniform(0.84, 1.0, len(theta)), s=44, color=c,
+                       alpha=0.8, edgecolor="white", linewidth=0.6, zorder=3,
+                       label=f"{g} (n={len(theta)})")
+            cs = circular_stats(sub["_ph"].to_numpy(float), period)
+            ax.annotate("", xy=(cs["mean"] * w, cs["r"]), xytext=(0, 0),
+                        arrowprops=dict(arrowstyle="-|>", color=c, lw=3, mutation_scale=18),
+                        zorder=4)
+        stats["groups"][g] = circular_stats(sub["_ph"].to_numpy(float), period)
+
+    if has_radius:
+        ax.set_rlabel_position(112)
+        ax.tick_params(axis="y", labelsize=8, colors="grey")
+    else:
+        ax.set_ylim(0, 1.03)
+        ax.set_yticklabels([])
+
+    if len(groups) >= 2:
+        stats["watson_williams"] = watson_williams(
+            [work[work["_grp"] == g]["_ph"].to_numpy(float) for g in groups], period)
+    elif len(groups) == 1:
+        stats["rayleigh"] = rayleigh_test(work["_ph"].to_numpy(float), period)
+    return stats
+
+
+def plot_acrophase_clock(experiment, phase_col="Acrophase (h)", group_col=None,
+                         period=24.0, radius_col=None, group_order=None,
+                         specificity=None, palette=None,
+                         title=None, save=True, save_path=None, save_name=None,
+                         subfolder=None, montage=False, dpi=600, return_data=False):
+    """Circular clock plot of per-subject peak phase, grouped and tested.
+
+    Each subject is a point on a ``period``-hour clock at its ``phase_col`` value
+    (acrophase, onset, L5/M10 start — any circular time), coloured by group. Groups
+    are told apart by colour, not by ring; each group's mean resultant vector is
+    drawn from the centre (length = phase concentration) and the between-group phase
+    difference is tested with the Watson–Williams circular ANOVA (a single group
+    gets a Rayleigh test). Pass ``radius_col`` (e.g. an amplitude column) to give
+    the radius a real meaning — a phase × amplitude scatter. ``group_order`` fixes
+    the colour/legend order. Reads a subject-level frame (``experiment.summary`` or
+    a DataFrame). Returns the figure (or ``(fig, stats)`` when ``return_data=True``).
+    """
+    if is_specificity_queue(specificity):
+        return {spec: plot_acrophase_clock(
+            experiment, phase_col=phase_col, group_col=group_col, period=period,
+            radius_col=radius_col, group_order=group_order, specificity=spec,
+            palette=palette, title=title, save=save, save_path=save_path,
+            save_name=save_name, subfolder=subfolder,
+            montage=montage, dpi=dpi, return_data=return_data)
+            for spec in iter_specificities(specificity)}
+
+    df = filter_df_by_specificity(_resolve_rhythm_frame(experiment), specificity).copy()
+    if phase_col not in df.columns:
+        raise ValueError(f"plot_acrophase_clock: phase_col {phase_col!r} not found.")
+
+    fig, ax = plt.subplots(figsize=(6.8, 6.8), subplot_kw={"projection": "polar"},
+                           layout="constrained")
+    stats = _acrophase_clock_axes(ax, df, phase_col, group_col, float(period),
+                                  radius_col, palette, group_order=group_order)
+    default_title = (f"Phase × {radius_col}" if radius_col
+                     else f"{phase_col} by {group_col}" if group_col else str(phase_col))
+    ttl = title or default_title
+    ww = stats.get("watson_williams")
+    if ww and np.isfinite(ww.get("p", np.nan)):
+        ttl += f"\nWatson–Williams p={ww['p']:.3f}"
+    ax.set_title(ttl, pad=24, fontsize=13)
+    ax.legend(loc="lower right", bbox_to_anchor=(1.18, -0.04), fontsize=9)
+
+    _emit_rhythm_record("circular_phase", f"Acrophase clock: {phase_col}", {
+        "phase_col": str(phase_col), "period": float(period),
+        "group_col": (None if group_col in (None, "_grp") else str(group_col)),
+        "circular": stats})
+
+    if save:
+        save_fig(fig, _stat_plot_save_path(experiment, save_path),
+                 strip_name(save_name or f"{phase_col}_clock"),
+                 subfolder=subfolder, verbose=False, montage=montage)
+    return (fig, stats) if return_data else fig

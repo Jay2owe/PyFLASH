@@ -602,7 +602,7 @@ def test_plot_mean_bars_factor_mode_uses_condition_labels(tmp_path, monkeypatch)
     assert tick_labels[-1] == ["AD", "Control"]
 
 
-def test_plot_mean_bars_can_save_dunn_bonferroni_posthoc(tmp_path):
+def _period_human_batch(tmp_path):
     csv = "\n".join([
         "ID,Diagnosis,Sex,Period (h)",
         "1,Dementia-AD,Female,24.2",
@@ -637,20 +637,56 @@ def test_plot_mean_bars_can_save_dunn_bonferroni_posthoc(tmp_path):
     )
     batch = Batch("human", [exp], diagnosis, str(tmp_path))
     batch.processData(import_images=False, progress=False)
+    return batch
+
+
+def test_plot_mean_bars_can_save_dunn_bonferroni_posthoc(tmp_path):
+    batch = _period_human_batch(tmp_path)
 
     plotting.plot_mean_bars(
         batch,
         filtered_columns=["Period(h)"],
         points=False,
-        save=False,
-        save_normality=False,
+        save=True,
+        save_normality=True,
         force_nonparametric=True,
         posthoc="Dunn",
         posthoc_correction="Bonferroni",
         comparisons=["1-2", "1-3", "2-3"],
     )
 
-    stats_paths = list(tmp_path.rglob("Period(h).csv"))
-    assert stats_paths
-    stats_csv = stats_paths[0].read_text(encoding="utf-8")
+    bars_dir = os.path.join(batch.fig_path, "Bars")
+    stats_path = os.path.join(bars_dir, "Period(h).csv")
+    assert os.path.isfile(stats_path)
+    assert os.path.isfile(os.path.join(bars_dir, "Period(h).svg"))
+    assert os.path.isfile(os.path.join(bars_dir, "Period(h)_normality.png"))
+    assert not os.path.exists(os.path.join(batch.data_path, "Period(h).csv"))
+    assert not os.path.exists(os.path.join(batch.data_path, "Period(h)_normality.png"))
+    with open(stats_path, encoding="utf-8") as handle:
+        stats_csv = handle.read()
     assert "Post-Hoc Test Used,Dunn Bonferroni" in stats_csv
+
+
+def test_plot_mean_bars_stats_errors_save_with_bar_svg(tmp_path, monkeypatch):
+    batch = _period_human_batch(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("forced stats failure")
+
+    monkeypatch.setattr(plotting, "multipleComparisons", boom)
+    plotting.plot_mean_bars(
+        batch,
+        filtered_columns=["Period(h)"],
+        points=False,
+        save=True,
+    )
+
+    bars_dir = os.path.join(batch.fig_path, "Bars")
+    error_path = os.path.join(bars_dir, "Stats_Errors.csv")
+    assert os.path.isfile(os.path.join(bars_dir, "Period(h).svg"))
+    assert os.path.isfile(error_path)
+    assert not os.path.exists(os.path.join(batch.data_path, "Stats_Errors.csv"))
+    with open(error_path, encoding="utf-8") as handle:
+        error_csv = handle.read()
+    assert "Period(h)" in error_csv
+    assert "forced stats failure" in error_csv

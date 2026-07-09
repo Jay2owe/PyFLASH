@@ -83,6 +83,7 @@ def test_adjusted_correlation_default_value_matrix_heatmap_is_p_value(tmp_path):
     assert res["plot_pvalue_matrices"] is True
     assert res["plot_qvalue_matrices"] is False
     assert res["coefficient_matrix_star_source"] == "raw_p_value"
+    assert res["data_dir"] == res["fig_dir"]
 
     matrices = os.path.join(res["fig_dir"], "Matrices")
     svgs = [f for f in os.listdir(matrices) if f.endswith(".svg")]
@@ -94,8 +95,10 @@ def test_adjusted_correlation_default_value_matrix_heatmap_is_p_value(tmp_path):
             coef_text = handle.read()
         assert "(* p&lt;0.05)" in coef_text or "(* p<0.05)" in coef_text
         assert "(* q&lt;0.05)" not in coef_text and "(* q<0.05)" not in coef_text
-        assert os.path.isfile(os.path.join(res["data_dir"], f"pvalues_Pearson_{block}.csv"))
-        assert os.path.isfile(os.path.join(res["data_dir"], f"qvalues_Pearson_{block}.csv"))
+        assert os.path.isfile(os.path.join(matrices, f"pvalues_Pearson_{block}.csv"))
+        assert os.path.isfile(os.path.join(matrices, f"qvalues_Pearson_{block}.csv"))
+        assert not os.path.exists(os.path.join(res["data_dir"], f"pvalues_Pearson_{block}.csv"))
+        assert not os.path.exists(os.path.join(res["data_dir"], f"qvalues_Pearson_{block}.csv"))
 
 
 def test_adjusted_correlation_promotes_candidate_removes_endpoint_and_saves(tmp_path):
@@ -139,6 +142,7 @@ def test_adjusted_correlation_promotes_candidate_removes_endpoint_and_saves(tmp_
     assert coeffs["is_primary_predictor"].any()
 
     data_dir = res["data_dir"]
+    assert data_dir == res["fig_dir"]
     assert os.path.isfile(os.path.join(data_dir, "manifest.json"))
     assert os.path.isfile(os.path.join(data_dir, "covariate_screening.csv"))
     assert os.path.isfile(os.path.join(data_dir, "adjusted_regression_coefficients.csv"))

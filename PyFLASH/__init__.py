@@ -38,7 +38,8 @@ __all__ = [
     # Factory & IO
     "create_batch", "save_state", "load_state", "normalize_paths",
     # Modelling
-    "iterative_best_fit", "run_linear_model_pipeline", "adjusted_correlation",
+    "iterative_best_fit", "iterative_model_sweep",
+    "run_linear_model_pipeline", "linear_model", "adjusted_correlation",
     "data_overview",
     # Outlier exclusion / marking
     "exclude_outliers", "mark_outliers", "apply_exclusions", "mark_exclusions",
@@ -73,7 +74,9 @@ __all__ = [
 # each ``__all__`` entry).
 _LAZY_ATTRS = {
     "iterative_best_fit": ("PyFLASH.modelling", "iterative_best_fit"),
+    "iterative_model_sweep": ("PyFLASH.modelling", "iterative_model_sweep"),
     "run_linear_model_pipeline": ("PyFLASH.modelling", "run_linear_model_pipeline"),
+    "linear_model": ("PyFLASH.pipeline", "linear_model"),
     "adjusted_correlation": ("PyFLASH.pipeline", "adjusted_correlation"),
     "data_overview": ("PyFLASH.pipeline", "data_overview"),
     "exclude_outliers": ("PyFLASH.exclusions", "exclude_outliers"),

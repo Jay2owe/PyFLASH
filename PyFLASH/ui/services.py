@@ -14,7 +14,7 @@ import io
 import os
 import re
 
-from PyFLASH._logging import logger
+from PyFLASH._logging import Verbosity, logger
 from PyFLASH.conditions import _resolve_color
 from PyFLASH.config import Config, check_directory
 from PyFLASH.experiment import resolve_experiment_paths
@@ -360,6 +360,9 @@ def capture_output():
     """
     buf = io.StringIO()
     prev = logger._output
+    prev_verbosity = logger.verbosity
+    if logger.verbosity < Verbosity.info:
+        logger.verbosity = Verbosity.info
     logger.set_output(buf)
     try:
         # ProgressTracker prints to stdout when not in a notebook; redirect it
@@ -370,6 +373,7 @@ def capture_output():
         # Restore the exact prior target (not sys.stdout) — set_output(obj)
         # assigns it verbatim, so this round-trips _output cleanly.
         logger._output = prev
+        logger.verbosity = prev_verbosity
 
 
 def run_create_batch(*, name, conditions, batch_path, experiments=None,

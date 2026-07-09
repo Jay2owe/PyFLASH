@@ -8,11 +8,16 @@ iterative feature-subset search using linear regression (statsmodels OLS).
 from __future__ import annotations
 
 import itertools
+import hashlib
 import json
+import math
 import os
 import re
 import time
-from typing import Iterable
+import warnings
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
@@ -667,7 +672,7 @@ def _linear_model_run_dir(base_dir: str, run_label: str, if_exists: str) -> tupl
     return out, label
 
 
-def run_linear_model_pipeline(
+def _fit_linear_models(
     batch,
     dependent_variables,
     predictors,
@@ -694,10 +699,9 @@ def run_linear_model_pipeline(
 ):
     """Fit adjusted OLS models for one or more dependent variables.
 
-    This is the modelling-side companion for analyses such as:
-    diagnosis + sex + sleep treatment + age + medication flags. It returns
-    coefficient and model-summary tables, and optionally saves those tables
-    under ``Data and Stats/Modelling/Linear Models/<run_label>``.
+    Private modelling backend used by the public linear-model pipeline. It
+    returns coefficient and model-summary tables, and optionally preserves the
+    legacy table-only save path used by ``run_linear_model_pipeline``.
     """
     if not hasattr(batch, "summary"):
         raise ValueError("First argument must expose a .summary DataFrame.")
@@ -707,7 +711,7 @@ def run_linear_model_pipeline(
 
     if _is_specificity_queue(specificity):
         return {
-            spec: run_linear_model_pipeline(
+            spec: _fit_linear_models(
                 batch,
                 dependent_variables=dependent_variables,
                 predictors=predictors,
@@ -1043,6 +1047,64 @@ def run_linear_model_pipeline(
     if return_fits:
         result["fits"] = fits
     return result
+
+
+def run_linear_model_pipeline(
+    batch,
+    dependent_variables,
+    predictors,
+    *,
+    categorical="auto",
+    reference_levels=None,
+    interactions=None,
+    medication_columns=None,
+    medication_mode="any",
+    medication_min_count=2,
+    specificity=None,
+    exclude=None,
+    cov_type=None,
+    cov_kwds=None,
+    alpha=0.05,
+    fdr_method="fdr_bh",
+    fdr_family="all",
+    save=True,
+    output_dir=None,
+    run_label="linear_models",
+    if_exists="version",
+    return_fits=False,
+    verbose=True,
+):
+    """Compatibility wrapper for the original table-only linear model workflow.
+
+    New analysis runs should use :func:`PyFLASH.pipeline.linear_model`, which
+    writes pipeline folders, adjusted means, figures, manifests, and montages.
+    This wrapper keeps existing notebooks working with the original
+    ``Modelling/Linear Models`` output location.
+    """
+    return _fit_linear_models(
+        batch,
+        dependent_variables=dependent_variables,
+        predictors=predictors,
+        categorical=categorical,
+        reference_levels=reference_levels,
+        interactions=interactions,
+        medication_columns=medication_columns,
+        medication_mode=medication_mode,
+        medication_min_count=medication_min_count,
+        specificity=specificity,
+        exclude=exclude,
+        cov_type=cov_type,
+        cov_kwds=cov_kwds,
+        alpha=alpha,
+        fdr_method=fdr_method,
+        fdr_family=fdr_family,
+        save=save,
+        output_dir=output_dir,
+        run_label=run_label,
+        if_exists=if_exists,
+        return_fits=return_fits,
+        verbose=verbose,
+    )
 
 
 def _subset_key(subset: Iterable[str]) -> tuple[str, ...]:
@@ -1661,13 +1723,80 @@ def _iter_feature_combinations(
     max_features: int,
     repeat_features: bool = False,
 ) -> list[tuple[str, ...]]:
-    combos = []
+    combos: list[tuple[str, ...]] = []
     for k in range(1, int(max_features) + 1):
-        for combo in itertools.combinations(predictors, k):
-            prefixes = [_safe_predictor_prefix(c) for c in combo]
-            if repeat_features or len(prefixes) == len(set(prefixes)):
-                combos.append(combo)
+        combos.extend(
+            _iter_valid_feature_combinations_by_size(
+                predictors,
+                k,
+                repeat_features=repeat_features,
+            )
+        )
     return combos
+
+
+def _iter_valid_feature_combinations_by_size(
+    predictors: list[str],
+    size: int,
+    repeat_features: bool = False,
+    prefix_list: list[str] | None = None,
+):
+    """Yield combinations while enforcing the same-prefix filter during search."""
+    size_i = int(size)
+    if size_i <= 0:
+        return
+    if bool(repeat_features):
+        yield from itertools.combinations(predictors, size_i)
+        return
+
+    predictors = [str(p) for p in predictors]
+    prefixes = prefix_list if prefix_list is not None else [_safe_predictor_prefix(p) for p in predictors]
+    n_predictors = len(predictors)
+    current: list[int] = []
+    used_prefixes: set[str] = set()
+
+    def _walk(start: int):
+        remaining = size_i - len(current)
+        if remaining == 0:
+            yield tuple(predictors[i] for i in current)
+            return
+        last_start = n_predictors - remaining + 1
+        for idx in range(start, last_start):
+            prefix = prefixes[idx]
+            if prefix in used_prefixes:
+                continue
+            current.append(idx)
+            used_prefixes.add(prefix)
+            yield from _walk(idx + 1)
+            used_prefixes.remove(prefix)
+            current.pop()
+
+    yield from _walk(0)
+
+
+def _count_valid_feature_combinations(
+    predictors: list[str],
+    max_features: int,
+    repeat_features: bool = False,
+    prefix_list: list[str] | None = None,
+) -> int:
+    max_i = max(0, min(int(max_features), len(predictors)))
+    if max_i == 0:
+        return 0
+    if bool(repeat_features):
+        return int(sum(math.comb(len(predictors), k) for k in range(1, max_i + 1)))
+
+    prefixes = prefix_list if prefix_list is not None else [_safe_predictor_prefix(p) for p in predictors]
+    group_sizes = pd.Series([str(p) for p in prefixes], dtype=object).value_counts().to_list()
+
+    # Valid subsets choose at most one predictor from each same-prefix group.
+    # Count coefficients of product(1 + group_size*x), truncated at max_i.
+    coeff = [1] + [0] * max_i
+    for group_size in group_sizes:
+        g = int(group_size)
+        for k in range(max_i, 0, -1):
+            coeff[k] += coeff[k - 1] * g
+    return int(sum(coeff[1: max_i + 1]))
 
 
 def _primary_predictor(expr: str) -> str:
@@ -2735,3 +2864,2073 @@ def iterative_best_fit(
     if return_details:
         return result
     return best_formula, best_fit.params
+
+
+# ---------------------------------------------------------------------------
+# Classification model sweep
+# ---------------------------------------------------------------------------
+
+def _classifier_one_hot_encoder():
+    """Return a dense OneHotEncoder across old and new scikit-learn versions."""
+    from sklearn.preprocessing import OneHotEncoder
+
+    try:
+        return OneHotEncoder(
+            handle_unknown="infrequent_if_exist",
+            min_frequency=2,
+            sparse_output=False,
+        )
+    except TypeError:  # scikit-learn < 1.2
+        return OneHotEncoder(
+            handle_unknown="ignore",
+            sparse=False,
+        )
+
+
+class _PyFLASHOrdinalLogistic:
+    """Pickle-safe sklearn-compatible wrapper around mord.LogisticIT."""
+
+    def __init__(self, alpha: float = 1.0, max_iter: int = 10000):
+        self.alpha = alpha
+        self.max_iter = max_iter
+
+    def get_params(self, deep: bool = True):
+        return {"alpha": self.alpha, "max_iter": self.max_iter}
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
+    def fit(self, X, y):
+        from mord import LogisticIT
+
+        self.classes_ = np.array(sorted(np.unique(y)))
+        self.model_ = LogisticIT(alpha=self.alpha, max_iter=self.max_iter)
+        self.model_.fit(X, y)
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(X).astype(int)
+
+    def predict_proba(self, X):
+        raw = np.asarray(self.model_.predict_proba(X), dtype=float)
+        if raw.shape[1] == len(self.classes_):
+            return raw
+        aligned = np.zeros((raw.shape[0], len(self.classes_)), dtype=float)
+        for col_idx in range(min(raw.shape[1], len(self.classes_))):
+            aligned[:, col_idx] = raw[:, col_idx]
+        row_sums = aligned.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        return aligned / row_sums
+
+
+def _classification_model_configs(
+    preset: str = "ultra_compact",
+    model_families: Iterable[str] | None = None,
+    random_state: int = 20260708,
+) -> list[dict[str, Any]]:
+    """
+    Build a compact library of classifier configurations for model sweeps.
+
+    Presets:
+    - ultra_compact: one representative per family, intended for large sweeps.
+    - compact: a small grid.
+    - full: a broader discovery grid.
+    """
+    from sklearn.discriminant_analysis import (
+        LinearDiscriminantAnalysis,
+        QuadraticDiscriminantAnalysis,
+    )
+    from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.svm import SVC
+
+    preset_key = str(preset).strip().lower()
+    if preset_key not in {"ultra_compact", "compact", "full"}:
+        raise ValueError("model_preset must be 'ultra_compact', 'compact', or 'full'.")
+    ultra = preset_key == "ultra_compact"
+    compact = preset_key in {"ultra_compact", "compact"}
+
+    wanted = None
+    if model_families is not None:
+        wanted = {str(f).strip().lower() for f in model_families if str(f).strip()}
+
+    def _include(family: str) -> bool:
+        return wanted is None or str(family).strip().lower() in wanted
+
+    configs: list[dict[str, Any]] = []
+
+    if _include("ridge_multinomial_logistic"):
+        ridge_cs = [1.0] if ultra else ([0.1, 1.0] if compact else [0.03, 0.1, 0.3, 1.0, 3.0])
+        for c_val in ridge_cs:
+            configs.append({
+                "family": "ridge_multinomial_logistic",
+                "name": f"ridge_C={c_val:g}",
+                "estimator": LogisticRegression(
+                    penalty="l2",
+                    solver="lbfgs",
+                    C=c_val,
+                    max_iter=50000,
+                    random_state=random_state,
+                ),
+                "params": {"C": c_val},
+            })
+
+    if _include("elastic_net_multinomial_logistic"):
+        elastic_params = (
+            [(0.1, 0.5)]
+            if ultra
+            else [(0.1, 0.5), (1.0, 0.5)]
+            if compact
+            else [(c_val, ratio) for c_val in [0.1, 0.3, 1.0] for ratio in [0.1, 0.5, 0.9]]
+        )
+        for c_val, ratio in elastic_params:
+            configs.append({
+                "family": "elastic_net_multinomial_logistic",
+                "name": f"elastic_C={c_val:g}_l1={ratio:g}",
+                "estimator": LogisticRegression(
+                    penalty="elasticnet",
+                    solver="saga",
+                    C=c_val,
+                    l1_ratio=ratio,
+                    max_iter=50000,
+                    random_state=random_state,
+                ),
+                "params": {"C": c_val, "l1_ratio": ratio},
+            })
+
+    if _include("ordinal_logistic"):
+        try:
+            from mord import LogisticIT  # noqa: F401
+        except Exception:
+            LogisticIT = None
+
+        if LogisticIT is not None:
+            ordinal_alphas = [1.0] if ultra else ([1.0, 10.0] if compact else [0.1, 1.0, 10.0, 100.0])
+            for alpha in ordinal_alphas:
+                configs.append({
+                    "family": "ordinal_logistic",
+                    "name": f"ordinal_alpha={alpha:g}",
+                    "estimator": _PyFLASHOrdinalLogistic(alpha=alpha, max_iter=50000),
+                    "params": {"alpha": alpha},
+                })
+
+    if _include("shrinkage_lda"):
+        lda_shrinkages = ["auto"] if compact else ["auto", 0.1, 0.5, 0.9]
+        for shrinkage in lda_shrinkages:
+            configs.append({
+                "family": "shrinkage_lda",
+                "name": f"lda_shrinkage={shrinkage}",
+                "estimator": LinearDiscriminantAnalysis(solver="lsqr", shrinkage=shrinkage),
+                "params": {"shrinkage": shrinkage},
+            })
+
+    if _include("regularised_qda"):
+        qda_regs = [0.7] if ultra else ([0.5, 0.9] if compact else [0.1, 0.3, 0.5, 0.7, 0.9])
+        for reg in qda_regs:
+            configs.append({
+                "family": "regularised_qda",
+                "name": f"qda_reg={reg:g}",
+                "estimator": QuadraticDiscriminantAnalysis(reg_param=reg),
+                "params": {"reg_param": reg},
+            })
+
+    if _include("polynomial_svm"):
+        svm_params = (
+            [(1.0, 1.0)]
+            if compact
+            else [(c_val, coef0) for c_val in [0.1, 1.0, 10.0] for coef0 in [0.0, 1.0]]
+        )
+        for c_val, coef0 in svm_params:
+            configs.append({
+                "family": "polynomial_svm",
+                "name": f"poly_svm_C={c_val:g}_coef0={coef0:g}",
+                "estimator": SVC(
+                    kernel="poly",
+                    degree=2,
+                    C=c_val,
+                    coef0=coef0,
+                    probability=not ultra,
+                    random_state=random_state,
+                ),
+                "params": {"C": c_val, "degree": 2, "coef0": coef0},
+            })
+
+    if _include("shallow_random_forest"):
+        rf_params = (
+            [(2, 2, "sqrt", 50)]
+            if ultra
+            else [(2, 2, "sqrt", 200)]
+            if compact
+            else [(depth, leaf, max_feat, 200) for depth in [1, 2] for leaf in [2, 4] for max_feat in ["sqrt", 0.5]]
+        )
+        for depth, leaf, max_feat, n_estimators in rf_params:
+            configs.append({
+                "family": "shallow_random_forest",
+                "name": f"rf_depth={depth}_leaf={leaf}_mf={max_feat}",
+                "estimator": RandomForestClassifier(
+                    n_estimators=n_estimators,
+                    max_depth=depth,
+                    min_samples_leaf=leaf,
+                    max_features=max_feat,
+                    random_state=random_state,
+                    n_jobs=1,
+                ),
+                "params": {
+                    "max_depth": depth,
+                    "min_samples_leaf": leaf,
+                    "max_features": max_feat,
+                    "n_estimators": n_estimators,
+                },
+            })
+
+    if _include("shallow_gradient_boosting"):
+        gb_params = (
+            [(10, 0.1, 1, 2)]
+            if ultra
+            else [(25, 0.1, 1, 2)]
+            if compact
+            else [(n_est, lr, depth, 2) for n_est in [10, 25] for lr in [0.03, 0.1] for depth in [1, 2]]
+        )
+        for n_estimators, lr, depth, leaf in gb_params:
+            configs.append({
+                "family": "shallow_gradient_boosting",
+                "name": f"gb_n={n_estimators}_lr={lr:g}_depth={depth}",
+                "estimator": GradientBoostingClassifier(
+                    n_estimators=n_estimators,
+                    learning_rate=lr,
+                    max_depth=depth,
+                    min_samples_leaf=leaf,
+                    random_state=random_state,
+                ),
+                "params": {
+                    "n_estimators": n_estimators,
+                    "learning_rate": lr,
+                    "max_depth": depth,
+                    "min_samples_leaf": leaf,
+                },
+            })
+
+    if len(configs) == 0:
+        raise ValueError(
+            "No classifier configurations selected. "
+            "Check model_families names."
+        )
+    return configs
+
+
+def _prepare_classifier_feature_frame(
+    df: pd.DataFrame,
+    features: Iterable[str],
+    sentinel: str = NOT_INCLUDED_SENTINEL,
+) -> tuple[pd.DataFrame, dict[str, str], list[str]]:
+    """
+    Convert numeric-looking columns once and keep categorical columns as objects.
+
+    Missing values are not filled here; imputation happens inside each
+    cross-validation fold.
+    """
+    out = pd.DataFrame(index=df.index)
+    type_map: dict[str, str] = {}
+    removed: list[str] = []
+
+    for feature in features:
+        col = str(feature)
+        if col not in df.columns:
+            removed.append(col)
+            continue
+        raw = pd.Series(df[col], index=df.index)
+        sentinel_mask = _sentinel_like_mask(raw, sentinel=sentinel)
+        masked = raw.mask(sentinel_mask, np.nan)
+        numeric = _to_numeric_excluding_not_included(raw, sentinel=sentinel)
+
+        nonmissing = masked.notna()
+        nonmissing_count = int(nonmissing.sum())
+        parsed_count = int(numeric.loc[nonmissing].notna().sum()) if nonmissing_count else 0
+        if nonmissing_count == 0:
+            removed.append(col)
+            continue
+
+        if parsed_count == nonmissing_count:
+            out[col] = numeric
+            type_map[col] = "numeric"
+        else:
+            out[col] = masked.astype(object)
+            type_map[col] = "categorical"
+
+    return out, type_map, _unique_preserve_order(removed)
+
+
+def _build_classifier_preprocessor(
+    type_map: dict[str, str],
+    features: Iterable[str],
+    normalize_method: str = "zscore",
+):
+    from sklearn.compose import ColumnTransformer
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import MinMaxScaler, StandardScaler
+
+    feature_list = [str(f) for f in features]
+    numeric = [f for f in feature_list if type_map.get(f) == "numeric"]
+    categorical = [f for f in feature_list if type_map.get(f) == "categorical"]
+
+    transformers = []
+    if numeric:
+        num_steps = [("imputer", SimpleImputer(strategy="median"))]
+        norm = str(normalize_method).strip().lower()
+        if norm == "minmax":
+            num_steps.append(("scaler", MinMaxScaler()))
+        elif norm != "none":
+            num_steps.append(("scaler", StandardScaler()))
+        transformers.append(("num", Pipeline(num_steps), numeric))
+
+    if categorical:
+        transformers.append((
+            "cat",
+            Pipeline([
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                ("onehot", _classifier_one_hot_encoder()),
+            ]),
+            categorical,
+        ))
+
+    if not transformers:
+        raise ValueError("No usable numeric or categorical predictors in subset.")
+    return ColumnTransformer(transformers, remainder="drop", sparse_threshold=0.0)
+
+
+def _classifier_cv_splitter(
+    y: np.ndarray,
+    cv: str = "stratified5",
+    random_state: int = 20260708,
+):
+    from sklearn.model_selection import LeaveOneOut, StratifiedKFold
+
+    cv_key = str(cv).strip().lower()
+    if cv_key in {"loo", "leave_one_out", "leave-one-out"}:
+        return LeaveOneOut()
+
+    n_splits = 5
+    m = re.match(r"stratified(\d+)", cv_key)
+    if m:
+        n_splits = int(m.group(1))
+    elif cv_key not in {"stratified", "stratified5"}:
+        raise ValueError("cv must be 'stratified5', 'stratifiedN', or 'loo'.")
+
+    _, counts = np.unique(y, return_counts=True)
+    min_count = int(np.min(counts)) if len(counts) else 0
+    if min_count < 2:
+        raise ValueError("Stratified CV needs at least 2 samples in every class.")
+    n_splits = max(2, min(int(n_splits), min_count))
+    return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+
+
+def _align_classifier_proba(
+    estimator,
+    x_test: pd.DataFrame,
+    class_codes: np.ndarray,
+    pred: np.ndarray | None = None,
+) -> np.ndarray:
+    if hasattr(estimator, "predict_proba"):
+        proba = np.asarray(estimator.predict_proba(x_test), dtype=float)
+        estimator_classes = getattr(estimator, "classes_", None)
+        if estimator_classes is None and hasattr(estimator, "named_steps"):
+            estimator_classes = getattr(estimator.named_steps.get("clf"), "classes_", None)
+    else:
+        if pred is None:
+            pred = np.asarray(estimator.predict(x_test), dtype=int)
+        else:
+            pred = np.asarray(pred, dtype=int)
+        proba = np.zeros((len(pred), len(class_codes)), dtype=float)
+        contiguous_codes = np.arange(len(class_codes), dtype=int)
+        if np.array_equal(class_codes, contiguous_codes):
+            valid = (pred >= 0) & (pred < len(class_codes))
+            if np.any(valid):
+                rows = np.flatnonzero(valid)
+                proba[rows, pred[valid].astype(int)] = 1.0
+        else:
+            for row_idx, pred_code in enumerate(pred):
+                matches = np.flatnonzero(class_codes == int(pred_code))
+                if len(matches):
+                    proba[row_idx, int(matches[0])] = 1.0
+        return proba
+
+    if proba.ndim != 2:
+        raise ValueError("predict_proba returned a non-2D array.")
+
+    aligned = np.zeros((len(x_test), len(class_codes)), dtype=float)
+    if estimator_classes is None:
+        if proba.shape[1] == len(class_codes):
+            aligned = proba
+        else:
+            aligned[:, : min(proba.shape[1], len(class_codes))] = proba[:, : min(proba.shape[1], len(class_codes))]
+    else:
+        for col_idx, cls in enumerate(estimator_classes):
+            try:
+                cls_i = int(cls)
+            except Exception:
+                continue
+            matches = np.flatnonzero(class_codes == cls_i)
+            if len(matches) and col_idx < proba.shape[1]:
+                aligned[:, int(matches[0])] = proba[:, col_idx]
+
+    row_sums = aligned.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1.0
+    return aligned / row_sums
+
+
+def _classifier_metrics_from_predictions(
+    y: np.ndarray,
+    pred: np.ndarray,
+    proba: np.ndarray,
+    class_codes: np.ndarray,
+    fold_id: np.ndarray | None = None,
+    collect_predictions: bool = False,
+) -> dict[str, Any] | None:
+    from sklearn.metrics import (
+        accuracy_score,
+        balanced_accuracy_score,
+        f1_score,
+        log_loss,
+        roc_auc_score,
+    )
+
+    if int((pred >= 0).sum()) != len(y) or not np.isfinite(proba).all():
+        return None
+
+    row: dict[str, Any] = {
+        "accuracy": float(accuracy_score(y, pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(y, pred)),
+        "macro_f1": float(f1_score(y, pred, average="macro", zero_division=0)),
+    }
+    try:
+        row["macro_ovr_auc"] = float(
+            roc_auc_score(y, proba, labels=class_codes, multi_class="ovr", average="macro")
+        )
+    except Exception:
+        row["macro_ovr_auc"] = np.nan
+    try:
+        row["log_loss"] = float(log_loss(y, proba, labels=class_codes))
+    except Exception:
+        row["log_loss"] = np.nan
+
+    if collect_predictions:
+        row["prediction_code"] = pred
+        row["probability"] = proba
+        if fold_id is not None:
+            row["fold"] = fold_id
+    return row
+
+
+def _build_classifier_cv_matrices(
+    feature_frame: pd.DataFrame,
+    type_map: dict[str, str],
+    features: Iterable[str],
+    cv_splits: list[tuple[np.ndarray, np.ndarray]],
+    normalize_method: str = "zscore",
+    y: np.ndarray | None = None,
+    fold_y_train: list[np.ndarray] | None = None,
+    fold_class_valid: list[bool] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Fit fold-local preprocessing once for a subset and reuse it across classifiers."""
+    from sklearn.base import clone
+
+    feature_list = [str(f) for f in features]
+    x_all = feature_frame[feature_list]
+    try:
+        preprocessor = _build_classifier_preprocessor(type_map, feature_list, normalize_method)
+    except Exception:
+        return None
+
+    folds: list[dict[str, Any]] = []
+    for fold_pos, (train_idx, test_idx) in enumerate(cv_splits):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                fold_preprocessor = clone(preprocessor)
+                x_train = fold_preprocessor.fit_transform(x_all.iloc[train_idx])
+                x_test = fold_preprocessor.transform(x_all.iloc[test_idx])
+        except Exception:
+            return None
+        fold = {
+            "train_idx": train_idx,
+            "test_idx": test_idx,
+            "x_train": np.asarray(x_train, dtype=float),
+            "x_test": np.asarray(x_test, dtype=float),
+        }
+        if fold_y_train is not None and fold_pos < len(fold_y_train):
+            y_train = fold_y_train[fold_pos]
+            fold["y_train"] = y_train
+            if fold_class_valid is not None and fold_pos < len(fold_class_valid):
+                fold["train_has_multiple_classes"] = bool(fold_class_valid[fold_pos])
+            else:
+                fold["train_has_multiple_classes"] = bool(len(np.unique(y_train)) >= 2)
+        elif y is not None:
+            y_train = y[train_idx]
+            fold["y_train"] = y_train
+            if fold_class_valid is not None and fold_pos < len(fold_class_valid):
+                fold["train_has_multiple_classes"] = bool(fold_class_valid[fold_pos])
+            else:
+                fold["train_has_multiple_classes"] = bool(len(np.unique(y_train)) >= 2)
+        folds.append(fold)
+    return folds
+
+
+def _score_classifier_subset_from_cv_matrices(
+    cv_matrices: list[dict[str, Any]] | None,
+    y: np.ndarray,
+    config: dict[str, Any],
+    class_codes: np.ndarray,
+    collect_predictions: bool = False,
+    fold_class_valid: list[bool] | None = None,
+) -> dict[str, Any] | None:
+    if not cv_matrices:
+        return None
+    from sklearn.base import clone
+
+    pred = np.full(len(y), -1, dtype=int)
+    proba = np.full((len(y), len(class_codes)), np.nan, dtype=float)
+    fold_id = np.full(len(y), -1, dtype=int) if collect_predictions else None
+
+    for fold_idx, fold in enumerate(cv_matrices, start=1):
+        train_idx = fold["train_idx"]
+        test_idx = fold["test_idx"]
+        if fold_class_valid is not None and fold_idx - 1 < len(fold_class_valid):
+            valid_fold = bool(fold_class_valid[fold_idx - 1])
+        else:
+            valid_fold = fold.get("train_has_multiple_classes", None)
+            if valid_fold is None:
+                valid_fold = len(np.unique(y[train_idx])) >= 2
+        if not valid_fold:
+            return None
+        y_train = fold.get("y_train", y[train_idx])
+        estimator = clone(config["estimator"])
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                estimator.fit(fold["x_train"], y_train)
+                fold_pred = np.asarray(estimator.predict(fold["x_test"]), dtype=int)
+                pred[test_idx] = fold_pred
+                proba[test_idx] = _align_classifier_proba(
+                    estimator,
+                    fold["x_test"],
+                    class_codes,
+                    pred=fold_pred,
+                )
+                if fold_id is not None:
+                    fold_id[test_idx] = int(fold_idx)
+        except Exception:
+            return None
+
+    return _classifier_metrics_from_predictions(
+        y,
+        pred,
+        proba,
+        class_codes,
+        fold_id=fold_id,
+        collect_predictions=collect_predictions,
+    )
+
+
+def _score_prepared_subset_configs_worker(
+    prepared,
+    configs: list[dict[str, Any]],
+    y: np.ndarray,
+    class_codes: np.ndarray,
+    fold_class_valid: list[bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Process-safe worker: score all configs for one prepared subset."""
+    subset_list, features_text, features_json, _numeric_col_idx, subset_cv_matrices = prepared
+    if subset_cv_matrices is None:
+        return []
+
+    rows = []
+    for config in configs:
+        metrics = _score_classifier_subset_from_cv_matrices(
+            subset_cv_matrices,
+            y,
+            config,
+            class_codes,
+            collect_predictions=False,
+            fold_class_valid=fold_class_valid,
+        )
+        if metrics is None:
+            continue
+        rows.append({
+            "family": config["family"],
+            "model_config": config["name"],
+            "params_json": config.get("_params_json") or json.dumps(config["params"], sort_keys=True),
+            "subset_size": len(subset_list),
+            "features": features_text,
+            "features_json": features_json,
+            "features_tuple": tuple(subset_list),
+            **metrics,
+        })
+    return rows
+
+
+def _score_classifier_subset(
+    feature_frame: pd.DataFrame,
+    type_map: dict[str, str],
+    y: np.ndarray,
+    features: Iterable[str],
+    config: dict[str, Any],
+    class_codes: np.ndarray,
+    cv: str = "stratified5",
+    normalize_method: str = "zscore",
+    random_state: int = 20260708,
+    collect_predictions: bool = False,
+    cv_splits: list[tuple[np.ndarray, np.ndarray]] | None = None,
+    fold_class_valid: list[bool] | None = None,
+) -> dict[str, Any] | None:
+    from sklearn.base import clone
+    from sklearn.pipeline import Pipeline
+
+    feature_list = [str(f) for f in features]
+    x_all = feature_frame[feature_list]
+    if cv_splits is None:
+        splitter = _classifier_cv_splitter(y, cv=cv, random_state=random_state)
+        splits = list(splitter.split(x_all, y))
+    else:
+        splits = cv_splits
+    pred = np.full(len(y), -1, dtype=int)
+    proba = np.full((len(y), len(class_codes)), np.nan, dtype=float)
+    fold_id = np.full(len(y), -1, dtype=int) if collect_predictions else None
+
+    for fold_idx, (train_idx, test_idx) in enumerate(splits, start=1):
+        valid_fold = (
+            bool(fold_class_valid[fold_idx - 1])
+            if fold_class_valid is not None and fold_idx - 1 < len(fold_class_valid)
+            else len(np.unique(y[train_idx])) >= 2
+        )
+        if not valid_fold:
+            return None
+        pipe = Pipeline([
+            ("preprocess", _build_classifier_preprocessor(type_map, feature_list, normalize_method)),
+            ("clf", clone(config["estimator"])),
+        ])
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                pipe.fit(x_all.iloc[train_idx], y[train_idx])
+                fold_pred = np.asarray(pipe.predict(x_all.iloc[test_idx]), dtype=int)
+                pred[test_idx] = fold_pred
+                proba[test_idx] = _align_classifier_proba(
+                    pipe,
+                    x_all.iloc[test_idx],
+                    class_codes,
+                    pred=fold_pred,
+                )
+                if fold_id is not None:
+                    fold_id[test_idx] = int(fold_idx)
+        except Exception:
+            return None
+
+    return _classifier_metrics_from_predictions(
+        y,
+        pred,
+        proba,
+        class_codes,
+        fold_id=fold_id,
+        collect_predictions=collect_predictions,
+    )
+
+
+def _build_numeric_classifier_cv_cache(
+    feature_frame: pd.DataFrame,
+    type_map: dict[str, str],
+    cv_splits: list[tuple[np.ndarray, np.ndarray]],
+    normalize_method: str = "zscore",
+    y: np.ndarray | None = None,
+    fold_y_train: list[np.ndarray] | None = None,
+    fold_class_valid: list[bool] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Precompute fold-wise numeric imputation and scaling for all numeric columns.
+
+    For numeric-only subsets this is equivalent to a fold-local
+    SimpleImputer(strategy='median') plus StandardScaler or MinMaxScaler,
+    but avoids rebuilding and refitting a preprocessing pipeline for every
+    subset/configuration pair.
+    """
+    numeric_features = [
+        str(col)
+        for col in feature_frame.columns
+        if type_map.get(str(col)) == "numeric"
+    ]
+    if len(numeric_features) == 0:
+        return None
+
+    try:
+        x_raw = feature_frame[numeric_features].to_numpy(dtype=float, copy=True)
+    except Exception:
+        return None
+    x_raw[~np.isfinite(x_raw)] = np.nan
+
+    norm = str(normalize_method).strip().lower()
+    folds = []
+    for fold_pos, (train_idx, test_idx) in enumerate(cv_splits):
+        x_train_raw = x_raw[train_idx]
+        x_test_raw = x_raw[test_idx]
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            med = np.nanmedian(x_train_raw, axis=0)
+        valid = np.isfinite(med)
+        med_safe = np.where(valid, med, 0.0)
+
+        x_train = np.where(np.isnan(x_train_raw), med_safe, x_train_raw)
+        x_test = np.where(np.isnan(x_test_raw), med_safe, x_test_raw)
+
+        if norm == "minmax":
+            data_min = np.min(x_train, axis=0)
+            data_max = np.max(x_train, axis=0)
+            scale = data_max - data_min
+            scale = np.where(np.isfinite(scale) & (scale != 0.0), scale, 1.0)
+            x_train = (x_train - data_min) / scale
+            x_test = (x_test - data_min) / scale
+        elif norm != "none":
+            mean = np.mean(x_train, axis=0)
+            scale = np.std(x_train, axis=0, ddof=0)
+            scale = np.where(np.isfinite(scale) & (scale != 0.0), scale, 1.0)
+            x_train = (x_train - mean) / scale
+            x_test = (x_test - mean) / scale
+
+        fold = {
+            "train_idx": train_idx,
+            "test_idx": test_idx,
+            "x_train": np.asarray(x_train, dtype=float),
+            "x_test": np.asarray(x_test, dtype=float),
+            "valid": np.asarray(valid, dtype=bool),
+        }
+        if fold_y_train is not None and fold_pos < len(fold_y_train):
+            y_train = fold_y_train[fold_pos]
+            fold["y_train"] = y_train
+            if fold_class_valid is not None and fold_pos < len(fold_class_valid):
+                fold["train_has_multiple_classes"] = bool(fold_class_valid[fold_pos])
+            else:
+                fold["train_has_multiple_classes"] = bool(len(np.unique(y_train)) >= 2)
+        elif y is not None:
+            y_train = y[train_idx]
+            fold["y_train"] = y_train
+            if fold_class_valid is not None and fold_pos < len(fold_class_valid):
+                fold["train_has_multiple_classes"] = bool(fold_class_valid[fold_pos])
+            else:
+                fold["train_has_multiple_classes"] = bool(len(np.unique(y_train)) >= 2)
+        folds.append(fold)
+
+    return {
+        "features": numeric_features,
+        "feature_index": {name: idx for idx, name in enumerate(numeric_features)},
+        "folds": folds,
+        "normalize_method": norm,
+    }
+
+
+def _slice_numeric_classifier_cv_matrices(
+    numeric_cv_cache: dict[str, Any] | None,
+    col_idx: np.ndarray,
+) -> list[dict[str, Any]] | None:
+    """Materialize a numeric subset once so all classifier configs reuse it."""
+    if numeric_cv_cache is None:
+        return None
+    col_idx = np.asarray(col_idx, dtype=int)
+    folds = []
+    for fold in numeric_cv_cache.get("folds", []):
+        if not bool(np.asarray(fold["valid"])[col_idx].all()):
+            return None
+        out = {
+            "train_idx": fold["train_idx"],
+            "test_idx": fold["test_idx"],
+            "x_train": fold["x_train"][:, col_idx],
+            "x_test": fold["x_test"][:, col_idx],
+        }
+        if "y_train" in fold:
+            out["y_train"] = fold["y_train"]
+        if "train_has_multiple_classes" in fold:
+            out["train_has_multiple_classes"] = fold["train_has_multiple_classes"]
+        folds.append(out)
+    return folds
+
+
+def _score_classifier_subset_fast_numeric(
+    numeric_cv_cache: dict[str, Any] | None,
+    type_map: dict[str, str],
+    y: np.ndarray,
+    features: Iterable[str],
+    config: dict[str, Any],
+    class_codes: np.ndarray,
+    collect_predictions: bool = False,
+    col_idx: np.ndarray | None = None,
+    fold_class_valid: list[bool] | None = None,
+) -> dict[str, Any] | None:
+    """Score a numeric-only subset using cached fold matrices."""
+    if numeric_cv_cache is None:
+        return None
+    from sklearn.base import clone
+
+    feature_list = [str(f) for f in features]
+    if col_idx is None:
+        if any(type_map.get(f) != "numeric" for f in feature_list):
+            return None
+        feature_index = numeric_cv_cache.get("feature_index", {})
+        if any(f not in feature_index for f in feature_list):
+            return None
+        col_idx = np.asarray([feature_index[f] for f in feature_list], dtype=int)
+    else:
+        col_idx = np.asarray(col_idx, dtype=int)
+
+    pred = np.full(len(y), -1, dtype=int)
+    proba = np.full((len(y), len(class_codes)), np.nan, dtype=float)
+    fold_id = np.full(len(y), -1, dtype=int) if collect_predictions else None
+
+    for fold_idx, fold in enumerate(numeric_cv_cache.get("folds", []), start=1):
+        train_idx = fold["train_idx"]
+        test_idx = fold["test_idx"]
+        if fold_class_valid is not None and fold_idx - 1 < len(fold_class_valid):
+            valid_fold = bool(fold_class_valid[fold_idx - 1])
+        else:
+            valid_fold = fold.get("train_has_multiple_classes", None)
+            if valid_fold is None:
+                valid_fold = len(np.unique(y[train_idx])) >= 2
+        if not valid_fold:
+            return None
+        if not bool(np.asarray(fold["valid"])[col_idx].all()):
+            return None
+
+        x_train = fold["x_train"][:, col_idx]
+        x_test = fold["x_test"][:, col_idx]
+        y_train = fold.get("y_train", y[train_idx])
+        estimator = clone(config["estimator"])
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                estimator.fit(x_train, y_train)
+                fold_pred = np.asarray(estimator.predict(x_test), dtype=int)
+                pred[test_idx] = fold_pred
+                proba[test_idx] = _align_classifier_proba(
+                    estimator,
+                    x_test,
+                    class_codes,
+                    pred=fold_pred,
+                )
+                if fold_id is not None:
+                    fold_id[test_idx] = int(fold_idx)
+        except Exception:
+            return None
+
+    return _classifier_metrics_from_predictions(
+        y,
+        pred,
+        proba,
+        class_codes,
+        fold_id=fold_id,
+        collect_predictions=collect_predictions,
+    )
+
+
+def _score_classifier_subset_auto(
+    feature_frame: pd.DataFrame,
+    type_map: dict[str, str],
+    y: np.ndarray,
+    features: Iterable[str],
+    config: dict[str, Any],
+    class_codes: np.ndarray,
+    cv: str = "stratified5",
+    normalize_method: str = "zscore",
+    random_state: int = 20260708,
+    collect_predictions: bool = False,
+    cv_splits: list[tuple[np.ndarray, np.ndarray]] | None = None,
+    numeric_cv_cache: dict[str, Any] | None = None,
+    fast_numeric: bool = True,
+    numeric_col_idx: np.ndarray | None = None,
+    cv_matrices: list[dict[str, Any]] | None = None,
+    fold_class_valid: list[bool] | None = None,
+) -> dict[str, Any] | None:
+    if bool(fast_numeric):
+        metrics = _score_classifier_subset_fast_numeric(
+            numeric_cv_cache,
+            type_map,
+            y,
+            features,
+            config,
+            class_codes,
+            collect_predictions=collect_predictions,
+            col_idx=numeric_col_idx,
+            fold_class_valid=fold_class_valid,
+        )
+        if metrics is not None:
+            return metrics
+
+    if cv_matrices is not None:
+        metrics = _score_classifier_subset_from_cv_matrices(
+            cv_matrices,
+            y,
+            config,
+            class_codes,
+            collect_predictions=collect_predictions,
+            fold_class_valid=fold_class_valid,
+        )
+        if metrics is not None:
+            return metrics
+
+    return _score_classifier_subset(
+        feature_frame,
+        type_map,
+        y,
+        features,
+        config,
+        class_codes,
+        cv=cv,
+        normalize_method=normalize_method,
+        random_state=random_state,
+        collect_predictions=collect_predictions,
+        cv_splits=cv_splits,
+        fold_class_valid=fold_class_valid,
+    )
+
+
+def _classifier_sort_spec(scoring: str) -> tuple[list[str], list[bool]]:
+    score = str(scoring).strip()
+    if score == "":
+        score = "balanced_accuracy"
+    lower_is_better = score in {"log_loss", "loss"}
+    if score == "loss":
+        score = "log_loss"
+    columns = [score, "macro_ovr_auc", "macro_f1", "balanced_accuracy", "family", "features"]
+    ascending = [bool(lower_is_better), False, False, False, True, True]
+    return columns, ascending
+
+
+def _sort_classifier_results(results: pd.DataFrame, scoring: str) -> pd.DataFrame:
+    if len(results) == 0:
+        return results.copy()
+    columns, ascending = _classifier_sort_spec(scoring)
+    columns = [c for c in columns if c in results.columns]
+    ascending = ascending[: len(columns)]
+    return results.sort_values(columns, ascending=ascending).reset_index(drop=True)
+
+
+def _feature_recurrence_summary(
+    results: pd.DataFrame,
+    top_n: int,
+    scoring: str = "balanced_accuracy",
+) -> pd.DataFrame:
+    if len(results) == 0:
+        return pd.DataFrame()
+    top = _sort_classifier_results(results, scoring).head(max(1, int(top_n)))
+    score_col = "log_loss" if str(scoring).strip() in {"log_loss", "loss"} else str(scoring).strip()
+    if score_col not in top.columns:
+        score_col = "balanced_accuracy"
+    lower_is_better = score_col == "log_loss"
+
+    rows = []
+    features_seen = sorted({f for subset in top["features_tuple"] for f in subset})
+    for feature in features_seen:
+        sub = top[top["features_tuple"].map(lambda vals, feat=feature: feat in vals)]
+        metric_vals = pd.to_numeric(sub[score_col], errors="coerce")
+        rows.append({
+            "feature": feature,
+            "top_n_appearances": int(len(sub)),
+            f"best_{score_col}": float(metric_vals.min() if lower_is_better else metric_vals.max()),
+            f"mean_{score_col}": float(metric_vals.mean()),
+            "best_balanced_accuracy": float(pd.to_numeric(sub["balanced_accuracy"], errors="coerce").max()),
+            "best_macro_ovr_auc": float(pd.to_numeric(sub["macro_ovr_auc"], errors="coerce").max(skipna=True)),
+        })
+    if len(rows) == 0:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(
+        ["top_n_appearances", "best_balanced_accuracy", "feature"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+
+
+def _classifier_sweep_data_hash(
+    target_text: pd.Series,
+    feature_frame: pd.DataFrame,
+    predictors: list[str],
+    target: str,
+) -> str:
+    """Stable hash for deciding whether checkpoint rows match this data."""
+    try:
+        sig_df = pd.concat(
+            [pd.Series(target_text, name=str(target)), feature_frame[predictors]],
+            axis=1,
+        )
+        row_hash = pd.util.hash_pandas_object(sig_df, index=True).to_numpy(dtype=np.uint64)
+        h = hashlib.sha256()
+        h.update(json.dumps([str(c) for c in sig_df.columns]).encode("utf-8"))
+        h.update(row_hash.tobytes())
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
+def _plot_classifier_sweep_outputs(
+    results: pd.DataFrame,
+    feature_stats: pd.DataFrame,
+    figures_dir: Path,
+    scoring: str = "balanced_accuracy",
+    class_count: int = 3,
+    dpi: int = 220,
+) -> None:
+    if len(results) == 0:
+        return
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    score_col = "log_loss" if str(scoring).strip() in {"log_loss", "loss"} else str(scoring).strip()
+    if score_col not in results.columns:
+        score_col = "balanced_accuracy"
+    top = _sort_classifier_results(results, score_col).head(30).copy()
+    if "rank" not in top.columns:
+        top.insert(0, "rank", np.arange(1, len(top) + 1))
+    top["model_label"] = (
+        top["rank"].astype(str)
+        + ". "
+        + top["family"].astype(str)
+        + "\n"
+        + top["features"].astype(str).str.slice(0, 95)
+    )
+
+    plt.figure(figsize=(10, 8))
+    sns.barplot(data=top, y="model_label", x=score_col, hue="subset_size", dodge=False)
+    if score_col != "log_loss" and class_count > 0:
+        plt.axvline(1.0 / float(class_count), color="black", linestyle="--", linewidth=1)
+    plt.xlabel(f"Cross-validated {score_col.replace('_', ' ')}")
+    plt.ylabel("")
+    plt.title("Top iterative classifier sweep models")
+    plt.tight_layout()
+    plt.savefig(figures_dir / "top_iterative_model_sweep.png", dpi=dpi)
+    plt.close()
+
+    pivot = results.pivot_table(
+        index="family",
+        columns="subset_size",
+        values=score_col,
+        aggfunc="min" if score_col == "log_loss" else "max",
+    )
+    if len(pivot) > 0:
+        plt.figure(figsize=(8, 5))
+        sns.heatmap(pivot, annot=True, fmt=".2f", cmap="viridis")
+        plt.title(f"Best {score_col.replace('_', ' ')} by model family and subset size")
+        plt.tight_layout()
+        plt.savefig(figures_dir / "family_by_subset_size_heatmap.png", dpi=dpi)
+        plt.close()
+
+    if feature_stats is not None and not feature_stats.empty:
+        show = feature_stats.head(25).copy()
+        plt.figure(figsize=(9, 8))
+        sns.barplot(data=show, y="feature", x="top_n_appearances", color="#3A6EA5")
+        plt.xlabel("Appearances among top ranked models")
+        plt.ylabel("")
+        plt.title("Features recurring in top models")
+        plt.tight_layout()
+        plt.savefig(figures_dir / "top_feature_recurrence.png", dpi=dpi)
+        plt.close()
+
+
+def _classifier_sweep_permutation_test(
+    feature_frame: pd.DataFrame,
+    type_map: dict[str, str],
+    y: np.ndarray,
+    top_row: pd.Series,
+    config: dict[str, Any],
+    class_codes: np.ndarray,
+    n_permutations: int,
+    cv: str,
+    scoring: str,
+    normalize_method: str,
+    random_state: int,
+) -> pd.DataFrame:
+    n_perm = int(n_permutations)
+    if n_perm <= 0:
+        return pd.DataFrame()
+    score_col = "log_loss" if str(scoring).strip() in {"log_loss", "loss"} else str(scoring).strip()
+    if score_col not in top_row.index:
+        score_col = "balanced_accuracy"
+    observed = float(top_row[score_col])
+    lower_is_better = score_col == "log_loss"
+    features = list(top_row["features_tuple"])
+    rng = np.random.default_rng(int(random_state))
+    perm_scores = []
+    for _ in range(n_perm):
+        y_perm = np.array(y, copy=True)
+        rng.shuffle(y_perm)
+        metrics = _score_classifier_subset(
+            feature_frame,
+            type_map,
+            y_perm,
+            features,
+            config,
+            class_codes,
+            cv=cv,
+            normalize_method=normalize_method,
+            random_state=random_state,
+            collect_predictions=False,
+        )
+        if metrics is None:
+            continue
+        score_val = metrics.get(score_col, np.nan)
+        if np.isfinite(score_val):
+            perm_scores.append(float(score_val))
+
+    if len(perm_scores) == 0:
+        return pd.DataFrame()
+    scores_arr = np.asarray(perm_scores, dtype=float)
+    if lower_is_better:
+        extreme = int(np.sum(scores_arr <= observed))
+    else:
+        extreme = int(np.sum(scores_arr >= observed))
+    pvalue = float((extreme + 1) / (len(scores_arr) + 1))
+    return pd.DataFrame([{
+        "family": top_row["family"],
+        "model_config": top_row["model_config"],
+        "features": top_row["features"],
+        "subset_size": int(top_row["subset_size"]),
+        "scoring": score_col,
+        "observed_score": observed,
+        "pvalue": pvalue,
+        "permutation_mean": float(np.mean(scores_arr)),
+        "permutation_sd": float(np.std(scores_arr, ddof=1)) if len(scores_arr) > 1 else np.nan,
+        "n_permutations_requested": n_perm,
+        "n_permutations_valid": int(len(scores_arr)),
+        "permutation_scores": ";".join(f"{v:.6f}" for v in scores_arr),
+    }])
+
+
+def _write_classifier_sweep_readme(
+    outdir: Path,
+    df: pd.DataFrame,
+    target: str,
+    predictors: list[str],
+    configs: list[dict[str, Any]],
+    results: pd.DataFrame,
+    permutations: pd.DataFrame,
+    class_labels: list[str],
+    max_features: int,
+    cv: str,
+    search_strategy: str,
+    model_preset: str,
+    scoring: str,
+) -> None:
+    top = _sort_classifier_results(results, scoring).head(15)
+    try:
+        subset_count = sum(math.comb(len(predictors), k) for k in range(1, int(max_features) + 1))
+    except Exception:
+        subset_count = np.nan
+    lines = [
+        "# Iterative Model Sweep",
+        "",
+        f"Generated: {datetime.now().isoformat(timespec='seconds')}",
+        "",
+        "This is a discovery screen: many feature subsets and classifier settings are tested, then ranked.",
+        "Use an independent validation set, nested cross-validation, or a search-level label-shuffle test before treating the top model as confirmed.",
+        "",
+        "## Dataset",
+        "",
+        f"- Rows used: {len(df)}",
+        f"- Target: `{target}`",
+        "- Class counts: " + ", ".join(f"{label}={int((df[target].astype(str) == str(label)).sum())}" for label in class_labels),
+        f"- Candidate predictors: {len(predictors)}",
+        f"- Max subset size: {int(max_features)}",
+        f"- Exhaustive subset estimate: {subset_count}",
+        f"- Classifier configurations: {len(configs)}",
+        f"- Valid model scores: {len(results)}",
+        f"- CV mode: `{cv}`",
+        f"- Search strategy: `{search_strategy}`",
+        f"- Model preset: `{model_preset}`",
+        f"- Ranking metric: `{scoring}`",
+        "",
+        "## Top Results",
+        "",
+    ]
+    if len(top) > 0:
+        show_cols = [
+            c for c in [
+                "rank",
+                "family",
+                "model_config",
+                "subset_size",
+                "balanced_accuracy",
+                "macro_ovr_auc",
+                "macro_f1",
+                "log_loss",
+                "features",
+            ]
+            if c in top.columns
+        ]
+        lines.append(top[show_cols].to_string(index=False))
+        lines.append("")
+
+    if permutations is not None and not permutations.empty:
+        lines.extend([
+            "## Top-Model Label Shuffle",
+            "",
+            permutations.drop(columns=["permutation_scores"], errors="ignore").to_string(index=False),
+            "",
+            "This shuffle only tests the selected top model, not the whole search process.",
+            "",
+        ])
+
+    lines.extend([
+        "## Key Files",
+        "",
+        "- `iterative_model_sweep_scores.csv`",
+        "- `top_iterative_model_sweep_scores.csv`",
+        "- `top_feature_recurrence.csv`",
+        "- `top_model_predictions.csv`",
+        "- `top_model_permutation_test.csv`",
+        "- `top_iterative_model_sweep.png`",
+        "- `family_by_subset_size_heatmap.png`",
+        "- `top_feature_recurrence.png`",
+    ])
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def iterative_model_sweep(
+    batch_or_df,
+    target: str,
+    possible_predictors: Iterable[str] | None = None,
+    column_strings=None,
+    regex_string=None,
+    predictor_exclude="",
+    excluded_predictors: Iterable[str] | None = None,
+    max_features: int = 2,
+    repeat_features: bool = False,
+    model_preset: str = "ultra_compact",
+    model_families: Iterable[str] | None = None,
+    class_order: Iterable[Any] | None = None,
+    cv: str = "stratified5",
+    scoring: str = "balanced_accuracy",
+    specificity=None,
+    exclude=None,
+    normalize_method: str = "zscore",
+    search_strategy: str = "exhaustive",
+    beam_width: int = 100,
+    save: bool = True,
+    output_dir: str | os.PathLike | None = None,
+    run_label: str = "iterative_model_sweep",
+    top_n: int = 200,
+    permutations: int = 0,
+    checkpoint_every: int = 250,
+    resume: bool = False,
+    plot: bool = True,
+    dpi: int = 220,
+    random_state: int = 20260708,
+    fast_numeric: bool = True,
+    n_jobs: int = 1,
+    parallel_backend: str = "threads",
+    parallel_batch_size: int = 256,
+    verbose: bool = True,
+    return_details: bool = True,
+):
+    """
+    Iteratively sweep feature subsets and classifier families for a class target.
+
+    This is the classification counterpart to :func:`iterative_best_fit`.
+    It is meant for discovery screens such as Control vs MCI vs AD from a
+    candidate panel of volume/activity/covariate columns.
+
+    Parameters
+    ----------
+    batch_or_df:
+        Either a PyFLASH batch-like object exposing ``.summary`` or a pandas
+        DataFrame.
+    target:
+        Categorical target column to predict.
+    possible_predictors / column_strings / regex_string:
+        Candidate predictor selection.  Predictors must be real DataFrame
+        columns; formula terms are not used for this classifier sweep.
+    max_features:
+        Test every subset size from 1..max_features when exhaustive.  In beam
+        mode this is the maximum depth.
+    search_strategy:
+        ``"exhaustive"`` tests every subset. ``"beam"`` expands only the best
+        subsets from the previous level and is much faster for large feature
+        pools, but can miss the global best subset.
+    model_preset:
+        ``"ultra_compact"``, ``"compact"``, or ``"full"`` classifier grids.
+    cv:
+        ``"stratified5"`` (default), ``"stratifiedN"``, or ``"loo"``.
+    n_jobs:
+        Number of parallel scoring workers. Use -1 for all cores. Parallel
+        scoring uses threads by default so cached CV matrices are shared.
+    parallel_backend:
+        ``"threads"`` or ``"processes"``. Processes can be faster for large
+        exhaustive sweeps but have more startup overhead on Windows.
+
+    Returns
+    -------
+    dict by default, including the ranked score table, best feature subset,
+    fitted final estimator, feature recurrence table, and output paths.
+    """
+    if isinstance(batch_or_df, pd.DataFrame):
+        source_df = batch_or_df
+        batch_fig_path = None
+    elif hasattr(batch_or_df, "summary"):
+        source_df = getattr(batch_or_df, "summary", None)
+        batch_fig_path = getattr(batch_or_df, "fig_path", None)
+    else:
+        raise ValueError("First argument must be a pandas DataFrame or expose .summary.")
+    if not isinstance(source_df, pd.DataFrame) or len(source_df) == 0:
+        raise ValueError("Input data must be a non-empty pandas DataFrame.")
+
+    if _is_specificity_queue(specificity):
+        queued_outputs = {}
+        for spec in _iter_specificities(specificity):
+            queued_outputs[spec] = iterative_model_sweep(
+                batch_or_df,
+                target=target,
+                possible_predictors=possible_predictors,
+                column_strings=column_strings,
+                regex_string=regex_string,
+                predictor_exclude=predictor_exclude,
+                excluded_predictors=excluded_predictors,
+                max_features=max_features,
+                repeat_features=repeat_features,
+                model_preset=model_preset,
+                model_families=model_families,
+                class_order=class_order,
+                cv=cv,
+                scoring=scoring,
+                specificity=spec,
+                exclude=exclude,
+                normalize_method=normalize_method,
+                search_strategy=search_strategy,
+                beam_width=beam_width,
+                save=save,
+                output_dir=output_dir,
+                run_label=run_label,
+                top_n=top_n,
+                permutations=permutations,
+                checkpoint_every=checkpoint_every,
+                resume=resume,
+                plot=plot,
+                dpi=dpi,
+                random_state=random_state,
+                fast_numeric=fast_numeric,
+                n_jobs=n_jobs,
+                parallel_backend=parallel_backend,
+                parallel_batch_size=parallel_batch_size,
+                verbose=verbose,
+                return_details=return_details,
+            )
+        return queued_outputs
+
+    df = source_df.copy()
+    if target not in df.columns:
+        raise ValueError(f"target '{target}' not found in DataFrame.")
+
+    predictor_name_blacklist = set(DEFAULT_EXCLUDED_PREDICTORS)
+    predictor_name_blacklist.add(str(target))
+    if excluded_predictors is not None:
+        predictor_name_blacklist.update([str(c) for c in excluded_predictors])
+
+    predictors = _resolve_possible_predictors(
+        df,
+        possible_predictors=possible_predictors,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=predictor_exclude,
+    )
+    predictors = [
+        str(p)
+        for p in predictors
+        if str(p) in df.columns and str(p) not in predictor_name_blacklist
+    ]
+    predictors = _unique_preserve_order(predictors)
+    if len(predictors) == 0:
+        raise ValueError(
+            "No predictor columns available after filtering. "
+            "Check possible_predictors/column_strings/regex_string."
+        )
+
+    work_df = _filter_df_by_specificity(df, specificity).copy()
+    pre_exclude_n = len(work_df)
+    work_df = _exclude_df_by_rules(work_df, exclude).copy()
+    work_df = _drop_unused_categorical_levels(work_df)
+    if verbose and exclude is not None:
+        _log.hint(f"[iterative_model_sweep] Exclude filter removed {pre_exclude_n - len(work_df)} rows.")
+    if len(work_df) == 0:
+        raise ValueError("No rows remain after specificity/exclude filtering.")
+
+    target_series = pd.Series(work_df[target], index=work_df.index)
+    valid_target = target_series.notna() & (~_sentinel_like_mask(target_series))
+    target_text = target_series.astype(str).str.strip()
+    valid_target = valid_target & (target_text != "")
+
+    if class_order is not None:
+        class_labels = [str(c) for c in class_order]
+        valid_target = valid_target & target_text.isin(class_labels)
+    else:
+        class_labels = _unique_preserve_order(target_text.loc[valid_target].tolist())
+
+    work_df = work_df.loc[valid_target].copy()
+    target_text = target_text.loc[valid_target]
+    if len(class_labels) < 2:
+        raise ValueError("Target must contain at least two classes.")
+    if len(work_df) < len(class_labels) * 2:
+        raise ValueError("Too few rows remain for classification cross-validation.")
+
+    class_to_code = {label: idx for idx, label in enumerate(class_labels)}
+    y = target_text.map(class_to_code).to_numpy(dtype=int)
+    class_codes = np.arange(len(class_labels), dtype=int)
+
+    feature_frame, type_map, removed_empty_features = _prepare_classifier_feature_frame(
+        work_df,
+        predictors,
+    )
+    predictors = [p for p in predictors if p in feature_frame.columns and p not in removed_empty_features]
+    predictors = _unique_preserve_order(predictors)
+    if len(predictors) == 0:
+        raise ValueError("No predictors contain usable values after sentinel/missing filtering.")
+    feature_frame = feature_frame[predictors].copy()
+
+    max_features_i = int(max_features) if int(max_features) > 0 else len(predictors)
+    max_features_i = max(1, min(max_features_i, len(predictors)))
+    strategy = str(search_strategy).strip().lower()
+    if strategy not in {"exhaustive", "beam"}:
+        raise ValueError("search_strategy must be 'exhaustive' or 'beam'.")
+
+    configs = _classification_model_configs(
+        preset=model_preset,
+        model_families=model_families,
+        random_state=random_state,
+    )
+    for cfg in configs:
+        cfg["_params_json"] = json.dumps(cfg["params"], sort_keys=True)
+    config_lookup = {cfg["name"]: cfg for cfg in configs}
+    cv_splits = [
+        (np.asarray(train_idx, dtype=int), np.asarray(test_idx, dtype=int))
+        for train_idx, test_idx in _classifier_cv_splitter(y, cv=cv, random_state=random_state).split(feature_frame, y)
+    ]
+    fold_y_train = [y[train_idx] for train_idx, _ in cv_splits]
+    fold_class_valid = [len(np.unique(y_train)) >= 2 for y_train in fold_y_train]
+    numeric_cv_cache = (
+        _build_numeric_classifier_cv_cache(
+            feature_frame,
+            type_map,
+            cv_splits,
+            normalize_method=normalize_method,
+            y=y,
+            fold_y_train=fold_y_train,
+            fold_class_valid=fold_class_valid,
+        )
+        if bool(fast_numeric)
+        else None
+    )
+
+    if output_dir is not None:
+        outdir = Path(output_dir)
+    elif save and batch_fig_path is not None:
+        outdir = Path(batch_fig_path) / "Modelling" / "Model Sweep" / str(run_label)
+    else:
+        outdir = Path.cwd() / "Modelling" / "Model Sweep" / str(run_label)
+    stats_dir = outdir
+    figures_dir = outdir
+    if save:
+        outdir.mkdir(parents=True, exist_ok=True)
+
+    prefix_list = [_safe_predictor_prefix(p) for p in predictors]
+    subset_estimate = _count_valid_feature_combinations(
+        predictors,
+        max_features_i,
+        repeat_features=bool(repeat_features),
+        prefix_list=prefix_list,
+    )
+    total_estimate = subset_estimate * len(configs)
+    if verbose:
+        _log.status(f"[iterative_model_sweep] Rows: {len(work_df)}")
+        _log.status(
+            "[iterative_model_sweep] Classes: "
+            + ", ".join(f"{label}={int(np.sum(y == code))}" for label, code in class_to_code.items())
+        )
+        _log.status(f"[iterative_model_sweep] Candidate predictors: {len(predictors)}")
+        _log.status(f"[iterative_model_sweep] Search strategy: {strategy}")
+        _log.status(f"[iterative_model_sweep] Subsets estimate: {subset_estimate}")
+        _log.status(f"[iterative_model_sweep] Model configs: {len(configs)}")
+        _log.status(f"[iterative_model_sweep] Total score estimate: {total_estimate}")
+        if int(n_jobs) != 1:
+            _log.status(f"[iterative_model_sweep] Parallel workers: {int(n_jobs)}")
+        if removed_empty_features:
+            _log.hint(
+                "[iterative_model_sweep] Bypassed empty predictors: "
+                + ", ".join(removed_empty_features)
+            )
+
+    resume_signature = {
+        "signature_version": 1,
+        "target": str(target),
+        "class_labels": [str(v) for v in class_labels],
+        "predictors": [str(v) for v in predictors],
+        "data_hash": _classifier_sweep_data_hash(target_text, feature_frame, predictors, target),
+        "max_features": int(max_features_i),
+        "repeat_features": bool(repeat_features),
+        "model_preset": str(model_preset),
+        "configs": [
+            {
+                "family": str(cfg["family"]),
+                "name": str(cfg["name"]),
+                "params_json": str(cfg.get("_params_json") or json.dumps(cfg["params"], sort_keys=True)),
+            }
+            for cfg in configs
+        ],
+        "cv": str(cv),
+        "scoring": str(scoring),
+        "normalize_method": str(normalize_method),
+        "search_strategy": str(strategy),
+        "beam_width": int(beam_width),
+        "random_state": int(random_state),
+        "specificity": repr(specificity),
+        "exclude": repr(exclude),
+    }
+
+    partial_path = stats_dir / "iterative_model_sweep_scores_partial.csv"
+    partial_meta_path = stats_dir / "iterative_model_sweep_scores_partial.meta.json"
+    rows: list[dict[str, Any]] = []
+    completed_keys: set[str] = set()
+    resumed_partial = False
+    if bool(resume) and save and partial_path.exists():
+        meta_matches = False
+        if partial_meta_path.exists():
+            try:
+                prior_signature = json.loads(partial_meta_path.read_text(encoding="utf-8"))
+                meta_matches = prior_signature == resume_signature
+            except Exception:
+                meta_matches = False
+        if meta_matches:
+            partial = pd.read_csv(partial_path)
+            for _, row in partial.iterrows():
+                row_dict = row.to_dict()
+                try:
+                    row_dict["features_tuple"] = tuple(json.loads(row_dict["features_json"]))
+                except Exception:
+                    row_dict["features_tuple"] = tuple(str(row_dict.get("features", "")).split(" + "))
+                key = f"{row_dict.get('model_config')}||{row_dict.get('features')}"
+                completed_keys.add(key)
+                rows.append(row_dict)
+            resumed_partial = True
+            if verbose:
+                _log.status(f"[iterative_model_sweep] Resumed {len(rows)} prior scores.")
+        else:
+            if verbose:
+                _log.hint(
+                    "[iterative_model_sweep] Existing partial checkpoint does not "
+                    "match this run; starting a fresh checkpoint."
+                )
+            for stale_path in [partial_path, partial_meta_path]:
+                try:
+                    stale_path.unlink()
+                except Exception:
+                    pass
+    elif save and partial_path.exists():
+        for stale_path in [partial_path, partial_meta_path]:
+            try:
+                stale_path.unlink()
+            except Exception:
+                pass
+
+    partial_rows_flushed = len(rows) if resumed_partial else 0
+
+    def _write_partial(force: bool = False) -> None:
+        nonlocal partial_rows_flushed
+        if not save or len(rows) <= partial_rows_flushed:
+            return
+        if not force and int(checkpoint_every) > 0:
+            if len(rows) - partial_rows_flushed < int(checkpoint_every):
+                return
+        elif not force and int(checkpoint_every) <= 0:
+            return
+        partial_df = pd.DataFrame(rows[partial_rows_flushed:]).copy()
+        partial_df = partial_df.drop(columns=["features_tuple", "rank", "model_label"], errors="ignore")
+        if not partial_meta_path.exists():
+            partial_meta_path.write_text(
+                json.dumps(resume_signature, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        write_header = not partial_path.exists()
+        partial_df.to_csv(
+            partial_path,
+            mode="a" if partial_path.exists() else "w",
+            header=write_header,
+            index=False,
+            float_format="%.17g",
+        )
+        partial_rows_flushed = len(rows)
+
+    name_to_index = {p: i for i, p in enumerate(predictors)}
+
+    def _passes_repeat_filter(subset_names: Iterable[str]) -> bool:
+        if repeat_features:
+            return True
+        prefixes = [_safe_predictor_prefix(s) for s in subset_names]
+        return len(prefixes) == len(set(prefixes))
+
+    def _prepare_subset_scoring(subset: tuple[str, ...]):
+        subset_list = [str(s) for s in subset]
+        features_text = " + ".join(subset_list)
+        features_json = json.dumps(subset_list)
+        numeric_col_idx = None
+        subset_cv_matrices = None
+        if bool(fast_numeric) and numeric_cv_cache is not None:
+            feature_index = numeric_cv_cache.get("feature_index", {})
+            if all(type_map.get(f) == "numeric" and f in feature_index for f in subset_list):
+                numeric_col_idx = np.asarray([feature_index[f] for f in subset_list], dtype=int)
+                subset_cv_matrices = _slice_numeric_classifier_cv_matrices(
+                    numeric_cv_cache,
+                    numeric_col_idx,
+                )
+                if subset_cv_matrices is not None:
+                    numeric_col_idx = None
+        if subset_cv_matrices is None:
+            subset_cv_matrices = _build_classifier_cv_matrices(
+                feature_frame,
+                type_map,
+                subset_list,
+                cv_splits,
+                normalize_method=normalize_method,
+                y=y,
+                fold_y_train=fold_y_train,
+                fold_class_valid=fold_class_valid,
+            )
+        return subset_list, features_text, features_json, numeric_col_idx, subset_cv_matrices
+
+    def _score_one_model(
+        subset: tuple[str, ...],
+        config: dict[str, Any],
+        prepared=None,
+    ) -> dict[str, Any] | None:
+        if prepared is None:
+            subset_list, features_text, features_json, numeric_col_idx, subset_cv_matrices = (
+                _prepare_subset_scoring(subset)
+            )
+        else:
+            subset_list, features_text, features_json, numeric_col_idx, subset_cv_matrices = prepared
+        metrics = _score_classifier_subset_auto(
+            feature_frame,
+            type_map,
+            y,
+            subset_list,
+            config,
+            class_codes,
+            cv=cv,
+            normalize_method=normalize_method,
+            random_state=random_state,
+            collect_predictions=False,
+            cv_splits=cv_splits,
+            numeric_cv_cache=numeric_cv_cache if subset_cv_matrices is None else None,
+            fast_numeric=bool(fast_numeric) and numeric_col_idx is not None,
+            numeric_col_idx=numeric_col_idx,
+            cv_matrices=subset_cv_matrices,
+            fold_class_valid=fold_class_valid,
+        )
+        if metrics is None:
+            return None
+        return {
+            "family": config["family"],
+            "model_config": config["name"],
+            "params_json": config.get("_params_json") or json.dumps(config["params"], sort_keys=True),
+            "subset_size": len(subset_list),
+            "features": features_text,
+            "features_json": features_json,
+            "features_tuple": tuple(subset_list),
+            **metrics,
+        }
+
+    def _record_scored_rows(scored_rows: list[dict[str, Any] | None], keys: list[str]) -> None:
+        for row, key in zip(scored_rows, keys):
+            completed_keys.add(key)
+            if row is not None:
+                rows.append(row)
+        if int(checkpoint_every) > 0:
+            _write_partial()
+
+    def _progress(done_counter: int) -> None:
+        if verbose and (done_counter % 250 == 0 or done_counter == total_estimate):
+            elapsed = time.time() - start_time
+            rate = done_counter / elapsed if elapsed > 0 else float("nan")
+            _log.status(
+                f"[iterative_model_sweep] Scored {done_counter}/{total_estimate} "
+                f"configs ({rate:.1f}/s, valid={len(rows)})"
+            )
+
+    def _score_subset(subset: tuple[str, ...], done_counter: int) -> int:
+        subset = tuple(str(s) for s in subset)
+        pre_features_text = " + ".join(subset)
+        if all(f"{config['name']}||{pre_features_text}" in completed_keys for config in configs):
+            return done_counter
+        subset_list, features_text, features_json, numeric_col_idx, subset_cv_matrices = (
+            _prepare_subset_scoring(subset)
+        )
+        prepared = (subset_list, features_text, features_json, numeric_col_idx, subset_cv_matrices)
+        for config in configs:
+            key = f"{config['name']}||{features_text}"
+            if key in completed_keys:
+                continue
+            row = _score_one_model(subset, config, prepared=prepared)
+            done_counter += 1
+            _record_scored_rows([row], [key])
+            _progress(done_counter)
+        return done_counter
+
+    def _score_candidate_subsets(candidates: Iterable[tuple[str, ...]], done_counter: int) -> int:
+        n_jobs_i = int(n_jobs)
+        batch_size = max(1, int(parallel_batch_size))
+
+        if n_jobs_i == 1:
+            for subset in candidates:
+                done_counter = _score_subset(tuple(subset), done_counter)
+            return done_counter
+
+        try:
+            from joblib import Parallel, delayed
+        except Exception:
+            if verbose:
+                _log.hint("[iterative_model_sweep] joblib unavailable; falling back to serial scoring.")
+            for subset in candidates:
+                done_counter = _score_subset(tuple(subset), done_counter)
+            return done_counter
+
+        backend_key = str(parallel_backend).strip().lower()
+        if backend_key in {"process", "processes", "loky"}:
+            parallel = Parallel(
+                n_jobs=n_jobs_i,
+                prefer="processes",
+                batch_size="auto",
+            )
+        else:
+            parallel = Parallel(
+                n_jobs=n_jobs_i,
+                prefer="threads",
+                require="sharedmem",
+                batch_size="auto",
+            )
+        pending: list[tuple[tuple[Any, ...], list[dict[str, Any]], list[str]]] = []
+
+        def _score_subset_configs_thread_worker(
+            subset: tuple[str, ...],
+            configs_to_run: list[dict[str, Any]],
+        ) -> list[dict[str, Any]]:
+            prepared = _prepare_subset_scoring(subset)
+            return _score_prepared_subset_configs_worker(
+                prepared,
+                configs_to_run,
+                y,
+                class_codes,
+                fold_class_valid,
+            )
+
+        def _flush_pending() -> None:
+            nonlocal done_counter, pending
+            if len(pending) == 0:
+                return
+            chunk = pending
+            pending = []
+            if backend_key in {"process", "processes", "loky"}:
+                scored = parallel(
+                    delayed(_score_prepared_subset_configs_worker)(
+                        prepared,
+                        configs_to_run,
+                        y,
+                        class_codes,
+                        fold_class_valid,
+                    )
+                    for prepared, configs_to_run, _keys in chunk
+                )
+            else:
+                scored = parallel(
+                    delayed(_score_subset_configs_thread_worker)(subset, configs_to_run)
+                    for subset, configs_to_run, _keys in chunk
+                )
+            done_counter += sum(len(keys) for _prepared, _configs_to_run, keys in chunk)
+            for _prepared, _configs_to_run, keys in chunk:
+                completed_keys.update(keys)
+            for group_rows in scored:
+                rows.extend(group_rows)
+            if int(checkpoint_every) > 0:
+                _write_partial()
+            _progress(done_counter)
+
+        for subset in candidates:
+            subset = tuple(str(s) for s in subset)
+            features_text = " + ".join(subset)
+            configs_to_run = []
+            keys = []
+            for config in configs:
+                key = f"{config['name']}||{features_text}"
+                if key in completed_keys:
+                    continue
+                configs_to_run.append(config)
+                keys.append(key)
+            if len(configs_to_run) == 0:
+                continue
+            if backend_key in {"process", "processes", "loky"}:
+                prepared = _prepare_subset_scoring(subset)
+            else:
+                prepared = subset
+            pending.append((prepared, configs_to_run, keys))
+            if len(pending) >= batch_size:
+                _flush_pending()
+        _flush_pending()
+        return done_counter
+
+    start_time = time.time()
+    done = 0
+    if strategy == "exhaustive":
+        for k in range(1, max_features_i + 1):
+            if verbose:
+                _log.status(f"[iterative_model_sweep] Level {k}: exhaustive scoring")
+            candidates = _iter_valid_feature_combinations_by_size(
+                predictors,
+                k,
+                repeat_features=bool(repeat_features),
+                prefix_list=prefix_list,
+            )
+            done = _score_candidate_subsets(candidates, done)
+    else:
+        beam_w = max(1, int(beam_width))
+        surviving: list[tuple[str, ...]] = []
+        for k in range(1, max_features_i + 1):
+            if k == 1:
+                candidates = [(p,) for p in predictors]
+            else:
+                if len(rows) == 0 or len(surviving) == 0:
+                    break
+                surviving_idx = [
+                    tuple(name_to_index[name] for name in subset if name in name_to_index)
+                    for subset in surviving
+                ]
+                expanded_idx = _beam_expand(
+                    surviving_idx,
+                    len(predictors),
+                    bool(repeat_features),
+                    prefix_list,
+                )
+                candidates = [tuple(predictors[i] for i in idx_tuple) for idx_tuple in expanded_idx]
+
+            if verbose:
+                _log.status(
+                    f"[iterative_model_sweep] Beam level {k}: scoring {len(candidates)} subsets"
+                )
+            done = _score_candidate_subsets((tuple(subset) for subset in candidates), done)
+
+            level_results = pd.DataFrame(rows)
+            if len(level_results) == 0:
+                surviving = []
+                continue
+            level_results = level_results[level_results["subset_size"] == k].copy()
+            if len(level_results) == 0:
+                surviving = []
+                continue
+            level_results = _sort_classifier_results(level_results, scoring)
+            surviving = list(dict.fromkeys(level_results["features_tuple"].tolist()))[:beam_w]
+
+    _write_partial(force=True)
+    if len(rows) == 0:
+        raise RuntimeError("No valid model scores were produced.")
+
+    results = pd.DataFrame(rows)
+    results = _sort_classifier_results(results, scoring)
+    if "rank" in results.columns:
+        results = results.drop(columns=["rank"])
+    results.insert(0, "rank", np.arange(1, len(results) + 1))
+    results["model_label"] = (
+        results["rank"].astype(str)
+        + ". "
+        + results["family"].astype(str)
+        + "\n"
+        + results["features"].astype(str).str.slice(0, 95)
+    )
+
+    top_row = results.iloc[0].copy()
+    best_features = list(top_row["features_tuple"])
+    best_config = config_lookup[str(top_row["model_config"])]
+    best_metrics = _score_classifier_subset_auto(
+        feature_frame,
+        type_map,
+        y,
+        best_features,
+        best_config,
+        class_codes,
+        cv=cv,
+        normalize_method=normalize_method,
+        random_state=random_state,
+        collect_predictions=True,
+        cv_splits=cv_splits,
+        numeric_cv_cache=numeric_cv_cache,
+        fast_numeric=fast_numeric,
+        fold_class_valid=fold_class_valid,
+    )
+    if best_metrics is None:
+        raise RuntimeError("Best model could not be refit for prediction output.")
+
+    from sklearn.base import clone
+    from sklearn.pipeline import Pipeline
+
+    best_estimator = Pipeline([
+        ("preprocess", _build_classifier_preprocessor(type_map, best_features, normalize_method)),
+        ("clf", clone(best_config["estimator"])),
+    ])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        best_estimator.fit(feature_frame[best_features], y)
+
+    pred_codes = np.asarray(best_metrics["prediction_code"], dtype=int)
+    proba = np.asarray(best_metrics["probability"], dtype=float)
+    predictions = pd.DataFrame({
+        "row_index": work_df.index.to_numpy(),
+        "fold": np.asarray(best_metrics["fold"], dtype=int),
+        "actual": [class_labels[int(code)] for code in y],
+        "actual_code": y,
+        "predicted": [class_labels[int(code)] if 0 <= int(code) < len(class_labels) else "" for code in pred_codes],
+        "predicted_code": pred_codes,
+    })
+    for code, label in enumerate(class_labels):
+        predictions[f"prob_{label}"] = proba[:, code]
+
+    feature_stats = _feature_recurrence_summary(results, int(top_n), scoring=scoring)
+    permutation_df = _classifier_sweep_permutation_test(
+        feature_frame,
+        type_map,
+        y,
+        top_row,
+        best_config,
+        class_codes,
+        int(permutations),
+        cv,
+        scoring,
+        normalize_method,
+        int(random_state),
+    )
+
+    output_results = results.drop(columns=["features_tuple", "model_label"], errors="ignore")
+    if save:
+        output_results.to_csv(
+            stats_dir / "iterative_model_sweep_scores.csv",
+            index=False,
+            float_format="%.17g",
+        )
+        output_results.head(max(1, int(top_n))).to_csv(
+            stats_dir / "top_iterative_model_sweep_scores.csv",
+            index=False,
+            float_format="%.17g",
+        )
+        feature_stats.to_csv(
+            stats_dir / "top_feature_recurrence.csv",
+            index=False,
+            float_format="%.17g",
+        )
+        predictions.to_csv(
+            stats_dir / "top_model_predictions.csv",
+            index=False,
+            float_format="%.17g",
+        )
+        permutation_df.to_csv(
+            stats_dir / "top_model_permutation_test.csv",
+            index=False,
+            float_format="%.17g",
+        )
+        manifest = {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "target": str(target),
+            "class_labels": class_labels,
+            "class_counts": {label: int(np.sum(y == code)) for label, code in class_to_code.items()},
+            "predictors": predictors,
+            "removed_empty_features": removed_empty_features,
+            "max_features": int(max_features_i),
+            "subset_estimate": int(subset_estimate),
+            "classifier_config_count": int(len(configs)),
+            "valid_model_scores": int(len(results)),
+            "cv": str(cv),
+            "scoring": str(scoring),
+            "model_preset": str(model_preset),
+            "search_strategy": str(strategy),
+            "beam_width": int(beam_width),
+            "fast_numeric": bool(fast_numeric),
+            "n_jobs": int(n_jobs),
+            "parallel_backend": str(parallel_backend),
+            "parallel_batch_size": int(parallel_batch_size),
+            "best_family": str(top_row["family"]),
+            "best_model_config": str(top_row["model_config"]),
+            "best_features": best_features,
+        }
+        (outdir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        if plot:
+            _plot_classifier_sweep_outputs(
+                results,
+                feature_stats,
+                figures_dir,
+                scoring=scoring,
+                class_count=len(class_labels),
+                dpi=int(dpi),
+            )
+        _write_classifier_sweep_readme(
+            outdir,
+            work_df.assign(**{target: target_text.to_numpy()}),
+            target,
+            predictors,
+            configs,
+            results,
+            permutation_df,
+            class_labels,
+            max_features_i,
+            cv,
+            strategy,
+            model_preset,
+            scoring,
+        )
+
+    if verbose:
+        score_col = "log_loss" if str(scoring).strip() in {"log_loss", "loss"} else str(scoring).strip()
+        if score_col not in top_row.index:
+            score_col = "balanced_accuracy"
+        _log.confirm(
+            "[iterative_model_sweep] Best: "
+            f"{top_row['family']} / {top_row['model_config']} | "
+            f"{score_col}={float(top_row[score_col]):.4g} | "
+            f"features: {' + '.join(best_features)}"
+        )
+        if save:
+            _log.confirm(f"[iterative_model_sweep] Saved outputs to {outdir}")
+
+    result = {
+        "best_family": str(top_row["family"]),
+        "best_model": str(top_row["model_config"]),
+        "best_features": tuple(best_features),
+        "best_score": float(top_row[
+            "log_loss" if str(scoring).strip() in {"log_loss", "loss"} and "log_loss" in top_row.index
+            else scoring if str(scoring).strip() in top_row.index
+            else "balanced_accuracy"
+        ]),
+        "best_metrics": {
+            key: float(top_row[key])
+            for key in ["accuracy", "balanced_accuracy", "macro_f1", "macro_ovr_auc", "log_loss"]
+            if key in top_row.index and pd.notna(top_row[key])
+        },
+        "best_estimator": best_estimator,
+        "class_labels": class_labels,
+        "class_to_code": class_to_code,
+        "feature_type_map": type_map,
+        "predictors": predictors,
+        "removed_empty_features": removed_empty_features,
+        "all_model_scores": results,
+        "top_feature_recurrence": feature_stats,
+        "top_model_predictions": predictions,
+        "top_model_permutation_test": permutation_df,
+        "output_dir": str(outdir) if save else None,
+        "stats_dir": str(stats_dir) if save else None,
+        "figures_dir": str(figures_dir) if save else None,
+        "search_strategy": strategy,
+        "cv": cv,
+        "scoring": scoring,
+        "model_preset": model_preset,
+        "fast_numeric": bool(fast_numeric),
+        "n_jobs": int(n_jobs),
+        "parallel_backend": str(parallel_backend),
+        "parallel_batch_size": int(parallel_batch_size),
+    }
+    if return_details:
+        return result
+    return str(top_row["model_config"]), tuple(best_features)

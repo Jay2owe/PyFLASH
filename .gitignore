@@ -47,3 +47,6 @@ docs/pyflash-ui/
 .runtime/
 scripts/
 docs/
+
+# transient debug traces
+tmp_*.txt

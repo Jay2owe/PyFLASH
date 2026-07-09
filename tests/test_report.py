@@ -160,6 +160,51 @@ def test_build_correlation_record_handles_nan():
     assert rec["r"] is None and rec["p"] is None
 
 
+def test_build_multivariable_regression_record():
+    rec = report.build_multivariable_regression_record(
+        predictor_set="Month",
+        predictors=["month_sin", "month_cos"],
+        y="AB42",
+        group="Combined",
+        n=24,
+        r2=0.71,
+        adj_r2=0.68,
+        f=12.3,
+        p=0.0008,
+        q=0.002,
+        df_model=2,
+        df_resid=21,
+        coefficients={"Intercept": 1.0, "month_sin": 0.5, "month_cos": -0.2},
+    )
+    assert rec["kind"] == "multivariable_regression"
+    assert rec["predictor_set"] == "Month"
+    assert rec["predictors"] == ["month_sin", "month_cos"]
+    assert rec["r2"] == pytest.approx(0.71)
+    assert rec["q"] == pytest.approx(0.002)
+    assert "AB42 ~ Month" in rec["headline"]
+
+
+def test_build_linear_model_record():
+    rec = report.build_linear_model_record(
+        dependent_variable="Totalcounts",
+        formula="Totalcounts ~ Diagnosis + Age + Sex",
+        group="Diagnosis",
+        predictors=["Diagnosis", "Age", "Sex"],
+        n=42,
+        r2=0.62,
+        adj_r2=0.58,
+        f=9.1,
+        p=0.004,
+        coefficients={"Age": {"estimate": 1.2, "p": 0.01}},
+        adjusted_means={"AD": {"adjusted_mean": 180.0, "ci_low": 170.0, "ci_high": 190.0}},
+    )
+    assert rec["kind"] == "linear_model"
+    assert rec["dependent_variable"] == "Totalcounts"
+    assert rec["group"] == "Diagnosis"
+    assert rec["adjusted_means"]["AD"]["adjusted_mean"] == pytest.approx(180.0)
+    assert "Totalcounts by Diagnosis" in rec["headline"]
+
+
 # ── summarize_return ────────────────────────────────────────────────────────────
 def test_summarize_return_none_for_figure_like():
     import matplotlib

@@ -2,9 +2,10 @@
 Shared run-folder / manifest I/O for the analysis pipelines.
 
 Every pipeline (``correlation``, ``adjusted_correlation``, ``data_overview``)
-writes into a versioned run folder under ``Python Figures/<Pipeline Name>/`` and
-``Data and Stats/<Pipeline Name>/``, with a ``manifest.json`` per run and a shared
-``_runs_index.csv``. That plumbing used to be triplicated (one ``run_dirs`` /
+writes into a versioned run folder under ``Python Figures/<Pipeline Name>/``.
+Figures, generated CSVs, ``manifest.json``, and the shared ``_runs_index.csv``
+live under that same pipeline folder so each run's plot files and data files stay
+together. That plumbing used to be triplicated (one ``run_dirs`` /
 ``slug`` / ``append_runs_index`` per pipeline, each hardcoding its folder name and
 one of them silently missing). This module is the single, pipeline-name-parameterised
 implementation; the pipeline modules pass their folder name and a payload/row.
@@ -88,11 +89,19 @@ def read_json(path):
 
 # ── run-folder resolution ────────────────────────────────────────────────────
 def data_root(experiment):
-    """Resolve the 'Data and Stats' root for pipeline tables."""
+    """Resolve the root for generated pipeline tables.
+
+    Prefer the figure root so CSVs and manifests are co-located with their SVGs.
+    ``data_path`` is only a fallback for lightweight callers that have no
+    ``fig_path``.
+    """
+    fig_path = getattr(experiment, "fig_path", None)
+    if fig_path:
+        return fig_path
     data_path = getattr(experiment, "data_path", None)
     if data_path:
         return data_path
-    return os.path.join(os.path.dirname(experiment.fig_path), "Data and Stats")
+    return "."
 
 
 def run_dirs(experiment, pipeline_name, run_label, if_exists, *, clear_overwrite=True):
@@ -104,13 +113,21 @@ def run_dirs(experiment, pipeline_name, run_label, if_exists, *, clear_overwrite
     output is kept, ``'error'`` raises, ``'skip'`` returns ``reuse_existing=True``
     so the caller can return the cached manifest without recomputing.
     """
-    base_fig = os.path.join(experiment.fig_path, pipeline_name)
-    base_data = os.path.join(data_root(experiment), pipeline_name)
+    root = data_root(experiment)
+    base_fig = os.path.join(root, pipeline_name)
+    base_data = base_fig
     policy = str(if_exists).strip().lower()
     if policy not in VALID_IF_EXISTS:
         raise ValueError(
             "if_exists must be 'overwrite', 'version', 'error', or 'skip'; "
             f"got {if_exists!r}.")
+
+    legacy_base_data = getattr(experiment, "data_path", None)
+    legacy_base = (
+        os.path.join(legacy_base_data, pipeline_name)
+        if legacy_base_data and os.path.abspath(legacy_base_data) != os.path.abspath(root)
+        else None
+    )
 
     def _dirs(lbl):
         safe = strip_name(str(lbl))
@@ -118,14 +135,24 @@ def run_dirs(experiment, pipeline_name, run_label, if_exists, *, clear_overwrite
             raise ValueError("run_label must resolve to a non-empty folder name.")
         return os.path.join(base_fig, safe), os.path.join(base_data, safe)
 
+    def _legacy_dir(lbl):
+        if legacy_base is None:
+            return None
+        safe = strip_name(str(lbl))
+        return os.path.join(legacy_base, safe) if safe else None
+
     fig_dir, data_dir = _dirs(run_label)
+    legacy_dir = _legacy_dir(run_label)
     exists = isdir(fig_dir) or isdir(data_dir)
-    if not exists:
+    legacy_exists = legacy_dir is not None and isdir(legacy_dir)
+    if not exists and not (policy == "overwrite" and legacy_exists):
         return fig_dir, data_dir, run_label, False
     if policy == "overwrite":
         if clear_overwrite:
             clear_run_dir(fig_dir, base_fig)
             clear_run_dir(data_dir, base_data)
+            if legacy_dir is not None:
+                clear_run_dir(legacy_dir, legacy_base)
         return fig_dir, data_dir, run_label, False
     if policy == "skip":
         return fig_dir, data_dir, run_label, True

@@ -792,3 +792,498 @@ def flag_outliers(df, columns, *, group_labels=None, methods=("rout",),
                     "rout_rsdr": float(rout_rsdr) if np.isfinite(rout_rsdr) else np.nan,
                 })
     return pd.DataFrame(rows, columns=out_cols)
+
+
+# ── Cosinor / rhythm analysis ────────────────────────────────────────
+# A single-component cosinor is the periodic sibling of ``fit_growth_curve``:
+# y = MESOR + amplitude * cos(2*pi/period * (t - acrophase)). It is period-generic
+# — period=24 for a daily rhythm, 12 for a circannual (seasonal) one, or fitted
+# freely for a free-running tau. Rhythm presence is the zero-amplitude F-test.
+def fit_cosinor(t, y, period=24.0, period_free=False, free_bounds=None):
+    """Fit a single-component cosinor to ``(t, y)``; return rhythm parameters.
+
+    ``y = MESOR + amplitude * cos(2*pi/period * (t - acrophase))``. With
+    ``period_free=True`` the period is fitted too (``free_bounds=(lo, hi)`` in the
+    same units as ``t``; defaults to roughly 2/3..3/2 of ``period``). Mirrors the
+    return shape of :func:`fit_growth_curve`.
+
+    Returns ``{model, period, mesor, amplitude, acrophase, coef_cos, coef_sin,
+    params:{name:{value,stderr}}, r_squared, f_stat, p, p_rhythm, n, predict}``.
+    ``acrophase`` is the peak time in the units of ``t`` (0..period). ``p`` is the
+    zero-amplitude test for rhythmicity. Raises on < 4 finite points.
+    """
+    t = np.asarray(t, float)
+    y = np.asarray(y, float)
+    ok = np.isfinite(t) & np.isfinite(y)
+    t, y = t[ok], y[ok]
+    n = len(t)
+    if n < 4:
+        raise ValueError("Need >= 4 finite (t, y) points to fit a cosinor.")
+    if period_free:
+        return _fit_cosinor_free(t, y, float(period), free_bounds)
+
+    period = float(period)
+    if period <= 0:
+        raise ValueError("period must be > 0.")
+    w = 2.0 * np.pi / period
+    X = np.column_stack([np.ones(n), np.cos(w * t), np.sin(w * t)])
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    M, b, g = (float(v) for v in beta)
+    amp = float(np.hypot(b, g))
+    acro = float((np.arctan2(g, b) / w) % period)
+    yhat = X @ beta
+    resid = y - yhat
+    ss_res = float(resid @ resid)
+    ss_tot = float(((y - y.mean()) ** 2).sum())
+    ss_mod = ss_tot - ss_res
+    r2 = ss_mod / ss_tot if ss_tot > 0 else float("nan")
+    dof_res = n - 3
+
+    if dof_res > 0 and ss_res > 0:
+        F = (ss_mod / 2.0) / (ss_res / dof_res)
+        p = float(_sps.f.sf(F, 2, dof_res))
+        sigma2 = ss_res / dof_res
+        try:
+            cov = sigma2 * np.linalg.inv(X.T @ X)
+        except np.linalg.LinAlgError:
+            cov = np.full((3, 3), np.nan)
+    else:
+        F = p = float("nan")
+        cov = np.full((3, 3), np.nan)
+
+    se_M = float(np.sqrt(cov[0, 0])) if np.isfinite(cov[0, 0]) else float("nan")
+    se_amp = se_acro = float("nan")
+    if amp > 0 and np.all(np.isfinite(cov[1:, 1:])):
+        gb, gg = b / amp, g / amp                      # d amp / d(b,g)
+        var_amp = gb * gb * cov[1, 1] + gg * gg * cov[2, 2] + 2 * gb * gg * cov[1, 2]
+        se_amp = float(np.sqrt(var_amp)) if var_amp >= 0 else float("nan")
+        da_b, da_g = -g / (amp * amp), b / (amp * amp)  # d acrophase(rad) / d(b,g)
+        var_acr = da_b * da_b * cov[1, 1] + da_g * da_g * cov[2, 2] + 2 * da_b * da_g * cov[1, 2]
+        se_acro = float(np.sqrt(var_acr) / w) if var_acr >= 0 else float("nan")
+
+    def predict(tt):
+        tt = np.asarray(tt, float)
+        return M + b * np.cos(w * tt) + g * np.sin(w * tt)
+
+    return {
+        "model": "cosinor", "period": period,
+        "mesor": M, "amplitude": amp, "acrophase": acro,
+        "coef_cos": b, "coef_sin": g,
+        "params": {
+            "mesor": {"value": M, "stderr": se_M},
+            "amplitude": {"value": amp, "stderr": se_amp},
+            "acrophase": {"value": acro, "stderr": se_acro},
+        },
+        "r_squared": float(r2), "f_stat": float(F),
+        "p": float(p), "p_rhythm": float(p), "n": int(n), "predict": predict,
+    }
+
+
+def _fit_cosinor_free(t, y, period0, free_bounds=None):
+    """Cosinor with the period fitted (free-running tau). Helper for fit_cosinor.
+
+    Note: the returned ``p`` is an omnibus F(3, n-4) over {amplitude, phase,
+    period} vs the mean model, NOT the exact zero-amplitude test — under H0
+    (amplitude = 0) the period is unidentified (Davies' problem), so it is
+    approximate and mildly anticonservative. Use the fixed-period fit for an exact
+    rhythmicity p; the free-period path is for exploratory tau estimation.
+    """
+    from scipy.optimize import curve_fit
+
+    n = len(t)
+    lo, hi = free_bounds if free_bounds else (period0 * 2.0 / 3.0, period0 * 1.5)
+
+    def model(tt, M, amp, phi, per):
+        return M + amp * np.cos(2.0 * np.pi / per * (tt - phi))
+
+    ymin, ymax = float(y.min()), float(y.max())
+    p0 = [float(y.mean()), max((ymax - ymin) / 2.0, 1e-6), period0 / 2.0, period0]
+    try:
+        popt, pcov = curve_fit(
+            model, t, y, p0=p0,
+            bounds=([-np.inf, 0.0, -np.inf, lo], [np.inf, np.inf, np.inf, hi]),
+            maxfev=20000)
+    except Exception as exc:
+        raise ValueError(f"free-period cosinor fit failed: {exc}")
+    M, amp, phi, per = (float(v) for v in popt)
+    acro = float(phi % per)
+    yhat = model(t, *popt)
+    ss_res = float(((y - yhat) ** 2).sum())
+    ss_tot = float(((y - y.mean()) ** 2).sum())
+    r2 = (ss_tot - ss_res) / ss_tot if ss_tot > 0 else float("nan")
+    dof_res = n - 4
+    if dof_res > 0 and ss_res > 0:
+        F = ((ss_tot - ss_res) / 3.0) / (ss_res / dof_res)
+        p = float(_sps.f.sf(F, 3, dof_res))
+    else:
+        F = p = float("nan")
+    se = np.sqrt(np.diag(pcov)) if np.all(np.isfinite(pcov)) else np.full(4, np.nan)
+    w = 2.0 * np.pi / per
+
+    def predict(tt):
+        return model(np.asarray(tt, float), *popt)
+
+    return {
+        "model": "cosinor_free", "period": per,
+        "mesor": M, "amplitude": amp, "acrophase": acro,
+        "coef_cos": float(amp * np.cos(w * acro)), "coef_sin": float(amp * np.sin(w * acro)),
+        "params": {
+            "mesor": {"value": M, "stderr": float(se[0])},
+            "amplitude": {"value": amp, "stderr": float(se[1])},
+            "acrophase": {"value": acro, "stderr": float(se[2])},
+            "period": {"value": per, "stderr": float(se[3])},
+        },
+        "r_squared": float(r2), "f_stat": float(F),
+        "p": float(p), "p_rhythm": float(p), "n": int(n), "predict": predict,
+    }
+
+
+def cosinor_table(df, time_col, value_col, group_col=None, animal_col=None,
+                  period=24.0, period_free=False, method="pooled", time_map=None):
+    """Per-group cosinor parameters as a tidy DataFrame (one row per group).
+
+    ``method`` controls how repeated measures (a subject sampled at many times)
+    are handled:
+
+    - ``'pooled'`` (default): fit one cosinor to all rows of the group. Correct for
+      a between-subject design (each subject one timepoint), the usual terminal-IF
+      or cross-sectional human layout.
+    - ``'population_mean'``: fit each subject's own cosinor (needs ``animal_col``
+      and >= 4 timepoints per subject), then average the coefficients; rhythmicity
+      is a Hotelling T^2 that the mean (cos, sin) vector differs from zero (Bingham).
+    - ``'mixed'``: a linear mixed model ``value ~ cos + sin`` with a random
+      intercept per subject (``statsmodels`` MixedLM); rhythmicity is a joint Wald
+      test that both harmonic coefficients are zero.
+
+    Returns columns ``group, n, method, mesor, amplitude, acrophase, period,
+    r_squared, p_rhythm`` (+ ``amplitude_se, acrophase_se`` where available,
+    ``error`` when a group could not be fit). ``time_map`` maps categorical time
+    labels to numbers (e.g. ``{'ZT0': 0, 'ZT6': 6}``); trailing digits are used
+    otherwise (so ``'ZT0'`` -> 0).
+    """
+    work = df.copy()
+    work["_t"] = _resolve_numeric_time(work[time_col], time_map)
+    work["_v"] = pd.to_numeric(work[value_col], errors="coerce")
+    work = work.dropna(subset=["_t", "_v"])
+
+    if group_col and group_col in work.columns:
+        work["_grp"] = work[group_col].astype(str)
+    else:
+        work["_grp"] = "all"
+    keys = list(dict.fromkeys(work["_grp"]))
+
+    rows = []
+    for g in keys:
+        sub = work[work["_grp"] == g]
+        rec = {"group": g, "n": int(len(sub)), "method": method,
+               "mesor": np.nan, "amplitude": np.nan, "acrophase": np.nan,
+               "period": float(period), "r_squared": np.nan, "p_rhythm": np.nan,
+               "amplitude_se": np.nan, "acrophase_se": np.nan, "error": None}
+        try:
+            use = method
+            if method in ("population_mean", "mixed") and (
+                    not animal_col or animal_col not in sub.columns):
+                use = "pooled"
+                rec["method"] = "pooled (no animal_col)"
+            if use == "pooled":
+                fit = fit_cosinor(sub["_t"].to_numpy(), sub["_v"].to_numpy(),
+                                  period, period_free)
+                rec.update(mesor=fit["mesor"], amplitude=fit["amplitude"],
+                           acrophase=fit["acrophase"], period=fit["period"],
+                           r_squared=fit["r_squared"], p_rhythm=fit["p"],
+                           amplitude_se=fit["params"]["amplitude"]["stderr"],
+                           acrophase_se=fit["params"]["acrophase"]["stderr"])
+            elif use == "population_mean":
+                rec.update(_population_mean_cosinor(sub, animal_col, period, period_free))
+            elif use == "mixed":
+                rec.update(_mixed_cosinor(sub, animal_col, period))
+            else:
+                raise ValueError(f"unknown method {method!r}")
+        except Exception as exc:
+            rec["error"] = str(exc)
+        rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def _population_mean_cosinor(sub, animal_col, period, period_free):
+    """Per-subject cosinor fits averaged; Hotelling T^2 rhythmicity (Bingham 1982)."""
+    coefs = []
+    for _, a in sub.groupby(animal_col):
+        if len(a) < 4:
+            continue
+        try:
+            f = fit_cosinor(a["_t"].to_numpy(), a["_v"].to_numpy(), period, period_free)
+            coefs.append((f["mesor"], f["coef_cos"], f["coef_sin"]))
+        except Exception:
+            continue
+    m = len(coefs)
+    if m < 2:
+        raise ValueError("population_mean needs >= 2 subjects with >= 4 timepoints each")
+    arr = np.asarray(coefs, float)
+    mesor = float(arr[:, 0].mean())
+    bg = arr[:, 1:]
+    mean_bg = bg.mean(axis=0)
+    b, g = float(mean_bg[0]), float(mean_bg[1])
+    amp = float(np.hypot(b, g))
+    w = 2.0 * np.pi / period
+    acro = float((np.arctan2(g, b) / w) % period)
+    p = np.nan
+    if m > 2:
+        S = np.cov(bg, rowvar=False)
+        try:
+            T2 = m * mean_bg @ np.linalg.inv(S) @ mean_bg
+            F = (m - 2) / (2.0 * (m - 1)) * T2
+            p = float(_sps.f.sf(F, 2, m - 2))
+        except np.linalg.LinAlgError:
+            p = np.nan
+    amp_se = float(np.hypot(*bg.std(axis=0, ddof=1)) / np.sqrt(m)) if m > 1 else np.nan
+    return {"mesor": mesor, "amplitude": amp, "acrophase": acro, "period": float(period),
+            "r_squared": np.nan, "p_rhythm": p, "amplitude_se": amp_se,
+            "acrophase_se": np.nan, "n_subjects": m}
+
+
+def _mixed_cosinor(sub, animal_col, period):
+    """Mixed-effects cosinor: random intercept per subject; joint Wald rhythmicity."""
+    import statsmodels.formula.api as smf
+
+    w = 2.0 * np.pi / period
+    d = pd.DataFrame({
+        "_v": sub["_v"].to_numpy(float),
+        "_cos": np.cos(w * sub["_t"].to_numpy(float)),
+        "_sin": np.sin(w * sub["_t"].to_numpy(float)),
+        "_g": sub[animal_col].astype(str).to_numpy(),
+    })
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        fit = smf.mixedlm("_v ~ _cos + _sin", d, groups=d["_g"]).fit(
+            reml=False, method="lbfgs")
+    b = float(fit.fe_params.get("_cos", np.nan))
+    g = float(fit.fe_params.get("_sin", np.nan))
+    mesor = float(fit.fe_params.get("Intercept", np.nan))
+    amp = float(np.hypot(b, g))
+    acro = float((np.arctan2(g, b) / w) % period)
+    try:
+        wald = fit.wald_test("_cos = 0, _sin = 0", scalar=True)
+        p = float(np.asarray(wald.pvalue).item())
+    except Exception:
+        p = np.nan
+    return {"mesor": mesor, "amplitude": amp, "acrophase": acro, "period": float(period),
+            "r_squared": np.nan, "p_rhythm": p, "amplitude_se": np.nan,
+            "acrophase_se": np.nan}
+
+
+def cosinor_group_test(df, time_col, value_col, group_col, period=24.0, time_map=None):
+    """Test whether rhythm parameters (amplitude/acrophase) differ between groups.
+
+    An F-test comparing a **full** model (a separate cos/sin pair per group, i.e.
+    group-specific rhythms) against a **reduced** model (one common cos/sin shared
+    by all groups), each allowing a group-specific MESOR. A significant result
+    means at least one group's rhythm (amplitude and/or acrophase) differs. Returns
+    ``{F, p, df1, df2, n, groups}`` (``p`` is ``nan`` when the design is degenerate).
+    """
+    work = df.copy()
+    work["_t"] = _resolve_numeric_time(work[time_col], time_map)
+    work["_v"] = pd.to_numeric(work[value_col], errors="coerce")
+    work["_g"] = work[group_col].astype(str)
+    work = work.dropna(subset=["_t", "_v"])
+    groups = list(dict.fromkeys(work["_g"]))
+    k = len(groups)
+    n = len(work)
+    if k < 2 or n < (3 * k + 1):
+        return {"F": float("nan"), "p": float("nan"), "df1": 0, "df2": 0,
+                "n": int(n), "groups": groups}
+
+    w = 2.0 * np.pi / period
+    cos = np.cos(w * work["_t"].to_numpy(float))
+    sin = np.sin(w * work["_t"].to_numpy(float))
+    D = pd.get_dummies(work["_g"], prefix="g").to_numpy(float)   # per-group mesor
+    y = work["_v"].to_numpy(float)
+
+    X_red = np.column_stack([D, cos, sin])                       # common rhythm
+    X_full = np.column_stack([D, D * cos[:, None], D * sin[:, None]])  # per-group rhythm
+
+    def _rss(X):
+        beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+        r = y - X @ beta
+        return float(r @ r), np.linalg.matrix_rank(X)
+
+    rss_r, p_r = _rss(X_red)
+    rss_f, p_f = _rss(X_full)
+    df1 = p_f - p_r
+    df2 = n - p_f
+    if df1 <= 0 or df2 <= 0 or rss_f <= 0:
+        return {"F": float("nan"), "p": float("nan"), "df1": int(max(df1, 0)),
+                "df2": int(max(df2, 0)), "n": int(n), "groups": groups}
+    # Clamp the numerator: the full model is nested and cannot fit worse, so a
+    # negative (rss_r - rss_f) is float noise on a near-perfect/constant fit.
+    F = (max(rss_r - rss_f, 0.0) / df1) / (rss_f / df2)
+    p = float(_sps.f.sf(F, df1, df2))
+    return {"F": float(F), "p": p, "df1": int(df1), "df2": int(df2),
+            "n": int(n), "groups": groups}
+
+
+# ── Circular statistics ──────────────────────────────────────────────
+# Acrophase, activity onset, and L5/M10 start times are clock times: they live on
+# a circle, so an ordinary mean or t-test is wrong (23:30 and 00:30 are 1 h apart,
+# not 23). These treat a set of times (in the units of ``period``, e.g. hours on a
+# 24 h clock, or months on a 12-month year) as angles.
+def _circ_angles(values, period):
+    v = np.asarray([float(x) for x in values], float)
+    v = v[np.isfinite(v)]
+    return v * (2.0 * np.pi / float(period)), v
+
+
+def circular_stats(values, period=24.0):
+    """Descriptive circular statistics for a set of times on a ``period`` cycle.
+
+    Returns ``{n, mean, r, rayleigh_z, rayleigh_p}`` — the mean time (in the units
+    of ``period``), the mean resultant length ``r`` in [0, 1] (1 = perfectly
+    concentrated, 0 = uniform), and the Rayleigh test that the times are NOT
+    uniformly distributed (i.e. that a preferred phase exists).
+    """
+    ang, _v = _circ_angles(values, period)
+    n = len(ang)
+    if n == 0:
+        return {"n": 0, "mean": float("nan"), "r": float("nan"),
+                "rayleigh_z": float("nan"), "rayleigh_p": float("nan")}
+    C, S = float(np.cos(ang).mean()), float(np.sin(ang).mean())
+    R = float(np.hypot(C, S))
+    mean_ang = float(np.arctan2(S, C))
+    mean = float((mean_ang % (2.0 * np.pi)) / (2.0 * np.pi) * period)
+    Z = n * R * R
+    p = float(np.exp(-Z) * (1 + (2 * Z - Z * Z) / (4 * n)
+              - (24 * Z - 132 * Z ** 2 + 76 * Z ** 3 - 9 * Z ** 4) / (288 * n * n)))
+    return {"n": int(n), "mean": mean, "r": R, "rayleigh_z": float(Z),
+            "rayleigh_p": float(min(max(p, 0.0), 1.0))}
+
+
+def rayleigh_test(values, period=24.0):
+    """Rayleigh test for a non-uniform (clustered) distribution of circular times.
+
+    Returns ``{n, r, z, p, mean}``. Small ``p`` means the times cluster around a
+    preferred phase rather than being spread around the whole cycle.
+    """
+    s = circular_stats(values, period)
+    return {"n": s["n"], "r": s["r"], "z": s["rayleigh_z"],
+            "p": s["rayleigh_p"], "mean": s["mean"]}
+
+
+def _a1inv(r):
+    """Inverse of the ratio of Bessel functions I1/I0 — the von Mises MLE for kappa."""
+    if r >= 1.0:
+        return float("inf")     # fully concentrated -> infinite concentration
+    if r < 0.53:
+        return 2 * r + r ** 3 + 5 * r ** 5 / 6.0
+    if r < 0.85:
+        return -0.4 + 1.39 * r + 0.43 / (1 - r)
+    return 1.0 / (r ** 3 - 4 * r ** 2 + 3 * r)
+
+
+def watson_williams(groups, period=24.0):
+    """Watson-Williams k-sample test for equal circular means (a circular ANOVA).
+
+    ``groups`` is a list of arrays of times (in the units of ``period``). Tests
+    whether the mean phase is the same across groups — the circular analogue of a
+    one-way ANOVA on acrophase. Assumes reasonably concentrated, similar-spread
+    von Mises data; a concentration correction (Mardia) is applied. Returns
+    ``{F, p, df1, df2, k, n, means, R}``.
+    """
+    angs = []
+    for g in groups:
+        a, _v = _circ_angles(g, period)
+        if len(a):
+            angs.append(a)
+    k = len(angs)
+    N = int(sum(len(a) for a in angs))
+    if k < 2 or N <= k:
+        return {"F": float("nan"), "p": float("nan"), "df1": 0, "df2": 0,
+                "k": k, "n": N, "means": [], "R": float("nan")}
+
+    def _resultant(a):
+        return float(np.hypot(np.cos(a).sum(), np.sin(a).sum()))
+
+    Rj = [_resultant(a) for a in angs]
+    all_a = np.concatenate(angs)
+    R = _resultant(all_a)
+    rw = sum(Rj) / N
+    kappa = _a1inv(rw) if 0 < rw < 1 else np.inf
+    corr = 1.0 + 3.0 / (8.0 * kappa) if np.isfinite(kappa) and kappa > 0 else 1.0
+    denom = (N - sum(Rj))
+    if denom <= 0:
+        return {"F": float("nan"), "p": float("nan"), "df1": k - 1, "df2": N - k,
+                "k": k, "n": N, "means": [], "R": R}
+    F = corr * (N - k) / (k - 1) * (sum(Rj) - R) / denom
+    p = float(_sps.f.sf(F, k - 1, N - k))
+    means = [float((np.arctan2(np.sin(a).mean(), np.cos(a).mean()) % (2 * np.pi))
+                   / (2 * np.pi) * period) for a in angs]
+    return {"F": float(F), "p": p, "df1": int(k - 1), "df2": int(N - k),
+            "k": int(k), "n": int(N), "means": means, "R": float(R)}
+
+
+def circular_linear_corr(theta_values, x, period=24.0):
+    """Circular-linear correlation between a circular time and a linear variable.
+
+    Quantifies association between a clock time (``theta_values`` on a ``period``
+    cycle) and a continuous variable ``x`` (e.g. acrophase vs age, or activity
+    amplitude vs recording month). Returns ``{r, r_squared, p, n}`` where ``r`` is
+    the circular-linear correlation coefficient and ``p`` its F-test.
+    """
+    theta = np.asarray([float(v) for v in theta_values], float)
+    x = np.asarray([float(v) for v in x], float)
+    ok = np.isfinite(theta) & np.isfinite(x)
+    theta, x = theta[ok], x[ok]
+    n = len(x)
+    if n < 4:
+        return {"r": float("nan"), "r_squared": float("nan"), "p": float("nan"), "n": int(n)}
+    ang = theta * (2.0 * np.pi / float(period))
+    c, s = np.cos(ang), np.sin(ang)
+    if x.std() == 0 or c.std() == 0 or s.std() == 0:
+        return {"r": float("nan"), "r_squared": float("nan"), "p": float("nan"), "n": int(n)}
+    rxc = float(np.corrcoef(x, c)[0, 1])
+    rxs = float(np.corrcoef(x, s)[0, 1])
+    rcs = float(np.corrcoef(c, s)[0, 1])
+    denom = 1.0 - rcs * rcs
+    if abs(denom) < 1e-12:
+        return {"r": float("nan"), "r_squared": float("nan"), "p": float("nan"), "n": int(n)}
+    R2 = (rxc * rxc + rxs * rxs - 2 * rxc * rxs * rcs) / denom
+    R2 = float(min(max(R2, 0.0), 1.0))
+    if n > 3 and R2 < 1.0:
+        F = (n - 3) / 2.0 * R2 / (1.0 - R2)
+        p = float(_sps.f.sf(F, 2, n - 3))
+    else:
+        p = float("nan")
+    return {"r": float(np.sqrt(R2)), "r_squared": R2, "p": p, "n": int(n)}
+
+
+def circular_dispersion_test(groups, period=24.0):
+    """Wallraff test for equal circular dispersion (phase *spread*) across groups.
+
+    The circular analogue of Levene's test — it asks whether the angular scatter
+    around each group's own mean differs between groups, independent of where those
+    means sit (Watson-Williams tests the means; this tests the spread). Each
+    observation is reduced to its absolute angular deviation from its group mean,
+    then a Kruskal-Wallis is run on those deviations (Wallraff 1979). Returns
+    ``{statistic, p, k, n, dispersions}`` where ``dispersions`` is each group's mean
+    angular deviation in the units of ``period`` (larger = more scattered phases).
+    """
+    dev_lists, disp = [], []
+    for g in groups:
+        a, _v = _circ_angles(g, period)
+        if len(a) < 2:
+            continue
+        mean_ang = np.arctan2(np.sin(a).mean(), np.cos(a).mean())
+        d = np.abs(np.angle(np.exp(1j * (a - mean_ang))))   # |deviation| in [0, pi]
+        dev_lists.append(d)
+        disp.append(float(d.mean() / (2 * np.pi) * period))
+    k = len(dev_lists)
+    n = int(sum(len(d) for d in dev_lists))
+    if k < 2:
+        return {"statistic": float("nan"), "p": float("nan"), "k": k, "n": n,
+                "dispersions": disp}
+    try:
+        h = _sps.kruskal(*dev_lists)
+        stat, p = float(h.statistic), float(h.pvalue)
+    except ValueError:
+        stat, p = float("nan"), float("nan")
+    return {"statistic": stat, "p": p, "k": int(k), "n": n, "dispersions": disp}

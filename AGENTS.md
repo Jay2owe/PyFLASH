@@ -39,6 +39,24 @@ Keep the registry in the package and the runner dumb; new `plot_*` functions are
 moment they exist, no runner edit.
 Registered pipeline callables are supported the same way through `PLOT_REGISTRY`.
 
+## Figure/SVG Output Rule
+
+Keep SVG text editable. PyFLASH-generated Matplotlib SVGs must emit labels,
+tick text, legends, p-value annotations, and matrix cell annotations as real
+`<text>` elements, not glyph paths. Prefer `PyFLASH.utils.save_fig` or call
+`PyFLASH.utils.rc_params()` before plotting. In one-off/custom agent scripts
+that call `fig.savefig(... ".svg")` directly, set this before creating or
+saving figures:
+
+```python
+import matplotlib
+matplotlib.rcParams["svg.fonttype"] = "none"
+matplotlib.rcParams["mathtext.default"] = "regular"
+```
+
+Do not convert SVG text to paths unless the user explicitly asks for outlined
+text.
+
 ## Before Broad Search: Query The Knowledge Graph
 
 A local graphify knowledge graph of the Python package and tests lives at

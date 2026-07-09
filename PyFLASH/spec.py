@@ -37,6 +37,7 @@ PLOT_REGISTRY = {
     'images': 'plot_images',
     'representative_images': 'plot_representative_images',
     'rect_matrices': 'plot_rect_matrices',
+    'multivariable_regression_matrix': 'plot_multivariable_regression_matrix',
     'coloc_upset': 'plot_coloc_upset',
     'coloc_sankey': 'plot_coloc_sankey',
     'power_curve': 'plot_power_curve',
@@ -45,10 +46,14 @@ PLOT_REGISTRY = {
     'superplot': 'plot_superplot',
     'effect_forest': 'plot_effect_forest',
     'group_matrix': 'plot_group_matrix',
+    'cosinor': 'plot_cosinor',
+    'acrophase_clock': 'plot_acrophase_clock',
     'correlation_pipeline': 'PyFLASH.pipeline.correlation',
     'adjusted_correlation_pipeline': 'PyFLASH.pipeline.adjusted_correlation',
     'data_overview_pipeline': 'PyFLASH.pipeline.data_overview',
     'group_comparison_pipeline': 'PyFLASH.pipeline.group_comparison',
+    'linear_model_pipeline': 'PyFLASH.pipeline.linear_model',
+    'rhythm_pipeline': 'PyFLASH.pipeline.rhythm',
 }
 
 # ── Describe-layer coverage (the structured-results / "describe" feature) ────
@@ -75,9 +80,16 @@ PLOT_REGISTRY = {
 DESCRIBE_COVERED = {
     'mean_bars',
     'regressions',
+    'multivariable_regression_matrix',
     'correlation_pipeline',
     'adjusted_correlation_pipeline',
     'group_comparison_pipeline',
+    'linear_model_pipeline',
+    # Rhythm module: cosinor fits and circular tests emit structured records via
+    # report.emit (plots) and the pipeline return manifest.
+    'cosinor',
+    'acrophase_clock',
+    'rhythm_pipeline',
 }
 DESCRIBE_EXEMPT = {
     'condition_key', 'images', 'representative_images', 'locations',

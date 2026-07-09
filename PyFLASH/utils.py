@@ -957,7 +957,10 @@ def rc_params(line_width=2, tick_major_width=2, tick_major_size=11,
         'legend.title_fontsize': legend_fontsize,
         'font.weight': font_weight,
         'font.family': font_family,
+        # Keep SVG text editable (real <text>, not glyph paths) and render any
+        # mathtext ($…$) in the house body font rather than DejaVu-oblique.
         'svg.fonttype': 'none',
+        'mathtext.default': 'regular',
     })
 
 
@@ -1017,7 +1020,6 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
     image_name = strip_name(image_name)
     if subfolder is not None:
         save_path = os.path.join(save_path, subfolder)
-        os.makedirs(_windows_extended_path(save_path), exist_ok=True)
 
     ext = ".svg"
     full_path = os.path.join(save_path, f"{image_name}{ext}")
@@ -1044,6 +1046,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         _notify_fig_save_observers(figure, full_path, image_name, subfolder, bool(montage))
 
     if Config.SAVE_MODE:
+        os.makedirs(_windows_extended_path(save_path), exist_ok=True)
         if use_skip and os.path.isfile(save_full_path):
             if verbose:
                 _log.hint(f"Skipped (exists): {full_path}")
@@ -1060,7 +1063,10 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             from PyFLASH.layout import apply_pyflash_layout
             apply_pyflash_layout(figure)
 
-        with plt.rc_context({'svg.fonttype': 'none'}):
+        # Guarantee editable text at the single figure choke point regardless of
+        # what rcParams the caller left active: every string stays a real <text>
+        # element and mathtext renders in the body font (not vectorised glyphs).
+        with plt.rc_context({'svg.fonttype': 'none', 'mathtext.default': 'regular'}):
             figure.savefig(save_full_path, bbox_inches='tight',
                            bbox_extra_artists=extra_artist,
                            dpi=600, transparent=True, pad_inches=pad_inches)

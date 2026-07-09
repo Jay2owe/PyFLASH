@@ -111,6 +111,16 @@ def apply_matplotlib_fast_path():
         mpl.rcParams['path.simplify'] = True
         mpl.rcParams['path.simplify_threshold'] = 1.0
         mpl.rcParams['agg.path.chunksize'] = 10000
+        # Keep SVG output editable: emit every string (titles, tick numbers,
+        # axis labels, significance stars, p-values, matrix annotations) as a
+        # real <text> element instead of vectorised glyph paths, so figures open
+        # as editable text in Illustrator/Inkscape. Set globally here — the first
+        # time matplotlib is touched — so even ad-hoc ``plt.savefig("x.svg")``
+        # inherits it, not only saves routed through ``utils.save_fig``.
+        # ``mathtext.default='regular'`` renders any ``$…$`` in the body font as
+        # clean upright text rather than fragmented DejaVu-oblique glyphs.
+        mpl.rcParams['svg.fonttype'] = 'none'
+        mpl.rcParams['mathtext.default'] = 'regular'
         _plt.ioff()
         _fast_path_applied = True
     except Exception:

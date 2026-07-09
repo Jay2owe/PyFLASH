@@ -1,6 +1,7 @@
 """Composable high-level PyFLASH analysis pipelines."""
 
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -8,6 +9,7 @@ from matplotlib import pyplot as plt
 
 from PyFLASH._logging import logger as _log
 from PyFLASH.modelling import (
+    _fit_linear_models,
     _linear_model_reference_value,
     _quote_formula_name,
     _resolve_summary_column,
@@ -51,10 +53,17 @@ from PyFLASH.plotting import (
     _volcano_table_figure,
     _resolve_marker_roi_long,
     _animal_group_map_from_groups,
+    _linear_model_adjusted_means_figure,
+    _linear_model_coefficient_forest_figure,
+    # Rhythm module: standalone plot functions the rhythm pipeline reuses (§8).
+    _resolve_rhythm_frame,
+    plot_cosinor,
+    plot_acrophase_clock,
 )
 from PyFLASH.utils import (
     build_pipeline_suffix,
     build_specificity_alias,
+    filter_df_by_specificity,
     is_excluded_mask,
     is_specificity_queue,
     iter_specificities,
@@ -63,7 +72,8 @@ from PyFLASH.utils import (
 from PyFLASH import pipeline_io as _pio
 from PyFLASH.pipeline_montage import capture_secondary, montage_pipeline
 
-__all__ = ["correlation", "adjusted_correlation", "data_overview", "group_comparison"]
+__all__ = ["correlation", "adjusted_correlation", "data_overview",
+           "group_comparison", "linear_model", "rhythm"]
 
 # ── Overview-montage contract (enforced uniformity for new pipelines) ─────────
 # Every pipeline run writes, in addition to its many individual figures, one
@@ -108,6 +118,7 @@ def _pipeline_specificity_queue(func, experiment, specificity, kwargs, pipeline_
     save = bool(kwargs.get("save", True))
     write_manifest_final = bool(kwargs.get("write_manifest", True))
     aliases = getattr(experiment, "aliases", None)
+    defer_corr_regressions = pipeline_name == "correlation"
 
     # All conditions share one folder, distinguished only by their specificity
     # filename tag. If two conditions sanitise to the same tag (e.g. values that
@@ -145,6 +156,8 @@ def _pipeline_specificity_queue(func, experiment, specificity, kwargs, pipeline_
         child_kwargs["write_manifest"] = False
         child_kwargs["montage"] = False
         child_kwargs["_tag_specificity"] = True
+        if defer_corr_regressions:
+            child_kwargs["max_regressions"] = 0
         if shared is not None:
             child_kwargs["_run_dirs"] = shared
         result = func(experiment, **child_kwargs)
@@ -231,7 +244,8 @@ def _pipeline_specificity_queue(func, experiment, specificity, kwargs, pipeline_
     for key in ("n_rows", "n_pairs", "n_selected", "n_regressions",
                 "n_adjusted_regressions", "n_outlier_animals", "n_outliers",
                 "n_covarying_pairs", "n_effect_sizes", "n_condition_distribution_rows",
-                "n_tests", "n_significant", "n_fallback_markers", "n_skipped_markers"):
+                "n_tests", "n_significant", "n_fallback_markers", "n_skipped_markers",
+                "n_models", "n_adjusted_means"):
         if key in combined:
             combined[key] = _sum_across(lambda r, k=key: r.get(k))
     for blk in ("raw", "adjusted"):
@@ -246,6 +260,12 @@ def _pipeline_specificity_queue(func, experiment, specificity, kwargs, pipeline_
             if key in combined["difference_matrices"]:
                 combined["difference_matrices"][key] = _sum_across(
                     lambda r, k=key: (r.get("difference_matrices") or {}).get(k))
+
+    if defer_corr_regressions:
+        plotted_pairs = _corr_queue_plot_regressions(
+            experiment, child_results, specs, kwargs, fig_dir)
+        combined["plotted_pairs"] = plotted_pairs
+        combined["n_regressions"] = len(plotted_pairs)
 
     if save and write_manifest_final and data_dir:
         _pio.write_json(combined, os.path.join(data_dir, "manifest.json"))
@@ -349,12 +369,11 @@ def correlation(
     Every call writes into its own run folder so previous runs are never
     silently lost and you can try several column sets side by side:
 
-    - ``Python Figures/Correlation Pipeline/<run>/`` - the matrices and
-      regression plots.
-    - ``Data and Stats/Correlation Pipeline/<run>/`` -
-      ``pairwise_correlations.csv`` (r/p/q/significance per method),
-      ``selected_pairs.csv``, per-method matrix CSVs, and ``manifest.json``.
-    - ``Data and Stats/Correlation Pipeline/_runs_index.csv`` - one row per run
+    - ``Python Figures/Correlation Pipeline/<run>/`` - the matrices,
+      regression plots, ``pairwise_correlations.csv`` (r/p/q/significance per
+      method), ``selected_pairs.csv``, per-method matrix CSVs, and
+      ``manifest.json``.
+    - ``Python Figures/Correlation Pipeline/_runs_index.csv`` - one row per run
       for quick comparison.
 
     ``run_label`` names the folder; when omitted it is auto-derived from the
@@ -488,11 +507,9 @@ def correlation(
 
     groups = _corr_pipeline_groups(experiment, scope_df, num_df, by, factor, specificity)
     single = len(groups) == 1
-    reg_factor = regression_factor
-    reg_by = by if reg_factor is not None else "conditions"
     # Group identity is encoded into the output filename (e.g. ``_GT.WT``) rather
     # than a per-group folder, so every group's matrices/tables sit flat in one
-    # ``Matrices/`` folder / ``data_dir`` and stay trivially comparable. In
+    # ``Matrices/`` folder / run data dir and stay trivially comparable. In
     # queue-merge mode the per-condition specificity is also woven into the name
     # (``_GT.WT_Dx.AD``) so conditions sharing the folder never collide.
     group_key = factor if factor else (
@@ -500,12 +517,16 @@ def correlation(
     aliases = getattr(experiment, "aliases", None)
     spec_for_filename = specificity if _tag_specificity else None
     spec_tag = build_pipeline_suffix(specificity=spec_for_filename, aliases=aliases)
+    reg_by, reg_factor, reg_specificity = _corr_regression_scope(
+        by, factor, specificity, regression_factor,
+        slug_specificity=_slug_specificity,
+    )
 
     combined_long, combined_selected, group_summaries, plotted_pairs = [], [], [], []
     groups_results = []
     first_long = first_selected = None
 
-    for gi, (glabel, gidx, greg_spec) in enumerate(groups):
+    for gi, (glabel, gidx, _greg_spec) in enumerate(groups):
         gnum = num_df.loc[num_df.index.intersection(gidx)]
         res = _corr_pipeline_compute(
             gnum, row_valid, col_valid, methods, gate, alpha, require, min_n, square,
@@ -531,14 +552,15 @@ def correlation(
         )
 
         if save:
+            matrices_data_dir = os.path.join(data_dir, "Matrices")
             _corr_to_csv(res["long"], os.path.join(data_dir, f"pairwise_correlations{tag}.csv"), index=False)
             _corr_to_csv(res["selected"], os.path.join(data_dir, f"selected_pairs{tag}.csv"), index=False)
             for m in methods:
                 disp = _correlation_display_name(m)
-                _corr_to_csv(res["coef"][m], os.path.join(data_dir, f"coef_{disp}{tag}.csv"))
-                _corr_to_csv(res["p"][m], os.path.join(data_dir, f"pvalues_{disp}{tag}.csv"))
-                _corr_to_csv(res["q"][m], os.path.join(data_dir, f"qvalues_{disp}{tag}.csv"))
-            _corr_to_csv(res["gate"].astype(int), os.path.join(data_dir, f"gate_matrix{tag}.csv"))
+                _corr_to_csv(res["coef"][m], os.path.join(matrices_data_dir, f"coef_{disp}{tag}.csv"))
+                _corr_to_csv(res["p"][m], os.path.join(matrices_data_dir, f"pvalues_{disp}{tag}.csv"))
+                _corr_to_csv(res["q"][m], os.path.join(matrices_data_dir, f"qvalues_{disp}{tag}.csv"))
+            _corr_to_csv(res["gate"].astype(int), os.path.join(matrices_data_dir, f"gate_matrix{tag}.csv"))
 
             star = "p<%g" % alpha
             suffix = "" if single else f" - {glabel}"
@@ -592,44 +614,11 @@ def correlation(
                      subfolder="Matrices", montage=True)
             plt.close(gfig)
 
-        # Regressions for surviving pairs (redirect output into the run folder).
-        # All groups' regressions land flat in the run's ``Regressions/`` folder;
-        # ``plot_regressions`` already encodes the group/specificity into each
-        # scatter's filename via ``build_subfolder`` (per-group ``greg_spec``).
         sel = res["selected"]
-        plot_sel = sel if max_regressions is None else sel.head(int(max_regressions))
-        reg_fig_root = fig_dir
-        orig_fig_path = getattr(experiment, "fig_path", None)
-        g_plotted = []
-        # Capture the strongest regression scatter plots onto the run's overview
-        # montage as secondary panels (the headline matrices are tagged
-        # montage=True; p/q-value matrices stay off the montage).
-        with capture_secondary("regression"):
-            for _, prow in plot_sel.iterrows():
-                x, y = prow["x"], prow["y"]
-                try:
-                    experiment.fig_path = reg_fig_root
-                    plot_regressions(
-                        experiment, x=x, y=y, by=reg_by, factor=reg_factor,
-                        test=regression_test, normalize_x=normalize_x, normalize_y=normalize_y,
-                        specificity=greg_spec, roi=_roi_base, save=save, combine=regression_combine,
-                    )
-                    g_plotted.append({
-                        "x": x, "y": y,
-                        "group": (None if single else str(glabel)),
-                        "median_abs_r": float(prow.get("median_abs_r", np.nan)),
-                    })
-                except Exception as exc:
-                    _log.warn(f"[correlation_pipeline] Regression {x} vs {y} failed: {exc}")
-                finally:
-                    if orig_fig_path is not None:
-                        experiment.fig_path = orig_fig_path
-
-        plotted_pairs.extend(g_plotted)
         group_summaries.append({
             "group": str(glabel), "n_rows": int(len(gnum)),
             "n_pairs": int(len(res["pairs"])), "n_selected": int(len(sel)),
-            "n_regressions": len(g_plotted),
+            "n_regressions": 0,
         })
 
     long_all = pd.concat(combined_long, ignore_index=True) if combined_long else pd.DataFrame()
@@ -637,6 +626,51 @@ def correlation(
     if save and not single:
         _corr_to_csv(long_all, os.path.join(data_dir, f"pairwise_correlations{spec_tag}.csv"), index=False)
         _corr_to_csv(selected_all, os.path.join(data_dir, f"selected_pairs{spec_tag}.csv"), index=False)
+
+    # Regressions for surviving pairs (redirect output into the run folder).
+    # By default, the line grouping follows the matrix grouping: factor-grouped
+    # matrices get factor lines, condition-grouped matrices get condition lines,
+    # and same-column specificity queues get one line per queued value.
+    plot_selected = _corr_selected_for_regression(selected_all, max_regressions)
+    reg_fig_root = fig_dir
+    orig_fig_path = getattr(experiment, "fig_path", None)
+    with capture_secondary("regression"):
+        for _, prow in plot_selected.iterrows():
+            x, y = prow["x"], prow["y"]
+            try:
+                experiment.fig_path = reg_fig_root
+                plot_regressions(
+                    experiment, x=x, y=y, by=reg_by, factor=reg_factor,
+                    test=regression_test, normalize_x=normalize_x, normalize_y=normalize_y,
+                    specificity=reg_specificity, roi=_roi_base, save=save,
+                    combine=regression_combine,
+                )
+                plotted_pairs.append({
+                    "x": x, "y": y,
+                    "group": None,
+                    "regression_factor": reg_factor,
+                    "median_abs_r": float(prow.get("median_abs_r", np.nan)),
+                })
+            except Exception as exc:
+                _log.warn(f"[correlation_pipeline] Regression {x} vs {y} failed: {exc}")
+            finally:
+                if orig_fig_path is not None:
+                    experiment.fig_path = orig_fig_path
+
+    plotted_pair_keys = {(str(p["x"]), str(p["y"])) for p in plotted_pairs}
+    if plotted_pair_keys:
+        for summary in group_summaries:
+            if "group" in selected_all.columns:
+                subset = selected_all[
+                    selected_all["group"].astype(str).eq(str(summary["group"]))
+                ]
+            else:
+                subset = selected_all
+            group_pairs = {
+                (str(row["x"]), str(row["y"]))
+                for _, row in subset.iterrows()
+            }
+            summary["n_regressions"] = len(group_pairs.intersection(plotted_pair_keys))
 
     total_pairs = int(sum(g["n_pairs"] for g in group_summaries))
     total_selected = int(sum(g["n_selected"] for g in group_summaries))
@@ -726,6 +760,133 @@ def correlation(
     result_obj["pairwise"] = long_all
     result_obj["selected"] = selected_all
     return result_obj
+
+
+def _corr_queue_specificity_scope(specificity):
+    """Return one union specificity for a same-column specificity queue."""
+    if not is_specificity_queue(specificity):
+        return None
+    specs = list(iter_specificities(specificity))
+    if not specs:
+        return None
+    key = specs[0][0]
+    values = []
+    for spec in specs:
+        if len(spec) < 2 or str(spec[0]) != str(key):
+            return None
+        for value in spec[1:]:
+            if isinstance(value, (list, tuple, set, pd.Index, np.ndarray, pd.Series)):
+                values.extend(list(value))
+            else:
+                values.append(value)
+    if not values:
+        return None
+    return (key, values)
+
+
+def _corr_regression_scope(by, factor, specificity, regression_factor,
+                           slug_specificity=None):
+    """Resolve regression grouping to match the matrix grouping by default."""
+    queue_scope = _corr_queue_specificity_scope(slug_specificity)
+    scope_specificity = queue_scope if queue_scope is not None else specificity
+    if regression_factor is not None:
+        return by, regression_factor, scope_specificity
+    if factor is not None:
+        return by, factor, scope_specificity
+    if str(by).strip().lower() == "conditions":
+        return "conditions", None, scope_specificity
+    if queue_scope is not None:
+        return by, queue_scope[0], queue_scope
+    return "conditions", None, scope_specificity
+
+
+def _corr_selected_for_regression(selected, max_regressions):
+    """Deduplicate selected pairs before drawing pipeline regression figures."""
+    if not isinstance(selected, pd.DataFrame) or selected.empty:
+        return pd.DataFrame(columns=["x", "y", "median_abs_r"])
+    if "x" not in selected.columns or "y" not in selected.columns:
+        return pd.DataFrame(columns=["x", "y", "median_abs_r"])
+    rows = selected.copy()
+    if "median_abs_r" not in rows.columns:
+        rows["median_abs_r"] = np.nan
+    rows["_pair_key"] = list(zip(rows["x"].astype(str), rows["y"].astype(str)))
+    rows["_row_order"] = np.arange(len(rows))
+    rows["_sort_score"] = pd.to_numeric(rows["median_abs_r"], errors="coerce")
+    rows = (
+        rows.sort_values(
+            ["_sort_score", "_row_order"],
+            ascending=[False, True],
+            na_position="last",
+        )
+        .drop_duplicates("_pair_key", keep="first")
+        .drop(columns=["_pair_key", "_row_order", "_sort_score"])
+        .reset_index(drop=True)
+    )
+    if max_regressions is not None:
+        rows = rows.head(int(max_regressions))
+    return rows
+
+
+def _corr_queue_plot_regressions(experiment, child_results, specs, kwargs, fig_dir):
+    selected_frames = []
+    for result in child_results:
+        if not isinstance(result, dict):
+            continue
+        selected = result.get("selected")
+        if isinstance(selected, pd.DataFrame) and not selected.empty:
+            selected_frames.append(selected)
+    selected_all = (
+        pd.concat(selected_frames, ignore_index=True)
+        if selected_frames else pd.DataFrame()
+    )
+    plot_selected = _corr_selected_for_regression(
+        selected_all, kwargs.get("max_regressions"))
+    if plot_selected.empty:
+        return []
+
+    reg_by, reg_factor, reg_specificity = _corr_regression_scope(
+        kwargs.get("by", "all"),
+        kwargs.get("factor"),
+        None,
+        kwargs.get("regression_factor"),
+        slug_specificity=specs,
+    )
+    roi_base = _resolve_roi_bases(kwargs.get("roi"), experiment)[0]
+    save = bool(kwargs.get("save", True))
+    orig_fig_path = getattr(experiment, "fig_path", None)
+    plotted_pairs = []
+    with capture_secondary("regression"):
+        for _, row in plot_selected.iterrows():
+            x, y = row["x"], row["y"]
+            try:
+                experiment.fig_path = fig_dir
+                plot_regressions(
+                    experiment,
+                    x=x,
+                    y=y,
+                    by=reg_by,
+                    factor=reg_factor,
+                    test=kwargs.get("regression_test", "pearsonr"),
+                    normalize_x=kwargs.get("normalize_x", False),
+                    normalize_y=kwargs.get("normalize_y", False),
+                    specificity=reg_specificity,
+                    roi=roi_base,
+                    save=save,
+                    combine=kwargs.get("regression_combine", True),
+                )
+                plotted_pairs.append({
+                    "x": x,
+                    "y": y,
+                    "group": None,
+                    "regression_factor": reg_factor,
+                    "median_abs_r": float(row.get("median_abs_r", np.nan)),
+                })
+            except Exception as exc:
+                _log.warn(f"[correlation_pipeline] Regression {x} vs {y} failed: {exc}")
+            finally:
+                if orig_fig_path is not None:
+                    experiment.fig_path = orig_fig_path
+    return plotted_pairs
 
 
 def _adj_as_list(value, *, name="value"):
@@ -1263,7 +1424,7 @@ def _adj_write_corr_block(
     use_fdr = _corr_pipeline_use_fdr(gate)
     # Block (Raw/Adjusted) + group identity ride in the filename (e.g.
     # ``--Adjusted--GT.WT``) so every block/group's matrices sit flat in one
-    # ``Matrices/`` folder / ``data_dir`` instead of nested block/group folders.
+    # ``Matrices/`` folder / run data dir instead of nested block/group folders.
     group_key = factor if factor else (
         "Condition" if str(by).strip().lower() == "conditions" else None)
     aliases = getattr(experiment, "aliases", None)
@@ -1287,13 +1448,14 @@ def _adj_write_corr_block(
             aliases=aliases,
         )
         if save:
+            matrices_data_dir = os.path.join(data_dir, "Matrices")
             _corr_to_csv(res["long"], os.path.join(data_dir, f"pairwise_correlations{tag}.csv"), index=False)
             _corr_to_csv(res["selected"], os.path.join(data_dir, f"selected_pairs{tag}.csv"), index=False)
             for method in methods:
                 disp = _correlation_display_name(method)
-                _corr_to_csv(res["coef"][method], os.path.join(data_dir, f"coef_{disp}{tag}.csv"))
-                _corr_to_csv(res["p"][method], os.path.join(data_dir, f"pvalues_{disp}{tag}.csv"))
-                _corr_to_csv(res["q"][method], os.path.join(data_dir, f"qvalues_{disp}{tag}.csv"))
+                _corr_to_csv(res["coef"][method], os.path.join(matrices_data_dir, f"coef_{disp}{tag}.csv"))
+                _corr_to_csv(res["p"][method], os.path.join(matrices_data_dir, f"pvalues_{disp}{tag}.csv"))
+                _corr_to_csv(res["q"][method], os.path.join(matrices_data_dir, f"qvalues_{disp}{tag}.csv"))
                 suffix = "" if single else f" - {glabel}"
                 star = "p<%g" % alpha
                 fig = _corr_pipeline_heatmap(
@@ -1332,7 +1494,7 @@ def _adj_write_corr_block(
                     )
                     save_fig(qfig, fig_dir, f"{disp} FDR Q-Value Matrix{tag}", subfolder="Matrices")
                     plt.close(qfig)
-            _corr_to_csv(res["gate"].astype(int), os.path.join(data_dir, f"gate_matrix{tag}.csv"))
+            _corr_to_csv(res["gate"].astype(int), os.path.join(matrices_data_dir, f"gate_matrix{tag}.csv"))
             gate_ttl = (f"{block_name} pairs passing gate{suffix}\n{str(require).upper()} of "
                         + "/".join(_correlation_display_name(m) for m in methods)
                         + f" @ {'q' if use_fdr else 'p'}<{alpha:g}")
@@ -3115,8 +3277,7 @@ def data_overview(
     Run management (``run_label`` / ``if_exists`` / ``save`` / ``write_manifest``)
     and the return shape (a manifest dict with the section DataFrames attached)
     mirror the other pipelines. Outputs land in
-    ``Python Figures/Data Overview Pipeline/<run>/`` and
-    ``Data and Stats/Data Overview Pipeline/<run>/``.
+    ``Python Figures/Data Overview Pipeline/<run>/``.
     """
     if is_specificity_queue(specificity):
         kwargs = dict(locals())
@@ -4434,4 +4595,1351 @@ def group_comparison(
     result["omnibus"] = omnibus_df
     result["descriptives"] = descriptives_df
     result["skipped"] = skipped_df
+    return result
+
+
+def _lm_run_dirs(experiment, run_label, if_exists, *, clear_overwrite=True):
+    return _pio.run_dirs(experiment, "Linear Model Pipeline", run_label, if_exists,
+                         clear_overwrite=clear_overwrite)
+
+
+def _lm_slug(dependent_variables, group, predictors, specificity, roi, settings=None):
+    return _pio.slug("linear_model", {
+        "dependent_variables": list(dependent_variables or []),
+        "group": group,
+        "predictors": list(predictors or []),
+        "specificity": str(specificity),
+        "roi": str(roi),
+        "settings": settings or {},
+    })
+
+
+def _lm_append_runs_index(experiment, manifest):
+    _pio.append_runs_index(experiment, "Linear Model Pipeline", {
+        "run_label": manifest.get("run_label"),
+        "pipeline": "linear_model",
+        "n_rows": manifest.get("n_rows"),
+        "n_models": manifest.get("n_models"),
+        "n_adjusted_means": manifest.get("n_adjusted_means"),
+        "dependent_variables": "; ".join(manifest.get("dependent_variables", [])),
+        "group": manifest.get("group"),
+        "predictors": "; ".join(manifest.get("predictors", [])),
+        "specificity": manifest.get("specificity"),
+        "roi": manifest.get("roi"),
+    })
+
+
+def _lm_unique(values):
+    seen = set()
+    out = []
+    for value in values or []:
+        s = str(value)
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _lm_as_list(value, *, name):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set, pd.Index, np.ndarray, pd.Series)):
+        return [str(v) for v in list(value) if str(v).strip() != ""]
+    raise TypeError(f"{name} must be a string or iterable of strings.")
+
+
+def _lm_resolve_terms(df, terms, *, kind):
+    resolved = []
+    for term in _lm_as_list(terms, name=kind):
+        col = _resolve_summary_column(df, term, required=False)
+        resolved.append(str(col) if col is not None else str(term))
+    return _lm_unique(resolved)
+
+
+def _lm_categorical_arg(df, predictors, categorical, group_col):
+    if isinstance(categorical, str) and categorical.strip().lower() == "auto":
+        resolved = []
+        for pred in predictors:
+            if pred not in df.columns:
+                continue
+            col = df[pred]
+            if (
+                _adj_auto_is_categorical(col)
+                or isinstance(col.dtype, pd.CategoricalDtype)
+                or pd.api.types.is_bool_dtype(col)
+            ):
+                resolved.append(pred)
+    elif categorical is None:
+        resolved = []
+    else:
+        resolved = [
+            str(_resolve_summary_column(df, col, required=True))
+            for col in _lm_as_list(categorical, name="categorical")
+        ]
+    if group_col is not None:
+        resolved.insert(0, group_col)
+    return _lm_unique(resolved)
+
+
+def _lm_mode(series):
+    values = pd.Series(series).dropna()
+    if values.empty:
+        return np.nan
+    try:
+        mode = values.mode(dropna=True)
+        if len(mode):
+            return mode.iloc[0]
+    except Exception:
+        pass
+    return values.iloc[0]
+
+
+def _lm_group_order(experiment, frame, group_col):
+    levels = list(pd.Series(frame[group_col]).dropna().unique())
+    if not levels:
+        return []
+    wanted = []
+    if str(group_col) == "Condition":
+        wanted.extend([
+            getattr(c, "name", c)
+            for c in getattr(experiment, "condition_list", []) or []
+        ])
+    factor_dict = getattr(getattr(experiment, "condition_list", None), "factorDict", {})
+    if isinstance(factor_dict, dict) and group_col in factor_dict:
+        wanted.extend([
+            getattr(item, "name", item)
+            for item in factor_dict.get(group_col, []) or []
+        ])
+    ordered = []
+    for want in wanted:
+        match = next((level for level in levels if str(level) == str(want)), None)
+        if match is not None and match not in ordered:
+            ordered.append(match)
+    ordered.extend([level for level in levels if level not in ordered])
+    return ordered
+
+
+def _lm_group_colors(experiment, group_col):
+    colors = {}
+    if str(group_col) == "Condition":
+        for c in getattr(experiment, "condition_list", []) or []:
+            colors[str(getattr(c, "name", c))] = getattr(c, "color", "black")
+    factor_dict = getattr(getattr(experiment, "condition_list", None), "factorDict", {})
+    if isinstance(factor_dict, dict) and group_col in factor_dict:
+        for item in factor_dict.get(group_col, []) or []:
+            colors[str(getattr(item, "name", item))] = getattr(item, "color", "black")
+    return colors
+
+
+def _lm_covariate_profile_key(covariate_profile):
+    profile = str(covariate_profile).strip().lower().replace("-", "_")
+    aliases = {
+        "mean/mode": "mean_mode",
+        "mean_mode": "mean_mode",
+        "reference_grid": "reference_grid",
+        "ref_grid": "reference_grid",
+        "emm": "reference_grid",
+        "emms": "reference_grid",
+        "emmeans": "reference_grid",
+        "estimated_marginal_means": "reference_grid",
+        "observed": "observed",
+        "observed_marginal": "observed",
+        "sample": "observed",
+        "standardized": "observed",
+        "g_computation": "observed",
+        "counterfactual": "observed",
+    }
+    if profile in aliases:
+        return aliases[profile]
+    raise ValueError(
+        "covariate_profile must be 'mean_mode', 'reference_grid'/'emm', "
+        "or 'observed'."
+    )
+
+
+def _lm_weight_key(weights):
+    key = str(weights).strip().lower().replace("-", "_")
+    aliases = {
+        "equal": "equal",
+        "balanced": "equal",
+        "observed": "observed",
+        "sample": "observed",
+        "proportional": "observed",
+        "cells": "observed",
+        "cell": "observed",
+    }
+    if key in aliases:
+        return aliases[key]
+    raise ValueError("adjusted_mean_weights must be 'equal' or 'observed'.")
+
+
+def _lm_is_categorical_column(model_df, col, categorical_set):
+    if col in categorical_set:
+        return True
+    series = model_df[col]
+    return (
+        pd.api.types.is_object_dtype(series)
+        or isinstance(series.dtype, pd.CategoricalDtype)
+        or pd.api.types.is_bool_dtype(series)
+    )
+
+
+def _lm_observed_levels(series):
+    if isinstance(series.dtype, pd.CategoricalDtype):
+        values = [
+            level for level in series.cat.categories
+            if pd.Series(series).astype(object).eq(level).any()
+        ]
+    else:
+        values = list(pd.Series(series).dropna().unique())
+    return [value for value in values if not pd.isna(value)]
+
+
+def _lm_prediction_frame(model_df, dependent_variable, group_col, level,
+                         categorical_set, reference_levels):
+    row = {}
+    for col in model_df.columns:
+        if col == dependent_variable:
+            vals = _to_numeric_excluding_not_included(model_df[col])
+            row[col] = float(vals.mean(skipna=True)) if vals.notna().any() else 0.0
+            continue
+        if col == group_col:
+            row[col] = level
+            continue
+        series = model_df[col]
+        if (
+            col in categorical_set
+            or pd.api.types.is_object_dtype(series)
+            or isinstance(series.dtype, pd.CategoricalDtype)
+            or pd.api.types.is_bool_dtype(series)
+        ):
+            row[col] = reference_levels.get(col, _lm_mode(series))
+        else:
+            vals = _to_numeric_excluding_not_included(series)
+            row[col] = float(vals.mean(skipna=True)) if vals.notna().any() else _lm_mode(series)
+    pred = pd.DataFrame([row])
+    for col in pred.columns:
+        if col in model_df.columns and isinstance(model_df[col].dtype, pd.CategoricalDtype):
+            pred[col] = pd.Categorical(pred[col], categories=model_df[col].cat.categories)
+    return pred
+
+
+def _lm_apply_model_categories(pred, model_df):
+    pred = pred.copy()
+    for col in pred.columns:
+        if col in model_df.columns and isinstance(model_df[col].dtype, pd.CategoricalDtype):
+            pred[col] = pd.Categorical(pred[col], categories=model_df[col].cat.categories)
+    return pred
+
+
+def _lm_reference_grid_frame(model_df, dependent_variable, group_col, level,
+                             categorical_set, reference_levels, grid_columns=None):
+    from itertools import product
+
+    grid_columns = set(grid_columns or [])
+    cat_cols = [
+        col for col in model_df.columns
+        if col in grid_columns
+        and col not in {dependent_variable, group_col}
+        and _lm_is_categorical_column(model_df, col, categorical_set)
+    ]
+    levels_by_col = []
+    for col in cat_cols:
+        levels = _lm_observed_levels(model_df[col])
+        if not levels:
+            levels = [reference_levels.get(col, _lm_mode(model_df[col]))]
+        levels_by_col.append(levels)
+    combos = list(product(*levels_by_col)) if levels_by_col else [()]
+
+    rows = []
+    for combo in combos:
+        row = {}
+        combo_map = dict(zip(cat_cols, combo))
+        for col in model_df.columns:
+            if col == dependent_variable:
+                vals = _to_numeric_excluding_not_included(model_df[col])
+                row[col] = float(vals.mean(skipna=True)) if vals.notna().any() else 0.0
+            elif col == group_col:
+                row[col] = level
+            elif col in combo_map:
+                row[col] = combo_map[col]
+            elif _lm_is_categorical_column(model_df, col, categorical_set):
+                row[col] = reference_levels.get(col, _lm_mode(model_df[col]))
+            else:
+                vals = _to_numeric_excluding_not_included(model_df[col])
+                row[col] = float(vals.mean(skipna=True)) if vals.notna().any() else _lm_mode(model_df[col])
+        rows.append(row)
+    frame = _lm_apply_model_categories(pd.DataFrame(rows), model_df)
+    return frame, cat_cols
+
+
+def _lm_reference_grid_weights(model_df, frame, cat_cols, weight_key):
+    if len(frame) == 0:
+        return np.asarray([], dtype=float)
+    if weight_key == "equal" or not cat_cols:
+        return np.repeat(1.0 / len(frame), len(frame))
+
+    observed = model_df[cat_cols].dropna()
+    if observed.empty:
+        return np.repeat(1.0 / len(frame), len(frame))
+    counts = observed.groupby(cat_cols, dropna=False).size()
+    weights = []
+    for _, row in frame[cat_cols].iterrows():
+        key = tuple(row[col] for col in cat_cols)
+        if len(cat_cols) == 1:
+            key = key[0]
+        weights.append(float(counts.get(key, 0.0)))
+    weights = np.asarray(weights, dtype=float)
+    total = float(weights.sum())
+    if total <= 0 or not np.isfinite(total):
+        return np.repeat(1.0 / len(frame), len(frame))
+    return weights / total
+
+
+def _lm_observed_profile_frame(model_df, dependent_variable, group_col, level):
+    frame = model_df.copy()
+    frame[group_col] = level
+    return _lm_apply_model_categories(frame, model_df)
+
+
+def _lm_design_matrix(fit, frame):
+    from patsy import build_design_matrices
+
+    design_info = getattr(getattr(fit.model, "data", None), "design_info", None)
+    if design_info is None:
+        return None, None
+    exog = build_design_matrices([design_info], frame, return_type="dataframe")[0]
+    params_index = list(fit.params.index)
+    exog = exog.reindex(columns=params_index, fill_value=0.0)
+    return exog.to_numpy(dtype=float), params_index
+
+
+def _lm_linear_function_summary(fit, linvec, *, alpha):
+    params_index = list(fit.params.index)
+    params = np.asarray(fit.params.reindex(params_index), dtype=float)
+    cov = fit.cov_params()
+    if hasattr(cov, "loc"):
+        cov = cov.loc[params_index, params_index]
+    cov = np.asarray(cov, dtype=float)
+    linvec = np.asarray(linvec, dtype=float)
+
+    estimate = float(np.dot(linvec, params))
+    variance = float(np.dot(linvec, np.dot(cov, linvec)))
+    std_error = float(np.sqrt(max(variance, 0.0))) if np.isfinite(variance) else np.nan
+    df_resid = float(getattr(fit, "df_resid", np.nan))
+    use_t = bool(getattr(fit, "use_t", True))
+    statistic = np.nan
+    p_value = np.nan
+    ci_low = np.nan
+    ci_high = np.nan
+    distribution = "normal"
+    if std_error > 0:
+        statistic = estimate / std_error
+        try:
+            if use_t and np.isfinite(df_resid):
+                from scipy import stats as sp_stats
+                crit = float(sp_stats.t.ppf(1.0 - float(alpha) / 2.0, df_resid))
+                p_value = float(2.0 * sp_stats.t.sf(abs(statistic), df_resid))
+                distribution = "t"
+            else:
+                from scipy import stats as sp_stats
+                crit = float(sp_stats.norm.ppf(1.0 - float(alpha) / 2.0))
+                p_value = float(2.0 * sp_stats.norm.sf(abs(statistic)))
+            ci_low = estimate - crit * std_error
+            ci_high = estimate + crit * std_error
+        except Exception:
+            pass
+    return {
+        "estimate": estimate,
+        "std_error": std_error,
+        "ci_low": float(ci_low) if np.isfinite(ci_low) else np.nan,
+        "ci_high": float(ci_high) if np.isfinite(ci_high) else np.nan,
+        "statistic": float(statistic) if np.isfinite(statistic) else np.nan,
+        "p_value": float(p_value) if np.isfinite(p_value) else np.nan,
+        "df_resid": df_resid,
+        "reference_distribution": distribution,
+    }
+
+
+def _lm_adjusted_prediction_data(experiment, fit_result, dependent_variable, group_col,
+                                 *, covariate_profile, adjusted_mean_weights, alpha):
+    profile = _lm_covariate_profile_key(covariate_profile)
+    weight_key = _lm_weight_key(adjusted_mean_weights)
+    fits = fit_result.get("fits") or {}
+    fit = fits.get(dependent_variable)
+    if fit is None:
+        return None
+    model_data = getattr(getattr(fit, "model", None), "data", None)
+    model_df = getattr(model_data, "frame", None)
+    if not isinstance(model_df, pd.DataFrame) or group_col not in model_df.columns:
+        return None
+    categorical_set = set(fit_result.get("categorical") or [])
+    reference_levels = dict(fit_result.get("reference_levels") or {})
+    predictor_columns = [
+        str(col) for col in (fit_result.get("predictors") or [])
+        if str(col) in model_df.columns and str(col) != group_col
+    ]
+    levels = _lm_group_order(experiment, model_df, group_col)
+    if not levels:
+        return None
+    functions = []
+    pred_frames = []
+    for level in levels:
+        if profile == "mean_mode":
+            frame = _lm_prediction_frame(
+                model_df, dependent_variable, group_col, level,
+                categorical_set, reference_levels,
+            )
+            weights = np.asarray([1.0], dtype=float)
+            grid_columns = []
+        elif profile == "reference_grid":
+            frame, grid_columns = _lm_reference_grid_frame(
+                model_df, dependent_variable, group_col, level,
+                categorical_set, reference_levels,
+                grid_columns=predictor_columns,
+            )
+            weights = _lm_reference_grid_weights(model_df, frame, grid_columns, weight_key)
+        else:
+            frame = _lm_observed_profile_frame(model_df, dependent_variable, group_col, level)
+            weights = np.repeat(1.0 / len(frame), len(frame)) if len(frame) else np.asarray([], dtype=float)
+            grid_columns = list(predictor_columns)
+        if len(frame) == 0 or len(weights) != len(frame):
+            continue
+        weights = np.asarray(weights, dtype=float)
+        total = float(weights.sum())
+        if total <= 0 or not np.isfinite(total):
+            weights = np.repeat(1.0 / len(frame), len(frame))
+        else:
+            weights = weights / total
+        xmat, _ = _lm_design_matrix(fit, frame)
+        if xmat is None:
+            continue
+        linvec = np.average(xmat, axis=0, weights=weights)
+        summary = _lm_linear_function_summary(fit, linvec, alpha=alpha)
+        functions.append({
+            "level": level,
+            "pred_df": frame,
+            "weights": weights,
+            "linvec": linvec,
+            "summary": summary,
+            "grid_columns": list(grid_columns),
+        })
+        pred_frames.append(frame.assign(_pyflash_lm_group=str(level)))
+    if not functions:
+        return None
+    pred_summary = pd.DataFrame([
+        {
+            "mean": item["summary"]["estimate"],
+            "mean_se": item["summary"]["std_error"],
+            "mean_ci_lower": item["summary"]["ci_low"],
+            "mean_ci_upper": item["summary"]["ci_high"],
+        }
+        for item in functions
+    ])
+    return {
+        "fit": fit,
+        "model_df": model_df,
+        "levels": [item["level"] for item in functions],
+        "pred_df": pd.concat(pred_frames, ignore_index=True) if pred_frames else pd.DataFrame(),
+        "pred_summary": pred_summary,
+        "linear_functions": functions,
+        "profile": profile,
+        "weights": weight_key,
+    }
+
+
+def _lm_adjusted_means_table(experiment, fit_result, dependent_variables, group_col,
+                             *, covariate_profile, adjusted_mean_weights, alpha):
+    rows = []
+    for dep in dependent_variables:
+        pred = _lm_adjusted_prediction_data(
+            experiment, fit_result, dep, group_col,
+            covariate_profile=covariate_profile,
+            adjusted_mean_weights=adjusted_mean_weights,
+            alpha=alpha,
+        )
+        if pred is None:
+            continue
+        model_df = pred["model_df"]
+        for item in pred["linear_functions"]:
+            level = item["level"]
+            mask = model_df[group_col].astype(str).eq(str(level))
+            raw_values = _to_numeric_excluding_not_included(model_df.loc[mask, dep])
+            summary = item["summary"]
+            rows.append({
+                "dependent_variable": str(dep),
+                "group_col": str(group_col),
+                "group": str(level),
+                "n": int(mask.sum()),
+                "raw_mean": (
+                    float(raw_values.mean(skipna=True))
+                    if raw_values.notna().any() else float("nan")
+                ),
+                "adjusted_mean": float(summary.get("estimate", np.nan)),
+                "mean_se": float(summary.get("std_error", np.nan)),
+                "ci_low": float(summary.get("ci_low", np.nan)),
+                "ci_high": float(summary.get("ci_high", np.nan)),
+                "alpha": float(alpha),
+                "covariate_profile": pred["profile"],
+                "adjusted_mean_weights": pred["weights"],
+                "reference_grid_rows": int(len(item["pred_df"])),
+                "reference_grid_columns": "; ".join(item["grid_columns"]),
+            })
+    return pd.DataFrame(rows)
+
+
+def _lm_default_comparisons(num_groups):
+    comps = []
+    for gap in range(1, int(num_groups)):
+        for first in range(1, int(num_groups) - gap + 1):
+            comps.append(f"{first}-{first + gap}")
+    return comps
+
+
+def _lm_sanitize_comparisons(comparisons, n_groups):
+    if comparisons is None:
+        return []
+    valid = []
+    seen = set()
+    for comp in comparisons:
+        try:
+            first, second = [int(part) for part in str(comp).split("-")]
+        except Exception:
+            continue
+        if first == second:
+            continue
+        if not (1 <= first <= n_groups and 1 <= second <= n_groups):
+            continue
+        token = f"{min(first, second)}-{max(first, second)}"
+        if token not in seen:
+            valid.append(token)
+            seen.add(token)
+    return valid
+
+
+def _lm_adjusted_mean_comparisons_table(
+    experiment, fit_result, dependent_variables, group_col,
+    *,
+    covariate_profile,
+    adjusted_mean_weights,
+    adjusted_mean_p_adjust,
+    adjusted_mean_p_family,
+    alpha,
+    comparisons=None,
+):
+    rows = []
+    for dep in dependent_variables:
+        pred = _lm_adjusted_prediction_data(
+            experiment, fit_result, dep, group_col,
+            covariate_profile=covariate_profile,
+            adjusted_mean_weights=adjusted_mean_weights,
+            alpha=alpha,
+        )
+        if pred is None:
+            continue
+        fit = pred["fit"]
+        levels = [str(level) for level in pred["levels"]]
+        n_groups = len(levels)
+        comp_tokens = _lm_sanitize_comparisons(comparisons, n_groups)
+        if not comp_tokens:
+            default_from_conditions = getattr(
+                getattr(experiment, "condition_list", None), "comparisons", None)
+            comp_tokens = _lm_sanitize_comparisons(default_from_conditions, n_groups)
+        if not comp_tokens and n_groups >= 2:
+            comp_tokens = _lm_default_comparisons(n_groups)
+        if not comp_tokens:
+            continue
+        linvecs = [np.asarray(item["linvec"], dtype=float) for item in pred["linear_functions"]]
+        for comp in comp_tokens:
+            first, second = [int(part) - 1 for part in comp.split("-")]
+            if first < 0 or second < 0 or first >= n_groups or second >= n_groups:
+                continue
+            contrast = linvecs[second] - linvecs[first]
+            summary = _lm_linear_function_summary(fit, contrast, alpha=alpha)
+            rows.append({
+                "dependent_variable": str(dep),
+                "group_col": str(group_col),
+                "comparison": comp,
+                "left_group": levels[first],
+                "right_group": levels[second],
+                "estimate": summary["estimate"],
+                "std_error": summary["std_error"],
+                "t_value": summary["statistic"],
+                "p_value": summary["p_value"],
+                "df_resid": summary["df_resid"],
+                "alpha": float(alpha),
+                "test": "Adjusted linear contrast",
+                "covariate_profile": pred["profile"],
+                "adjusted_mean_weights": pred["weights"],
+                "reference_distribution": summary["reference_distribution"],
+            })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    method = str(adjusted_mean_p_adjust).strip().lower().replace("-", "_")
+    if method in {"", "none", "no", "false", "raw", "uncorrected"}:
+        out["p_adjusted"] = pd.to_numeric(out["p_value"], errors="coerce")
+        out["reject_adjusted"] = out["p_adjusted"] <= float(alpha)
+        out["p_adjust_method"] = "none"
+        return out
+    family_key = str(adjusted_mean_p_family).strip().lower()
+    if family_key in {"dependent_variable", "by_dependent_variable", "by_endpoint", "endpoint"}:
+        families = out["dependent_variable"].astype(str).tolist()
+    else:
+        families = ["all"] * len(out)
+    try:
+        from PyFLASH.stats_extra import apply_fdr
+        adjusted = apply_fdr(
+            out["p_value"].tolist(),
+            labels=list(out.index),
+            families=families,
+            method=method,
+            alpha=float(alpha),
+        )
+        for _, row in adjusted.iterrows():
+            idx = row["label"]
+            out.loc[idx, "p_adjusted"] = float(row["p_adjusted"])
+            out.loc[idx, "reject_adjusted"] = bool(row["reject"])
+    except Exception:
+        out["p_adjusted"] = pd.to_numeric(out["p_value"], errors="coerce")
+        out["reject_adjusted"] = out["p_adjusted"] <= float(alpha)
+    out["p_adjust_method"] = method
+    return out
+
+
+def _lm_emit_report(fit_result, adjusted_means_df, group_col, predictors):
+    try:
+        import PyFLASH.report as report
+        if not report.is_active():
+            return
+        coeffs = fit_result.get("coefficients")
+        summaries = fit_result.get("model_summaries")
+        if not isinstance(coeffs, pd.DataFrame) or not isinstance(summaries, pd.DataFrame):
+            return
+        for _, summary in summaries.iterrows():
+            dep = str(summary.get("dependent_variable"))
+            csub = coeffs[coeffs["dependent_variable"].astype(str).eq(dep)]
+            coeff_payload = {}
+            for _, row in csub.iterrows():
+                coeff_payload[str(row.get("term"))] = {
+                    "estimate": row.get("estimate"),
+                    "p": row.get("p_value"),
+                    "q": row.get("q_value"),
+                    "ci_low": row.get("ci_low"),
+                    "ci_high": row.get("ci_high"),
+                }
+            mean_payload = {}
+            if isinstance(adjusted_means_df, pd.DataFrame) and not adjusted_means_df.empty:
+                msub = adjusted_means_df[
+                    adjusted_means_df["dependent_variable"].astype(str).eq(dep)
+                ]
+                for _, row in msub.iterrows():
+                    mean_payload[str(row.get("group"))] = {
+                        "adjusted_mean": row.get("adjusted_mean"),
+                        "ci_low": row.get("ci_low"),
+                        "ci_high": row.get("ci_high"),
+                        "n": row.get("n"),
+                    }
+            report.emit(report.build_linear_model_record(
+                dependent_variable=dep,
+                formula=summary.get("formula"),
+                group=group_col,
+                predictors=predictors,
+                n=summary.get("nobs"),
+                r2=summary.get("r_squared"),
+                adj_r2=summary.get("adj_r_squared"),
+                f=summary.get("f_statistic"),
+                p=summary.get("f_pvalue"),
+                coefficients=coeff_payload,
+                adjusted_means=mean_payload,
+            ))
+    except Exception:
+        return
+
+
+@montage_pipeline(title="Linear Model Pipeline")
+def linear_model(
+    experiment,
+    dependent_variables=None,
+    predictors=None,
+    *,
+    group=None,
+    categorical="auto",
+    reference_levels=None,
+    interactions=None,
+    medication_columns=None,
+    medication_mode="any",
+    medication_min_count=2,
+    specificity=None,
+    roi=None,
+    exclude=None,
+    cov_type=None,
+    cov_kwds=None,
+    alpha=0.05,
+    fdr_method="fdr_bh",
+    fdr_family="all",
+    adjusted_means=True,
+    covariate_profile="mean_mode",
+    adjusted_mean_weights="equal",
+    adjusted_mean_p_adjust="holm",
+    adjusted_mean_p_family="dependent_variable",
+    plot_adjusted_means=True,
+    plot_coefficients=True,
+    coefficient_gate="p",
+    max_coefficient_terms=60,
+    tick_label_size=20,
+    run_label=None,
+    if_exists="overwrite",
+    save=True,
+    write_manifest=True,
+    montage=True,
+    verbose=True,
+    _run_dirs=None,
+    _tag_specificity=False,
+    _slug_specificity=None,
+):
+    """Adjusted linear-model pipeline with coefficient and adjusted-mean plots."""
+    if is_specificity_queue(specificity):
+        kwargs = dict(locals())
+        kwargs.pop("experiment")
+        return _pipeline_specificity_queue(
+            linear_model, experiment, specificity, kwargs, "linear_model",
+            append_index=_lm_append_runs_index)
+
+    if dependent_variables is None:
+        raise ValueError("linear_model needs dependent_variables.")
+    dep_source = getattr(experiment, "summary", None)
+    if not isinstance(dep_source, pd.DataFrame) or dep_source.empty:
+        raise ValueError("experiment.summary must be a non-empty pandas DataFrame.")
+
+    _roi_base = _resolve_roi_bases(roi, experiment)[0]
+    scope_df = _filtered_summary_for_specificity(experiment, specificity, roi_base=_roi_base)
+    dep_vars = [
+        str(_resolve_summary_column(scope_df, col, required=True))
+        for col in _lm_as_list(dependent_variables, name="dependent_variables")
+    ]
+    dep_vars = _lm_unique(dep_vars)
+    if not dep_vars:
+        raise ValueError("linear_model resolved no dependent variables.")
+
+    group_col = (
+        str(_resolve_summary_column(scope_df, group, required=True))
+        if group is not None else None
+    )
+    if (adjusted_means or plot_adjusted_means) and group_col is None:
+        raise ValueError(
+            "linear_model adjusted means need group=<column>. "
+            "Set adjusted_means=False and plot_adjusted_means=False for model-only runs."
+        )
+    adjustment_predictors = [
+        pred for pred in _lm_resolve_terms(scope_df, predictors, kind="predictors")
+        if pred != group_col
+    ]
+    adjustment_predictors = _lm_unique(adjustment_predictors)
+    model_predictors = []
+    if group_col is not None:
+        model_predictors.append(group_col)
+    model_predictors.extend(adjustment_predictors)
+    model_predictors = _lm_unique(model_predictors)
+    if not model_predictors:
+        raise ValueError("linear_model needs at least one predictor or group.")
+    categorical_arg = _lm_categorical_arg(scope_df, model_predictors, categorical, group_col)
+
+    label = run_label or _lm_slug(
+        dep_vars, group_col, model_predictors,
+        (_slug_specificity if _slug_specificity is not None else specificity),
+        _roi_base,
+        settings={
+            "categorical": categorical_arg,
+            "reference_levels": reference_levels or {},
+            "interactions": [str(x) for x in (interactions or [])],
+            "cov_type": str(cov_type or "nonrobust"),
+            "alpha": float(alpha),
+            "fdr_family": str(fdr_family),
+            "adjusted_means": bool(adjusted_means),
+            "covariate_profile": str(covariate_profile),
+            "adjusted_mean_weights": str(adjusted_mean_weights),
+            "adjusted_mean_p_adjust": str(adjusted_mean_p_adjust),
+            "adjusted_mean_p_family": str(adjusted_mean_p_family),
+        },
+    )
+    if _run_dirs is not None:
+        fig_dir, data_dir, resolved_label = _run_dirs
+        reuse_existing = False
+    elif save:
+        fig_dir, data_dir, resolved_label, reuse_existing = _lm_run_dirs(
+            experiment, label, if_exists, clear_overwrite=bool(save))
+    else:
+        fig_dir = data_dir = None
+        resolved_label = str(label)
+        reuse_existing = False
+
+    manifest_path = os.path.join(data_dir, "manifest.json") if data_dir else None
+    if reuse_existing and manifest_path and _pio.isfile(manifest_path):
+        cached = _pio.read_json(manifest_path)
+        _log.hint(f"[linear_model] Reusing run {resolved_label!r} (if_exists='skip').")
+        cached["reused"] = True
+        return cached
+
+    scope = SimpleNamespace(
+        summary=scope_df,
+        data_path=getattr(experiment, "data_path", None),
+    )
+    fit_result = _fit_linear_models(
+        scope,
+        dependent_variables=dep_vars,
+        predictors=model_predictors,
+        categorical=categorical_arg,
+        reference_levels=reference_levels,
+        interactions=interactions,
+        medication_columns=medication_columns,
+        medication_mode=medication_mode,
+        medication_min_count=medication_min_count,
+        specificity=None,
+        exclude=exclude,
+        cov_type=cov_type,
+        cov_kwds=cov_kwds,
+        alpha=alpha,
+        fdr_method=fdr_method,
+        fdr_family=fdr_family,
+        save=False,
+        return_fits=True,
+        verbose=False,
+    )
+    coefficients = fit_result["coefficients"]
+    model_summaries = fit_result["model_summaries"]
+    metadata = fit_result["metadata"]
+    adjusted_df = (
+        _lm_adjusted_means_table(
+            experiment, fit_result, dep_vars, group_col,
+            covariate_profile=covariate_profile,
+            adjusted_mean_weights=adjusted_mean_weights,
+            alpha=alpha)
+        if adjusted_means and group_col is not None else pd.DataFrame()
+    )
+    adjusted_comparisons_df = (
+        _lm_adjusted_mean_comparisons_table(
+            experiment, fit_result, dep_vars, group_col,
+            covariate_profile=covariate_profile,
+            adjusted_mean_weights=adjusted_mean_weights,
+            adjusted_mean_p_adjust=adjusted_mean_p_adjust,
+            adjusted_mean_p_family=adjusted_mean_p_family,
+            alpha=alpha,
+        )
+        if adjusted_means and group_col is not None else pd.DataFrame()
+    )
+    _lm_emit_report(fit_result, adjusted_df, group_col, adjustment_predictors)
+
+    spec_tag = build_pipeline_suffix(
+        specificity=(specificity if _tag_specificity else None),
+        aliases=getattr(experiment, "aliases", None))
+    group_colors = _lm_group_colors(experiment, group_col) if group_col else {}
+    adjusted_means_dir = (
+        os.path.join(data_dir, "Adjusted Means")
+        if data_dir and plot_adjusted_means and not adjusted_df.empty
+        else data_dir
+    )
+
+    if save:
+        _pio.makedirs(data_dir)
+        _pio.to_csv(coefficients, os.path.join(data_dir, f"linear_model_coefficients{spec_tag}.csv"),
+                    index=False)
+        _pio.to_csv(model_summaries, os.path.join(data_dir, f"linear_model_summaries{spec_tag}.csv"),
+                    index=False)
+        _pio.to_csv(metadata, os.path.join(data_dir, f"linear_model_metadata{spec_tag}.csv"),
+                    index=False)
+        if not adjusted_df.empty:
+            _pio.makedirs(adjusted_means_dir)
+            _pio.to_csv(adjusted_df,
+                        os.path.join(adjusted_means_dir,
+                                     f"linear_model_adjusted_means{spec_tag}.csv"),
+                        index=False)
+        if not adjusted_comparisons_df.empty:
+            _pio.makedirs(adjusted_means_dir)
+            _pio.to_csv(
+                adjusted_comparisons_df,
+                os.path.join(
+                    adjusted_means_dir,
+                    f"linear_model_adjusted_mean_comparisons{spec_tag}.csv"),
+                index=False,
+            )
+        _pio.makedirs(fig_dir)
+        if plot_coefficients and not coefficients.empty:
+            cfig = _linear_model_coefficient_forest_figure(
+                coefficients,
+                alpha=alpha,
+                gate=coefficient_gate,
+                tick_label_size=tick_label_size,
+                max_terms=max_coefficient_terms,
+            )
+            if cfig is not None:
+                save_fig(cfig, fig_dir, f"Coefficient Forest{spec_tag}",
+                         montage=True)
+                plt.close(cfig)
+        if plot_adjusted_means and not adjusted_df.empty:
+            order = list(dict.fromkeys(adjusted_df["group"].astype(str)))
+            for dep in dep_vars:
+                fig = _linear_model_adjusted_means_figure(
+                    adjusted_df,
+                    dep,
+                    group_col,
+                    group_order=order,
+                    group_color_map=group_colors,
+                    comparisons=adjusted_comparisons_df,
+                    source=experiment,
+                    alpha=alpha,
+                    tick_label_size=tick_label_size,
+                )
+                if fig is not None:
+                    save_fig(fig, fig_dir, f"Adjusted Means {dep}{spec_tag}",
+                             subfolder="Adjusted Means", montage=True)
+                    plt.close(fig)
+
+    manifest = {
+        "run_label": resolved_label,
+        "fig_dir": fig_dir,
+        "data_dir": data_dir,
+        "adjusted_means_dir": adjusted_means_dir,
+        "pipeline": "linear_model",
+        "n_rows": int(len(scope_df)),
+        "dependent_variables": dep_vars,
+        "n_models": int(len(dep_vars)),
+        "group": group_col,
+        "predictors": list(adjustment_predictors),
+        "model_terms": list(fit_result.get("predictors") or model_predictors),
+        "covariates": list(adjustment_predictors),
+        "categorical": list(fit_result.get("categorical") or []),
+        "reference_levels": {str(k): str(v) for k, v in (fit_result.get("reference_levels") or {}).items()},
+        "interactions": [str(item) for item in (interactions or [])],
+        "medication_predictors": list(fit_result.get("medication_predictors") or []),
+        "alpha": float(alpha),
+        "fdr_method": str(fdr_method),
+        "fdr_family": str(fdr_family),
+        "cov_type": str(cov_type or "nonrobust"),
+        "specificity": str(specificity) if specificity is not None else None,
+        "roi": str(_roi_base) if _roi_base is not None else None,
+        "exclude": str(exclude),
+        "adjusted_means": bool(adjusted_means),
+        "n_adjusted_means": int(len(adjusted_df)),
+        "n_adjusted_mean_comparisons": int(len(adjusted_comparisons_df)),
+        "covariate_profile": str(covariate_profile),
+        "adjusted_mean_weights": str(adjusted_mean_weights),
+        "adjusted_mean_p_adjust": str(adjusted_mean_p_adjust),
+        "adjusted_mean_p_family": str(adjusted_mean_p_family),
+        "plot_adjusted_means": bool(plot_adjusted_means),
+        "plot_coefficients": bool(plot_coefficients),
+        "reused": False,
+    }
+    if save and write_manifest and manifest_path:
+        _pio.write_json(manifest, manifest_path)
+        _lm_append_runs_index(experiment, manifest)
+
+    if verbose:
+        _log.confirm(
+            f"[linear_model] {resolved_label}: {len(dep_vars)} model(s), "
+            f"{len(coefficients)} coefficient rows, {len(adjusted_df)} adjusted means."
+        )
+
+    result = dict(manifest)
+    result["coefficients"] = coefficients
+    result["model_summaries"] = model_summaries
+    result["metadata"] = metadata
+    result["adjusted_means_table"] = adjusted_df
+    result["adjusted_mean_comparisons"] = adjusted_comparisons_df
+    return result
+
+
+# ── Rhythm pipeline ──────────────────────────────────────────────────────────
+# The genuinely-new capability (PREFERENCES.md §1): cosinor + circular statistics.
+# Two modes on a subject-level frame (an experiment .summary or a plain DataFrame,
+# so external human/actigraphy CSVs work):
+#   * cosinor mode  — column(s) sampled across time_col -> per-group cosinor fits,
+#                     rhythm plots, a parameter table, and a group-difference test.
+#   * parameter mode — a pre-computed acrophase column (+ optional scalar params) ->
+#                     circular acrophase clock, a between-group circular test, and a
+#                     scalar-parameter comparison table.
+# Multiplicity follows §2-3: raw p is always the default; an FDR q is added ONLY as
+# a duplicate column when the run is declared an exploratory screen (screen=True),
+# never replacing p, and gate='fdr' requires screen=True.
+
+
+def _rhythm_run_dirs(experiment, run_label, if_exists, *, clear_overwrite=True):
+    return _pio.run_dirs(experiment, "Rhythm Pipeline", run_label,
+                         if_exists, clear_overwrite=clear_overwrite)
+
+
+def _rhythm_slug(mode, cols, group_col, specificity, settings=None):
+    payload = {"mode": str(mode), "cols": sorted(str(c) for c in cols),
+               "group_col": str(group_col), "specificity": str(specificity),
+               "settings": settings or {}}
+    return _pio.slug(f"rhythm_{mode}", payload)
+
+
+def _rhythm_append_runs_index(experiment, manifest):
+    _pio.append_runs_index(experiment, "Rhythm Pipeline", {
+        "run_label": manifest.get("run_label"),
+        "mode": manifest.get("mode"),
+        "period": manifest.get("period"),
+        "group_col": manifest.get("group_col"),
+        "n_groups": manifest.get("n_groups"),
+        "n_params": manifest.get("n_params"),
+        "phase_test_p": manifest.get("phase_test_p"),
+        "n_significant": manifest.get("n_significant"),
+        "screen": manifest.get("screen"),
+        "gate": manifest.get("gate"),
+        "alpha": manifest.get("alpha"),
+        "specificity": manifest.get("specificity"),
+        "fig_dir": manifest.get("fig_dir"),
+    })
+
+
+def _rhythm_param_tests(df, param_cols, group_col, groups, *, screen, families, alpha):
+    """Compare each scalar rhythm parameter across groups (raw p; q only on screen).
+
+    Kruskal-Wallis for >= 3 groups, Welch's t for 2, plus a monotonic trend
+    (Spearman rho against the ordered group index — informative for a progression
+    axis). Returns a tidy DataFrame; ``p_adjusted`` is added ONLY when
+    ``screen=True`` (an opt-in exploratory correction), never replacing the raw
+    ``p_value``.
+
+    ``families`` controls the FDR grouping under ``screen``: ``'parameter'``
+    (default) treats the whole parameter panel as one BH family; ``'none'`` /
+    ``'each'`` gives each parameter its own family (q == p, no cross-parameter
+    penalty); a ``{parameter: family}`` dict corrects within named families.
+    """
+    from scipy import stats as _sps
+    from PyFLASH.stats_extra import apply_fdr
+
+    codes = {g: i for i, g in enumerate(groups)}
+    rows = []
+    for col in param_cols:
+        by = {g: pd.to_numeric(df[df[group_col].astype(str) == g][col], errors="coerce")
+                 .dropna().to_numpy() for g in groups}
+        present = [(g, v) for g, v in by.items() if len(v) >= 2]
+        rec = {"parameter": str(col), "n": int(sum(len(v) for v in by.values()))}
+        for g in groups:
+            rec[f"mean_{g}"] = float(np.mean(by[g])) if len(by[g]) else float("nan")
+        if len(present) < 2:
+            rec.update(test="skipped (n<2 in >=2 groups)", statistic=float("nan"),
+                       p_value=float("nan"), trend_rho=float("nan"), trend_p=float("nan"))
+            rows.append(rec)
+            continue
+        glab = [g for g, _ in present]
+        arrs = [v for _, v in present]
+        if len(arrs) == 2:
+            stat, p = _sps.ttest_ind(arrs[0], arrs[1], equal_var=False)
+            test = "Welch t"
+        else:
+            stat, p = _sps.kruskal(*arrs)
+            test = "Kruskal-Wallis"
+        allv = np.concatenate(arrs)
+        allc = np.concatenate([[codes[g]] * len(v) for g, v in present])
+        if len(set(allc)) > 1:
+            rho, ptr = _sps.spearmanr(allc, allv)
+        else:
+            rho, ptr = float("nan"), float("nan")
+        rec.update(test=test, statistic=float(stat), p_value=float(p),
+                   trend_rho=float(rho), trend_p=float(ptr))
+        rows.append(rec)
+    out = pd.DataFrame(rows)
+    if screen and not out.empty and out["p_value"].notna().any():
+        # Opt-in exploratory screen: add a duplicate q column (raw p_value is
+        # never overwritten). `families` groups the BH correction.
+        params = list(out["parameter"])
+        if isinstance(families, dict):
+            fam = {str(p): str(families.get(p, "all")) for p in params}
+        elif str(families).lower() in ("none", "each", "per-parameter"):
+            fam = {str(p): str(p) for p in params}      # each its own family -> q == p
+        else:                                            # 'parameter': one panel-wide family
+            fam = {str(p): "parameter" for p in params}
+        fdr = apply_fdr(dict(zip(out["parameter"], out["p_value"])),
+                        families=fam, method="fdr_bh", alpha=float(alpha))
+        qmap = dict(zip(fdr["label"], fdr["p_adjusted"]))
+        out["p_adjusted"] = out["parameter"].map(qmap)
+    return out
+
+
+@montage_pipeline(title="Rhythm Pipeline")
+def rhythm(
+    experiment,
+    column=None,
+    columns=None,
+    time_col="Time",
+    group_col=None,
+    group_order=None,
+    period=24.0,
+    period_free=False,
+    method="pooled",
+    animal_col=None,
+    phase_col=None,
+    param_cols=None,
+    radius_col=None,
+    specificity=None,
+    screen=False,
+    families="parameter",
+    gate="p",
+    alpha=0.05,
+    palette=None,
+    run_label=None,
+    if_exists="overwrite",
+    save=True,
+    write_manifest=True,
+    montage=True,
+    _run_dirs=None,
+    _tag_specificity=False,
+    _slug_specificity=None,
+):
+    """Cosinor + circular rhythm analysis in one manifested run.
+
+    Period-generic (``period=24`` daily, ``12`` circannual, ``period_free`` for a
+    free-running tau). Works on an experiment ``.summary`` or a plain DataFrame.
+
+    Modes
+    -----
+    - **Cosinor** (pass ``column`` or ``columns`` + ``time_col``): fits a cosinor
+      per ``group_col`` level for every column, saves a rhythm plot each (reusing
+      :func:`plot_cosinor`), a ``cosinor_parameters`` table (MESOR / amplitude /
+      acrophase / rhythmicity p), and — with >= 2 groups — a
+      ``cosinor_group_test`` (does the rhythm differ between groups). ``method``
+      handles repeated measures: ``'pooled'`` / ``'population_mean'`` / ``'mixed'``.
+    - **Parameter** (pass ``phase_col``, e.g. a pre-computed ``"Acrophase (h)"``):
+      draws a circular acrophase clock (reusing :func:`plot_acrophase_clock`),
+      writes ``circular_phase_stats`` + a between-group ``phase_group_test``
+      (Watson-Williams), and — with ``param_cols`` — a ``parameter_tests`` table
+      comparing each scalar parameter across groups. ``radius_col`` adds a
+      phase x amplitude figure.
+
+    Multiplicity (``screen=`` / ``gate=``)
+    --------------------------------------
+    Raw **p** is always the default and drives significance. Pass ``screen=True`` to
+    add an FDR **q** as a *duplicate* ``p_adjusted`` column across the parameter
+    panel (never replacing p); ``gate='fdr'`` requires it. Different parameters are
+    not treated as a family unless you opt in (PREFERENCES.md §2-3).
+
+    Returns a dict manifest (run label, dirs, counts, the phase test) with the
+    computed tables attached.
+    """
+    if is_specificity_queue(specificity):
+        kwargs = dict(locals())
+        kwargs.pop("experiment")
+        return _pipeline_specificity_queue(
+            rhythm, experiment, specificity, kwargs, "rhythm",
+            append_index=_rhythm_append_runs_index)
+
+    gate = str(gate).strip().lower()
+    if gate not in ("p", "fdr"):
+        raise ValueError(f"gate must be 'p' or 'fdr'; got {gate!r}.")
+    if gate == "fdr" and not screen:
+        raise ValueError(
+            "gate='fdr' requires screen=True (no cross-parameter q is computed "
+            "otherwise — different parameters are not a family by default).")
+
+    df = filter_df_by_specificity(_resolve_rhythm_frame(experiment), specificity).copy()
+
+    cosinor_cols = list(columns) if columns else ([column] if column else [])
+    if phase_col:
+        mode = "parameter"
+    elif cosinor_cols:
+        mode = "cosinor"
+    else:
+        raise ValueError(
+            "rhythm needs either phase_col (parameter mode) or column/columns + "
+            "time_col (cosinor mode).")
+    if mode == "cosinor":
+        if time_col not in df.columns:
+            raise ValueError(
+                f"rhythm (cosinor mode): time_col {time_col!r} not found in the data.")
+        if not any(c in df.columns for c in cosinor_cols):
+            raise ValueError(
+                f"rhythm (cosinor mode): none of columns {cosinor_cols} found in the data.")
+
+    gcol = group_col if (group_col and group_col in df.columns) else None
+    if gcol is not None:
+        df = df[df[gcol].notna()]
+        groups = [g for g in dict.fromkeys(df[gcol].astype(str))]
+        if group_order:
+            ordered = [str(g) for g in group_order if str(g) in groups]
+            groups = ordered + [g for g in groups if g not in ordered]
+    else:
+        groups = ["all"]
+
+    slug_cols = cosinor_cols if mode == "cosinor" else ([phase_col] + list(param_cols or []))
+    label = run_label or _rhythm_slug(
+        mode, slug_cols, gcol,
+        (_slug_specificity if _slug_specificity is not None else specificity),
+        settings={"period": float(period), "period_free": bool(period_free),
+                  "method": str(method), "screen": bool(screen), "gate": gate,
+                  "families": str(families), "alpha": float(alpha),
+                  "radius_col": str(radius_col), "time_col": str(time_col)})
+    if _run_dirs is not None:
+        fig_dir, data_dir, resolved_label = _run_dirs
+        reuse_existing = False
+    else:
+        fig_dir, data_dir, resolved_label, reuse_existing = _rhythm_run_dirs(
+            experiment, label, if_exists, clear_overwrite=bool(save))
+    manifest_path = os.path.join(data_dir, "manifest.json")
+    if reuse_existing and _corr_isfile(manifest_path):
+        cached = _corr_read_json(manifest_path)
+        _log.hint(f"[rhythm] Reusing run {resolved_label!r} (if_exists='skip').")
+        cached["reused"] = True
+        return cached
+    spec_tag = build_pipeline_suffix(
+        specificity=(specificity if _tag_specificity else None),
+        aliases=getattr(experiment, "aliases", None))
+    if save:
+        # save_fig only makedirs when a subfolder is given, so create the run
+        # folders up front (before any figure/table write) as the other pipelines do.
+        _corr_makedirs(fig_dir)
+        _corr_makedirs(data_dir)
+
+    tables = {}
+    phase_test = None
+    n_params = 0
+    n_significant = 0
+    extra = {}
+
+    if mode == "cosinor":
+        from PyFLASH.stats_extra import cosinor_table, cosinor_group_test, apply_fdr
+
+        present_cols = [c for c in cosinor_cols if c in df.columns]
+        for c in cosinor_cols:
+            if c not in df.columns:
+                _log.hint(f"[rhythm] cosinor column {c!r} not found; skipped.")
+        ct = []
+        for col in present_cols:
+            t = cosinor_table(df, time_col, col, group_col=gcol, animal_col=animal_col,
+                              period=period, period_free=period_free, method=method)
+            t.insert(0, "column", str(col))
+            ct.append(t)
+        if ct:
+            tables["cosinor_parameters"] = pd.concat(ct, ignore_index=True)
+        if gcol and len(groups) >= 2:
+            gt = []
+            for col in present_cols:
+                r = cosinor_group_test(df, time_col, col, gcol, period=period)
+                gt.append({"column": str(col), "F": r["F"], "p": r["p"],
+                           "df1": r["df1"], "df2": r["df2"], "n": r["n"]})
+            if gt:
+                gtd = pd.DataFrame(gt)
+                # Opt-in screen: correct the rhythm-difference p across the column
+                # panel and add a duplicate q, so gate='fdr' selects consistently
+                # with parameter mode. p is always kept.
+                if screen and gtd["p"].notna().any():
+                    fdr = apply_fdr(dict(zip(gtd["column"], gtd["p"])),
+                                    method="fdr_bh", alpha=float(alpha))
+                    gtd["p_adjusted"] = gtd["column"].map(
+                        dict(zip(fdr["label"], fdr["p_adjusted"])))
+                tables["cosinor_group_test"] = gtd
+                gcol_sel = ("p_adjusted" if (gate == "fdr" and "p_adjusted" in gtd.columns)
+                            else "p")
+                n_significant = int((pd.to_numeric(gtd[gcol_sel], errors="coerce")
+                                     < float(alpha)).sum())
+        drawn = 0
+        for col in present_cols:
+            try:
+                fig, _fits = plot_cosinor(
+                    df, col, time_col=time_col, group_col=gcol, period=period,
+                    period_free=period_free, palette=palette, save=save,
+                    save_path=fig_dir, save_name=f"Cosinor {col}{spec_tag}",
+                    montage=(drawn == 0), return_data=True)
+                plt.close(fig)
+                drawn += 1
+            except Exception as exc:
+                _log.warn(f"[rhythm] cosinor plot failed for {col!r}: {exc}")
+        n_params = len(present_cols)
+        extra["columns"] = [str(c) for c in present_cols]
+
+    else:  # parameter mode
+        from PyFLASH.stats_extra import circular_stats  # noqa: F401 (used via plot)
+
+        if phase_col not in df.columns:
+            raise ValueError(f"rhythm: phase_col {phase_col!r} not found in the data.")
+        fig, clock_stats = plot_acrophase_clock(
+            df, phase_col=phase_col, group_col=gcol, period=period,
+            group_order=group_order, palette=palette,
+            save=save, save_path=fig_dir, save_name=f"Acrophase Clock{spec_tag}",
+            montage=True, return_data=True)
+        plt.close(fig)
+        if radius_col and radius_col in df.columns:
+            try:
+                fig2, _ = plot_acrophase_clock(
+                    df, phase_col=phase_col, group_col=gcol, period=period,
+                    radius_col=radius_col, group_order=group_order, palette=palette,
+                    save=save, save_path=fig_dir, save_name=f"Phase-Amplitude{spec_tag}",
+                    montage=True, return_data=True)
+                plt.close(fig2)
+            except Exception as exc:
+                _log.warn(f"[rhythm] phase-amplitude plot failed: {exc}")
+
+        crows = [{"group": g, "n": st.get("n"), "mean_phase": st.get("mean"),
+                  "resultant_r": st.get("r"), "rayleigh_z": st.get("rayleigh_z"),
+                  "rayleigh_p": st.get("rayleigh_p")}
+                 for g, st in clock_stats.get("groups", {}).items()]
+        if crows:
+            tables["circular_phase_stats"] = pd.DataFrame(crows)
+        # Two complementary between-group circular tests: mean phase
+        # (Watson-Williams) AND spread (Wallraff dispersion), so a phase that
+        # keeps its mean but scatters more is not missed.
+        phase_test = clock_stats.get("watson_williams") or clock_stats.get("rayleigh")
+        phase_rows = []
+        if phase_test:
+            kind = "Watson-Williams (mean)" if "F" in phase_test else "Rayleigh (clustering)"
+            row = {"test": kind}
+            row.update({k: v for k, v in phase_test.items() if k != "means"})
+            phase_rows.append(row)
+        if gcol and len(groups) >= 2:
+            from PyFLASH.stats_extra import circular_dispersion_test
+            disp = circular_dispersion_test(
+                [pd.to_numeric(df[df[gcol].astype(str) == g][phase_col], errors="coerce")
+                 .dropna().to_numpy() for g in groups], period)
+            phase_rows.append({"test": "Wallraff (dispersion)", "statistic": disp["statistic"],
+                               "p": disp["p"], "k": disp["k"], "n": disp["n"]})
+        if phase_rows:
+            tables["phase_group_test"] = pd.DataFrame(phase_rows)
+
+        if param_cols and gcol and len(groups) >= 2:
+            pcols = [c for c in param_cols if c in df.columns]
+            if pcols:
+                pt = _rhythm_param_tests(df, pcols, gcol, groups,
+                                         screen=screen, families=families, alpha=alpha)
+                tables["parameter_tests"] = pt
+                n_params = len(pcols)
+                gate_col = "p_adjusted" if gate == "fdr" else "p_value"
+                if gate_col in pt.columns:
+                    n_significant = int((pd.to_numeric(pt[gate_col], errors="coerce")
+                                         < float(alpha)).sum())
+        extra["phase_col"] = str(phase_col)
+
+    if save:
+        _corr_makedirs(data_dir)
+        for name, tbl in tables.items():
+            if isinstance(tbl, pd.DataFrame) and not tbl.empty:
+                _corr_to_csv(tbl, os.path.join(data_dir, f"{name}{spec_tag}.csv"),
+                             index=False)
+
+    phase_test_p = (float(phase_test["p"]) if phase_test
+                    and np.isfinite(phase_test.get("p", np.nan)) else None)
+    manifest = {
+        "run_label": resolved_label, "pipeline": "rhythm", "mode": mode,
+        "period": float(period), "period_free": bool(period_free), "method": str(method),
+        "group_col": gcol, "groups": list(groups), "n_groups": len(groups),
+        "n_params": int(n_params), "phase_test": phase_test, "phase_test_p": phase_test_p,
+        "screen": bool(screen), "gate": gate, "alpha": float(alpha),
+        "n_significant": int(n_significant), "specificity": str(specificity),
+        "fig_dir": fig_dir, "data_dir": data_dir, "reused": False,
+    }
+    manifest.update(extra)
+    if save and write_manifest:
+        _corr_write_json(manifest, manifest_path)
+        _rhythm_append_runs_index(experiment, manifest)
+    _log.confirm(
+        f"[rhythm] {resolved_label}: mode={mode}, {len(groups)} groups, "
+        f"{n_params} params, {n_significant} significant.")
+
+    result = dict(manifest)
+    for name, tbl in tables.items():
+        result[name] = tbl
     return result

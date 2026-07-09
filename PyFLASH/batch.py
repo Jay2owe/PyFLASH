@@ -201,23 +201,6 @@ class Batch(Experiment):
         self.column_path = os.path.join(self.csv_path, "Columns")
         self.attribute_path = os.path.join(self.csv_path, "Attributes")
 
-        paths = [results, self.export_path, self.fig_path, self.image_fig_path,
-                 self.representative_path, self.legend_path, self.data_path,
-                 self.csv_path, self.column_path, self.attribute_path]
-        # Per-marker folders with analysis-type subfolders
-        analysis_types = ['Bars', 'Histograms', 'Ridgelines', 'ECDFs', 'PieCharts']
-        for marker in self.markers:
-            marker_dir = os.path.join(self.fig_path, marker)
-            paths.append(marker_dir)
-            for atype in analysis_types:
-                paths.append(os.path.join(marker_dir, atype))
-        # Cross-marker analysis-type folders
-        for atype in ['Matrices', 'Rectangular', 'Locations', 'Regressions',
-                      'Modelling', 'Volcano', 'UpSet', 'Sankey']:
-            paths.append(os.path.join(self.fig_path, atype))
-        for p in paths:
-            os.makedirs(p, exist_ok=True)
-
     def _resolve_export_save_path(self, save_path):
         if save_path is None:
             if not hasattr(self, "export_path"):
@@ -264,7 +247,7 @@ class Batch(Experiment):
         tracker.finish_item("Set Batch Conditions")
         tracker.start_item("Create Save Paths")
         self.createSavePaths()
-        tracker.finish_item("Create Save Paths", detail="Results folders ready")
+        tracker.finish_item("Create Save Paths", detail="Output paths configured")
         tracker.start_item("Import Images" if import_images else "Skip Images")
         if import_images:
             self.importImages(progress=progress)
@@ -581,13 +564,11 @@ class Batch(Experiment):
         unregistered_summary_save_name="Extra_Summary",
     ):
         save_path = self._resolve_export_save_path(save_path)
-        os.makedirs(save_path, exist_ok=True)
 
         if if_summary or if_extended:
             summaries = self._ensure_batch_summaries_for_export()
             for roi_base in summaries:
                 roi_path = os.path.join(save_path, roi_base.lower())
-                os.makedirs(roi_path, exist_ok=True)
                 if if_summary:
                     self.export_IF_summary_excel(
                         roi_path,
@@ -1118,11 +1099,11 @@ class Batch(Experiment):
 
     def export_behavior_summary_excel(self, save_path=None, *, include=None, exclude=None, save_name="Behavior_Summary"):
         save_path = self._resolve_export_save_path(save_path)
-        os.makedirs(save_path, exist_ok=True)
         try:
             beh_df = self.data["Behaviour"].df
         except:
             return
+        os.makedirs(save_path, exist_ok=True)
         conditions = self.condition_list
         regex_filters = _prepare_export_regex_filters(include=include, exclude=exclude, label="behavior")
         workbook_path, regex_report_path, workbook_stem = _resolve_export_paths(

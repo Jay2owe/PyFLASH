@@ -95,9 +95,10 @@ def test_group_comparison_detects_planted_difference(tmp_path):
     assert "q" not in rt.columns
 
     data_dir = res["data_dir"]
+    fig_dir = res["fig_dir"]
+    assert data_dir == fig_dir
     for fname in ("group_comparison_results.csv", "omnibus.csv", "manifest.json"):
         assert os.path.isfile(os.path.join(data_dir, fname)), fname
-    fig_dir = res["fig_dir"]
     assert os.path.isfile(os.path.join(fig_dir, "Effect Size Forest p.svg"))
     assert os.path.isfile(os.path.join(fig_dir, "Stats Matrix p.svg"))
     assert os.path.isfile(os.path.join(fig_dir, "Volcano", "Volcano AD vs WT p.svg"))
@@ -125,6 +126,7 @@ def test_screen_mode_adds_q_but_keeps_p(tmp_path):
     assert "q" in rt.columns and "p" in rt.columns   # invariant: p always present
     assert rt["p"].notna().any()
     fig_dir = res["fig_dir"]
+    assert res["data_dir"] == fig_dir
     # Every q figure has a p counterpart.
     assert os.path.isfile(os.path.join(fig_dir, "Effect Size Forest p.svg"))
     assert os.path.isfile(os.path.join(fig_dir, "Effect Size Forest q.svg"))

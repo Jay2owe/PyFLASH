@@ -2468,7 +2468,7 @@ class Experiment:
 
         tracker.start_item("Create Save Paths")
         self.createSavePaths()
-        self._last_save_path_summary = "Results folders ready"
+        self._last_save_path_summary = "Output paths configured"
         tracker.finish_item("Create Save Paths", detail=self._last_save_path_summary)
 
         tracker.start_item("Import Images" if import_images else "Skip Images")
@@ -3060,23 +3060,6 @@ class Experiment:
         self.column_path = os.path.join(self.csv_path, "Columns")
         self.attribute_path = os.path.join(self.csv_path, "Attributes")
 
-        paths = [results, self.fig_path, self.image_fig_path,
-                 self.representative_path, self.legend_path, self.data_path,
-                 self.csv_path, self.column_path, self.attribute_path]
-        # Per-marker folders with analysis-type subfolders
-        analysis_types = ['Bars', 'Histograms', 'Ridgelines', 'ECDFs', 'PieCharts']
-        for marker in self.markers:
-            marker_dir = os.path.join(self.fig_path, marker)
-            paths.append(marker_dir)
-            for atype in analysis_types:
-                paths.append(os.path.join(marker_dir, atype))
-        # Cross-marker analysis-type folders
-        for atype in ['Matrices', 'Rectangular', 'Locations', 'Regressions',
-                      'Modelling', 'Volcano', 'UpSet', 'Sankey']:
-            paths.append(os.path.join(self.fig_path, atype))
-        for p in paths:
-            os.makedirs(p, exist_ok=True)
-
     # ── Image import ───────────────────────────────────────────────────
 
     def importImages(self, progress=True):
@@ -3157,8 +3140,11 @@ class Experiment:
 
     def save_column_csvs(self):
         df = self.summary.copy()
+        os.makedirs(self.csv_path, exist_ok=True)
         df.to_csv(os.path.join(self.csv_path, 'Summary.csv'), index=False)
         cols = [c for c in df.columns if c not in ['Condition', 'AnimalName']]
+        if len(cols) > 0:
+            os.makedirs(self.column_path, exist_ok=True)
         for col in cols:
             col_data = {}
             for cond in self.condition_list:
@@ -3170,6 +3156,9 @@ class Experiment:
             cleaned.to_csv(os.path.join(self.column_path, f'{col}.csv'), index=False)
 
     def save_attribute_csvs(self):
+        if len(self.data) == 0:
+            return
+        os.makedirs(self.attribute_path, exist_ok=True)
         for attr_name, attr in self.data.items():
             attr_type = type(attr).__name__
             attr.df.to_csv(os.path.join(self.attribute_path, f'{attr_name}_{attr_type}.csv'))
@@ -3478,7 +3467,7 @@ class MiniExperiment(Experiment):
         tracker.finish_item("Create Summary", detail=getattr(self, "_last_summary_summary", None))
         tracker.start_item("Create Save Paths")
         self.createSavePaths()
-        tracker.finish_item("Create Save Paths", detail="Results folders ready")
+        tracker.finish_item("Create Save Paths", detail="Output paths configured")
         tracker.start_item("Import Images" if import_images else "Skip Images")
         if import_images:
             self.importImages(progress=progress)

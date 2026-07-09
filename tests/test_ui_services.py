@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 
 from PyFLASH.batch import Batch
+from PyFLASH.experiment import Experiment
 from PyFLASH.serialization import save_state
 from PyFLASH.ui import services
 
@@ -225,6 +226,136 @@ def _make_experiment(parent, name, *, data_subdirs=(), csv_in_data=False,
     return exp
 
 
+def test_batch_save_paths_are_lazy(tmp_path):
+    batch = Batch.__new__(Batch)
+    batch.filePath = str(tmp_path)
+    batch.markers = {"DAPI"}
+
+    batch.createSavePaths()
+
+    assert batch.fig_path == os.path.join(str(tmp_path), "Results", "Python Figures")
+    assert batch.export_path == os.path.join(str(tmp_path), "Exports")
+    assert not (tmp_path / "Results").exists()
+    assert not (tmp_path / "Exports").exists()
+
+
+def test_experiment_save_paths_are_lazy(tmp_path):
+    root = tmp_path / "Exp1"
+    root.mkdir()
+    exp = Experiment.__new__(Experiment)
+    exp.filePath = str(root / "Data Analysis")
+    exp.source_root = str(root)
+    exp.markers = {"GFAP"}
+
+    exp.createSavePaths()
+
+    assert exp.fig_path == os.path.join(str(root), "Results", "Python Figures")
+    assert not (root / "Results").exists()
+
+
+def test_save_csvs_creates_only_csv_outputs_when_used(tmp_path):
+    exp = Experiment.__new__(Experiment)
+    exp.name = "Exp1"
+    exp.condition_list = []
+    exp.data = {}
+    exp.summaries = {
+        "SCN": pd.DataFrame(
+            {"AnimalName": ["A1"], "Condition": ["WT"]}
+        )
+    }
+    exp.csv_path = str(tmp_path / "Results" / "Separate CSVs")
+    exp.column_path = os.path.join(exp.csv_path, "Columns")
+    exp.attribute_path = os.path.join(exp.csv_path, "Attributes")
+
+    exp.save_csvs()
+
+    assert (tmp_path / "Results" / "Separate CSVs" / "Summary.csv").is_file()
+    assert not (tmp_path / "Results" / "Separate CSVs" / "Columns").exists()
+    assert not (tmp_path / "Results" / "Separate CSVs" / "Attributes").exists()
+    assert not (tmp_path / "Results" / "Python Figures").exists()
+
+
+def test_save_csvs_creates_detail_folders_when_detail_outputs_exist(tmp_path):
+    exp = Experiment.__new__(Experiment)
+    exp.name = "Exp1"
+    exp.condition_list = [types.SimpleNamespace(name="WT")]
+    exp.data = {
+        "GFAP": types.SimpleNamespace(
+            df=pd.DataFrame({"AnimalName": ["A1"], "Value": [1]})
+        )
+    }
+    exp.summaries = {
+        "SCN": pd.DataFrame(
+            {"AnimalName": ["A1"], "Condition": ["WT"], "SCN_GFAP_Count": [1]}
+        )
+    }
+    exp.csv_path = str(tmp_path / "Results" / "Separate CSVs")
+    exp.column_path = os.path.join(exp.csv_path, "Columns")
+    exp.attribute_path = os.path.join(exp.csv_path, "Attributes")
+
+    exp.save_csvs()
+
+    assert (tmp_path / "Results" / "Separate CSVs" / "Columns" / "SCN_GFAP_Count.csv").is_file()
+    assert any((tmp_path / "Results" / "Separate CSVs" / "Attributes").iterdir())
+
+
+def test_save_fig_creates_actual_destination_folder(tmp_path, monkeypatch):
+    from matplotlib import pyplot as plt
+    from PyFLASH.config import Config
+    from PyFLASH.utils import save_fig
+
+    monkeypatch.setattr(Config, "SAVE_MODE", True)
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+
+    path = save_fig(
+        fig,
+        str(tmp_path / "Results" / "Python Figures"),
+        "lazy figure",
+        verbose=False,
+    )
+    plt.close(fig)
+
+    assert os.path.isfile(path)
+    assert not (tmp_path / "Results" / "Python Figures" / "Images").exists()
+    assert not (tmp_path / "Results" / "Separate CSVs").exists()
+
+
+def test_export_excel_no_selected_outputs_creates_no_export_folder(tmp_path):
+    batch = Batch.__new__(Batch)
+    batch.filePath = str(tmp_path)
+    batch.markers = set()
+
+    batch.export_excel(
+        if_summary=False,
+        if_extended=False,
+        behaviour=False,
+        unregistered_summary=False,
+    )
+
+    assert not (tmp_path / "Exports").exists()
+
+
+def test_behavior_export_without_behaviour_table_creates_no_export_folder(tmp_path):
+    batch = Batch.__new__(Batch)
+    batch.filePath = str(tmp_path)
+    batch.markers = set()
+    batch.data = {}
+
+    batch.export_behavior_summary_excel()
+
+    assert not (tmp_path / "Exports").exists()
+
+
+def test_save_state_accepts_current_directory_filename(tmp_path, monkeypatch):
+    batch = _make_minimal_batch()
+    monkeypatch.chdir(tmp_path)
+
+    save_state(batch, "ui_batch.pkl", verbose=False)
+
+    assert (tmp_path / "ui_batch.pkl").is_file()
+
+
 def test_validate_folder_valid_via_required_subdir(tmp_path):
     # Data Analysis/Objects/ present -> valid (the REQUIRED_ANY branch).
     exp = _make_experiment(str(tmp_path), "expA", data_subdirs=["Objects"])
@@ -401,6 +532,25 @@ def test_capture_output_restores_logger_on_exception():
         pass
 
     assert logger._output is prev
+
+
+def test_capture_output_captures_status_when_verbosity_is_low():
+    from PyFLASH._logging import Verbosity, logger
+
+    prev_output = logger._output
+    prev_verbosity = logger.verbosity
+    logger.verbosity = Verbosity.error
+    try:
+        with services.capture_output() as buf:
+            logger.status("shown during capture")
+        captured = buf.getvalue()
+    finally:
+        logger._output = prev_output
+        logger.verbosity = prev_verbosity
+
+    assert "shown during capture" in captured
+    assert logger._output is prev_output
+    assert logger.verbosity == prev_verbosity
 
 
 def test_run_create_batch_forwards_kwargs_and_returns_log(monkeypatch):

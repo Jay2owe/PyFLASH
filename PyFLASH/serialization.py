@@ -163,7 +163,7 @@ def save_state(obj, filename=None, verbose=True):
         filename = os.path.join(obj.csv_path, f"{obj.name}.pkl")
 
     obj._state_path = filename
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
     with open(filename, 'wb') as f:
         pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
 

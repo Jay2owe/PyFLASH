@@ -82,6 +82,7 @@ def test_data_overview_classifies_columns_and_counts_sentinel_vs_nan(tmp_path):
 
     # Files written into the run folder.
     data_dir = res["data_dir"]
+    assert data_dir == res["fig_dir"]
     for fname in ("manifest.json", "column_inventory.csv", "group_counts.csv",
                   "descriptive_stats.csv", "normality.csv", "outliers.csv",
                   "outlier_animals.csv", "covariation_pairs.csv",

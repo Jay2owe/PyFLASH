@@ -78,8 +78,11 @@ def extract_p_and_stats_from_results(result_object, comparisons):
     return statistics, pvalues
 
 
-def results_to_excel(results_dict, other, experiment_save_path, save_name, verbose=True):
-    out_path = f"{experiment_save_path}\\{save_name}.csv"
+def results_to_excel(results_dict, other, experiment_save_path, save_name,
+                     verbose=True, output_dir=None):
+    out_dir = output_dir or experiment_save_path
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{save_name}.csv")
     with open(out_path, "w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(["Statistics Results"])
@@ -527,16 +530,20 @@ def plot_comparison_lines_from_figdata(
     errobar_width=0.12, lw=2, pad=10, handles_fraction=0.3,
     max_override=None,
     group_values=None, group_positions=None, group_colors=None,
+    draw_error_bars=True,
 ):
-    if scatter is None or bar is None:
+    if scatter is None:
         return None
     annotations = annotations or []
     comparisons = comparisons or []
     if not hasattr(scatter, "collections") or not scatter.collections:
         return None
-    bar_xs = sorted({patch.get_x() + patch.get_width() / 2 for patch in bar.patches})
     if group_positions is not None and len(group_positions) > 0:
         bar_xs = [float(x) for x in group_positions]
+    elif bar is not None:
+        bar_xs = sorted({patch.get_x() + patch.get_width() / 2 for patch in bar.patches})
+    else:
+        return None
     if len(bar_xs) == 0:
         return None
 
@@ -603,12 +610,14 @@ def plot_comparison_lines_from_figdata(
     base_height = max_all + pad_height
     line_kws = {"lw": lw, "color": "black", "zorder": 1, "clip_on": False}
 
-    # Plot SEM lines at each bar center.
-    for i in range(n):
-        cx = centers_with_data[i]
-        c = color_by_center[cx]
-        ax.plot([cx, cx], [means[i], error_heights[i]], color=c, zorder=2.5, lw=2.5)
-        ax.plot([cx - errobar_width, cx + errobar_width], [error_heights[i], error_heights[i]], color=c, zorder=2.6, lw=2.5)
+    # Plot SEM lines at each bar center. Callers that already draw their own
+    # interval glyphs can suppress these while still using the bracket logic.
+    if draw_error_bars:
+        for i in range(n):
+            cx = centers_with_data[i]
+            c = color_by_center[cx]
+            ax.plot([cx, cx], [means[i], error_heights[i]], color=c, zorder=2.5, lw=2.5)
+            ax.plot([cx - errobar_width, cx + errobar_width], [error_heights[i], error_heights[i]], color=c, zorder=2.6, lw=2.5)
 
     # Default comparisons if none given.
     if comparisons == []:
@@ -801,6 +810,7 @@ def multipleComparisons(
     normality_dpi=120,
     draw=True,
     cache_key=None,
+    output_dir=None,
 ):
     """Run group and post-hoc tests, save stats CSV, and optionally annotate.
 
@@ -838,7 +848,9 @@ def multipleComparisons(
         results_strings = cached.get('results_strings', {})
         effect_strings = cached.get('effect_strings', [])
         if save_name:
-            results_to_excel(results_dict, results_strings, experiment.data_path, save_name, verbose=verbose)
+            results_to_excel(
+                results_dict, results_strings, experiment.data_path, save_name,
+                verbose=verbose, output_dir=output_dir)
         annotation_objects = None
         if draw:
             annotation_objects = plot_comparison_lines_from_figdata(
@@ -878,7 +890,9 @@ def multipleComparisons(
     normal, results_dict, norm_fig = test_normality(valid_groups, make_plot=save_normality)
     if save_name and save_normality and norm_fig is not None:
         fname = f"{strip_name(save_name)}_normality.png"
-        out_path = os.path.join(experiment.data_path, fname)
+        normality_dir = output_dir or experiment.data_path
+        os.makedirs(normality_dir, exist_ok=True)
+        out_path = os.path.join(normality_dir, fname)
         norm_fig.savefig(out_path, bbox_inches="tight", dpi=normality_dpi)
         if verbose:
             _log.confirm(f"Normality figure saved to {out_path}")
@@ -937,6 +951,7 @@ def multipleComparisons(
                 experiment.data_path,
                 save_name,
                 verbose=verbose,
+                output_dir=output_dir,
             )
         return "Error", f"Error: {err}", None, results_dict
 
@@ -979,7 +994,9 @@ def multipleComparisons(
             results_dict["Effect_error"] = [str(e), np.nan]
 
     if save_name:
-        results_to_excel(results_dict, results_strings, experiment.data_path, save_name, verbose=verbose)
+        results_to_excel(
+            results_dict, results_strings, experiment.data_path, save_name,
+            verbose=verbose, output_dir=output_dir)
     annotation_objects = None
     if draw:
         annotation_objects = plot_comparison_lines_from_figdata(

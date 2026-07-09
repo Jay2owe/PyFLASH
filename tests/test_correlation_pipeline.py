@@ -12,7 +12,7 @@ import pytest
 
 from PyFLASH import pipeline
 from PyFLASH.batch import Batch
-from PyFLASH.conditions import condition, conditionList
+from PyFLASH.conditions import condition, conditionList, zipConditionLists, zipConditions
 from PyFLASH.experiment import MiniExperiment
 from PyFLASH.plotting import (
     _CORR_PVALUE_CMAP,
@@ -329,14 +329,19 @@ def test_if_exists_policies(tmp_path):
     # No existing folder -> use the name as-is.
     fig_dir, data_dir, label, reuse = _corr_pipeline_run_dirs(exp, "run", "overwrite")
     assert label == "run" and reuse is False
+    assert data_dir == fig_dir
 
     os.makedirs(fig_dir)  # simulate a previous run on disk
-    os.makedirs(data_dir)
     stale_fig = os.path.join(fig_dir, "stale.svg")
     stale_data = os.path.join(data_dir, "stale.csv")
+    legacy_data_dir = os.path.join(exp.data_path, "Correlation Pipeline", "run")
+    os.makedirs(legacy_data_dir)
+    stale_legacy_data = os.path.join(legacy_data_dir, "stale.csv")
     with open(stale_fig, "w", encoding="utf-8") as fh:
         fh.write("old")
     with open(stale_data, "w", encoding="utf-8") as fh:
+        fh.write("old")
+    with open(stale_legacy_data, "w", encoding="utf-8") as fh:
         fh.write("old")
 
     # overwrite reuses the same label but clears stale generated artifacts.
@@ -344,6 +349,17 @@ def test_if_exists_policies(tmp_path):
     assert label_ow == "run" and reuse_ow is False
     assert not os.path.exists(stale_fig)
     assert not os.path.exists(stale_data)
+    assert not os.path.exists(stale_legacy_data)
+
+    legacy_only_dir = os.path.join(exp.data_path, "Correlation Pipeline", "legacy_only")
+    os.makedirs(legacy_only_dir)
+    legacy_only_stale = os.path.join(legacy_only_dir, "stale.csv")
+    with open(legacy_only_stale, "w", encoding="utf-8") as fh:
+        fh.write("old")
+    _f, _d, label_legacy, reuse_legacy = _corr_pipeline_run_dirs(
+        exp, "legacy_only", "overwrite")
+    assert label_legacy == "legacy_only" and reuse_legacy is False
+    assert not os.path.exists(legacy_only_stale)
 
     os.makedirs(fig_dir)  # recreate a prior run for the non-overwrite policies
 
@@ -393,6 +409,108 @@ def _human_batch(tmp_path):
     return batch
 
 
+def _crossed_diagnosis_sex_experiment(tmp_path):
+    rows = []
+    i = 0
+    for diag_i, diag in enumerate(("Control", "MCI", "AD")):
+        for sex in ("Female", "Male"):
+            for rep in range(5):
+                i += 1
+                x = float(rep + 1)
+                rows.append({
+                    "AnimalName": f"S{i:02d}",
+                    "Condition": f"{diag}{sex}",
+                    "Diagnosis": diag,
+                    "Sex": sex,
+                    "Ma": x + diag_i * 0.1,
+                    "Mb": (2.0 * x) + diag_i * 0.2,
+                    "Mc": float((rep % 3) + diag_i),
+                })
+    diagnosis = conditionList([
+        condition("Control", "Control", "#787a7c", "Diagnosis"),
+        condition("MCI", "MCI", "#4369b2", "Diagnosis"),
+        condition("AD", "AD", "#9f1c1f", "Diagnosis"),
+    ])
+    male, female = zipConditions(
+        ["Male", "Female"], ["Male", "Female"], [None, None], "Sex")
+    crossed = conditionList(
+        list(zipConditionLists(diagnosis, conditionList([male, female]))))
+    return SimpleNamespace(
+        summary=pd.DataFrame(rows),
+        fig_path=str(tmp_path / "Python Figures"),
+        data_path=str(tmp_path / "Data and Stats"),
+        condition_list=crossed,
+    )
+
+
+def test_pipeline_regressions_follow_matrix_factor_not_subconditions(tmp_path, monkeypatch):
+    exp = _crossed_diagnosis_sex_experiment(tmp_path)
+    calls = []
+
+    def fake_plot_regressions(*args, **kwargs):
+        calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(pipeline, "plot_regressions", fake_plot_regressions)
+
+    res = pipeline.correlation(
+        exp,
+        filtered_columns=["Ma", "Mb", "Mc"],
+        factor="Diagnosis",
+        tests=("pearsonr",),
+        require="or",
+        gate="p",
+        alpha=0.05,
+        min_n=3,
+        max_regressions=1,
+        run_label="diagnosis_grouped_regressions",
+        save=False,
+    )
+
+    assert {g["group"] for g in res["groups"]} == {"Control", "MCI", "AD"}
+    assert calls
+    assert {call["factor"] for call in calls} == {"Diagnosis"}
+    assert {call["specificity"] for call in calls} == {None}
+
+
+def test_pipeline_queue_regressions_follow_queued_specificity(tmp_path, monkeypatch):
+    exp = _crossed_diagnosis_sex_experiment(tmp_path)
+    calls = []
+
+    def fake_plot_regressions(*args, **kwargs):
+        calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(pipeline, "plot_regressions", fake_plot_regressions)
+
+    res = pipeline.correlation(
+        exp,
+        filtered_columns=["Ma", "Mb", "Mc"],
+        by="all",
+        specificity=[
+            ("Diagnosis", "Control"),
+            ("Diagnosis", "MCI"),
+            ("Diagnosis", "AD"),
+        ],
+        tests=("pearsonr",),
+        require="or",
+        gate="p",
+        alpha=0.05,
+        min_n=3,
+        max_regressions=1,
+        run_label="diagnosis_queue_regressions",
+        save=False,
+    )
+
+    assert calls
+    assert len(calls) == 1
+    assert res["n_regressions"] == len(calls)
+    assert {call["factor"] for call in calls} == {"Diagnosis"}
+    queued_scopes = [call["specificity"] for call in calls]
+    assert {scope[0] for scope in queued_scopes} == {"Diagnosis"}
+    assert all(set(scope[1]) == {"Control", "MCI", "AD"} for scope in queued_scopes)
+
+
 def test_pipeline_default_value_matrix_heatmap_is_p_value(tmp_path):
     batch = _human_batch(tmp_path)
     cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
@@ -413,8 +531,10 @@ def test_pipeline_default_value_matrix_heatmap_is_p_value(tmp_path):
     assert any("Pearson PValue Matrix" in f for f in svgs)
     assert not any("Pearson FDR QValue Matrix" in f for f in svgs)
 
-    assert os.path.isfile(os.path.join(res["data_dir"], "pvalues_Pearson.csv"))
-    assert os.path.isfile(os.path.join(res["data_dir"], "qvalues_Pearson.csv"))
+    assert os.path.isfile(os.path.join(matrices, "pvalues_Pearson.csv"))
+    assert os.path.isfile(os.path.join(matrices, "qvalues_Pearson.csv"))
+    assert not os.path.exists(os.path.join(res["data_dir"], "pvalues_Pearson.csv"))
+    assert not os.path.exists(os.path.join(res["data_dir"], "qvalues_Pearson.csv"))
 
 
 def test_pipeline_end_to_end_outputs(tmp_path):
@@ -433,18 +553,23 @@ def test_pipeline_end_to_end_outputs(tmp_path):
     assert res["run_label"] == "e2e"
     data_dir = res["data_dir"]
     fig_dir = res["fig_dir"]
+    assert data_dir == fig_dir
 
     # Tables.
     for name in ("pairwise_correlations.csv", "selected_pairs.csv", "manifest.json"):
         assert os.path.isfile(os.path.join(data_dir, name)), name
+    matrices = os.path.join(fig_dir, "Matrices")
     for disp in ("Pearson", "Spearman", "Kendall"):
-        assert os.path.isfile(os.path.join(data_dir, f"coef_{disp}.csv"))
-        assert os.path.isfile(os.path.join(data_dir, f"pvalues_{disp}.csv"))
-        assert os.path.isfile(os.path.join(data_dir, f"qvalues_{disp}.csv"))
+        assert os.path.isfile(os.path.join(matrices, f"coef_{disp}.csv"))
+        assert os.path.isfile(os.path.join(matrices, f"pvalues_{disp}.csv"))
+        assert os.path.isfile(os.path.join(matrices, f"qvalues_{disp}.csv"))
+        assert not os.path.exists(os.path.join(data_dir, f"coef_{disp}.csv"))
+        assert not os.path.exists(os.path.join(data_dir, f"pvalues_{disp}.csv"))
+        assert not os.path.exists(os.path.join(data_dir, f"qvalues_{disp}.csv"))
+    assert os.path.isfile(os.path.join(matrices, "gate_matrix.csv"))
     assert os.path.isfile(os.path.join(os.path.dirname(data_dir), "_runs_index.csv"))
 
     # Matrix figures: coefficient, raw p-value, FDR q-value, and gate overview.
-    matrices = os.path.join(fig_dir, "Matrices")
     svgs = [f for f in os.listdir(matrices) if f.endswith(".svg")]
     assert any("Pearson" in f for f in svgs)
     assert any("Pearson PValue Matrix" in f for f in svgs)
@@ -483,8 +608,10 @@ def test_pipeline_can_skip_plotted_pq_matrices(tmp_path):
     assert not any("QValue Matrix" in f for f in svgs)
 
     # The tables are still part of the run even when the heatmaps are skipped.
-    assert os.path.isfile(os.path.join(res["data_dir"], "pvalues_Pearson.csv"))
-    assert os.path.isfile(os.path.join(res["data_dir"], "qvalues_Pearson.csv"))
+    assert os.path.isfile(os.path.join(matrices, "pvalues_Pearson.csv"))
+    assert os.path.isfile(os.path.join(matrices, "qvalues_Pearson.csv"))
+    assert not os.path.exists(os.path.join(res["data_dir"], "pvalues_Pearson.csv"))
+    assert not os.path.exists(os.path.join(res["data_dir"], "qvalues_Pearson.csv"))
 
 
 def test_pipeline_specificity_queue_merges_into_one_folder(tmp_path):
@@ -571,7 +698,7 @@ def test_pipeline_save_false_does_not_clear_existing_run(tmp_path):
     cols = [c for c in ["Ma", "Mb", "Mc", "Md"] if c in batch.summary.columns]
 
     fig_run = os.path.join(batch.fig_path, "Correlation Pipeline", "dry")
-    data_run = os.path.join(batch.data_path, "Correlation Pipeline", "dry")
+    data_run = fig_run
     os.makedirs(fig_run, exist_ok=True)
     os.makedirs(data_run, exist_ok=True)
     stale_fig = os.path.join(fig_run, "stale.svg")
@@ -615,6 +742,7 @@ def test_plot_matrix_differences_outputs_and_values(tmp_path):
     )
 
     assert res["run_label"] == "diag_diff"
+    assert res["data_dir"] == res["fig_dir"]
     assert res["comparisons"][0]["left_group"] == "AD"
     assert res["comparisons"][0]["right_group"] == "MCI"
     assert os.path.isfile(os.path.join(res["data_dir"], "manifest.json"))
