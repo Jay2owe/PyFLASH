@@ -9,8 +9,9 @@ Two jobs:
 
 2. **Behaviour.** The capture collector + ``save_fig`` observer record the right
    panels, ``build_montage`` writes one grid PNG, and each pipeline drops a
-   ``00 - Overview Montage.png`` into its run folder (honouring the ``montage`` /
-   ``save`` toggles, and letting specificity-queue *children* each build their own).
+   ``! Overview Montage.png`` (``Config.MONTAGE_FILENAME``) into its run folder
+   (honouring the ``montage`` / ``save`` toggles, resolving the config override /
+   legacy name, and letting specificity-queue *children* each build their own).
 """
 
 import inspect
@@ -172,6 +173,35 @@ def test_build_montage_empty_returns_none(tmp_path):
                             str(tmp_path), title="Demo") is None
 
 
+# ── 2b-bis. montage filename resolution + legacy fallback ─────────────────────
+def test_montage_filename_resolution():
+    # explicit wins; else Config.MONTAGE_FILENAME; else the module default.
+    assert pm._montage_filename("Custom Name") == "Custom Name"
+    assert pm._montage_filename() == pm.DEFAULT_MONTAGE_FILENAME
+    prev = Config.MONTAGE_FILENAME
+    Config.MONTAGE_FILENAME = "00 - Overview Montage"
+    try:
+        assert pm._montage_filename() == "00 - Overview Montage"
+        # explicit still overrides a config value
+        assert pm._montage_filename("Forced") == "Forced"
+    finally:
+        Config.MONTAGE_FILENAME = prev
+
+
+def test_existing_montage_finds_legacy_name(tmp_path):
+    # A run reused after the montage rename still resolves a montage the original
+    # run wrote under the historical "00 - Overview Montage.png" name.
+    fig_dir = str(tmp_path)
+    legacy = os.path.join(fig_dir, "00 - Overview Montage.png")
+    with open(legacy, "wb") as fh:
+        fh.write(b"\x89PNG\r\n")
+    result = {"reused": True, "fig_dir": fig_dir}
+    assert pm._existing_montage(result, pm.DEFAULT_MONTAGE_FILENAME) == legacy
+    # a non-reused run yields nothing even if a montage file exists
+    assert pm._existing_montage({"reused": False, "fig_dir": fig_dir},
+                                pm.DEFAULT_MONTAGE_FILENAME) is None
+
+
 # ── 2c. end-to-end through the pipelines ─────────────────────────────────────
 def _montage_path(res):
     return res.get("montage")
@@ -243,6 +273,21 @@ def test_reused_run_points_at_existing_montage(tmp_path):
     assert second.get("reused") is True
     assert second.get("montage") == first["montage"]
     assert os.path.isfile(second["montage"])
+
+
+def test_data_overview_montage_config_override(tmp_path):
+    # Setting Config.MONTAGE_FILENAME restores the historical name without a code
+    # edit; the decorator resolves it at run time.
+    exp = _dataset(tmp_path)
+    prev = Config.MONTAGE_FILENAME
+    Config.MONTAGE_FILENAME = "00 - Overview Montage"
+    try:
+        res = pipeline.data_overview(exp, run_label="ovw_legacy", save=True)
+    finally:
+        Config.MONTAGE_FILENAME = prev
+    montage = _montage_path(res)
+    assert montage and os.path.isfile(montage)
+    assert os.path.basename(montage) == "00 - Overview Montage.png"
 
 
 def test_specificity_queue_builds_one_combined_montage(tmp_path):

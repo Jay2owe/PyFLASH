@@ -65,6 +65,11 @@ class Config:
 
     # ── Save mode ──────────────────────────────────────────────────────
     SAVE_MODE = True   # False to skip saving figures
+    # Filename (no extension) of the per-run overview montage every pipeline
+    # writes. The leading "!" sorts it above digits and letters in Windows
+    # Explorer so it stays the first thing seen in a run folder. Set to
+    # "00 - Overview Montage" to restore the historical name.
+    MONTAGE_FILENAME = "! Overview Montage"
     SKIP_EXISTING = False  # True to skip saving when output file already exists
     EXPORT_HTML = False  # True to export interactive Altair HTML alongside SVG plots
     STATS_CACHE = False  # True to cache stats results within a session

@@ -57,9 +57,32 @@ from contextlib import contextmanager
 
 from PyFLASH._logging import logger as _log
 
-# Default filename — the leading "00" sorts the montage to the top of the folder
-# so it is the first thing seen when browsing a run's figures.
-DEFAULT_MONTAGE_FILENAME = "00 - Overview Montage"
+# Default filename — the leading "!" sorts the montage to the top of the folder
+# (Windows Explorer's StrCmpLogicalW orders punctuation above 0-9 and A-Z) so it
+# is the first thing seen when browsing a run's figures, without leaking sort
+# scaffolding like the old "00 - " prefix into a user-facing name. Overridable
+# per-run via ``Config.MONTAGE_FILENAME`` (resolved by ``_montage_filename``).
+DEFAULT_MONTAGE_FILENAME = "! Overview Montage"
+# Historical montage names, tried as a fallback when locating a montage a prior
+# run already wrote (so reused runs made before the rename still resolve).
+LEGACY_MONTAGE_FILENAMES = ("00 - Overview Montage",)
+
+
+def _montage_filename(explicit=None):
+    """Resolve the montage filename (no extension) for a run.
+
+    An ``explicit`` value (passed to the decorator) always wins; otherwise read
+    ``Config.MONTAGE_FILENAME`` so a user can override or restore the old name
+    without a code edit, falling back to :data:`DEFAULT_MONTAGE_FILENAME`. Fully
+    guarded — a heavy or circular ``Config`` import must never raise into a run.
+    """
+    if explicit is not None:
+        return explicit
+    try:
+        from PyFLASH.config import Config
+        return getattr(Config, "MONTAGE_FILENAME", None) or DEFAULT_MONTAGE_FILENAME
+    except Exception:
+        return DEFAULT_MONTAGE_FILENAME
 # DPI for the per-panel raster snapshots. Panels are small tiles, so a modest DPI
 # keeps the captured bytes (and the final montage) light without looking blurry.
 CAPTURE_DPI = 96
@@ -215,7 +238,7 @@ def _grid_shape(n):
     return nrows, ncols
 
 
-def build_montage(panels, fig_dir, *, title, filename=DEFAULT_MONTAGE_FILENAME,
+def build_montage(panels, fig_dir, *, title, filename=None,
                   max_panels=DEFAULT_MAX_PANELS, n_nonkey_omitted=0):
     """Tile captured panels into one montage PNG in ``fig_dir``; return its path.
 
@@ -223,8 +246,10 @@ def build_montage(panels, fig_dir, *, title, filename=DEFAULT_MONTAGE_FILENAME,
     non-key panels (regressions). The grid is capped at ``max_panels`` tiles; any
     panels beyond that — plus non-key figures never captured (``n_nonkey_omitted``)
     — are summarised in an overflow caption. Returns ``None`` when there is nothing
-    to montage.
+    to montage. ``filename`` defaults to :func:`_montage_filename` (the config
+    value, else :data:`DEFAULT_MONTAGE_FILENAME`); pass a string to force one.
     """
+    filename = _montage_filename(filename)
     panels = [p for p in (panels or []) if p and p.get("png")]
     if not panels or not fig_dir:
         return None
@@ -315,11 +340,16 @@ def _existing_montage(result, filename):
         return None
     from PyFLASH import pipeline_io as _pio
 
-    candidate = os.path.join(fig_dir, f"{filename}.png")
-    return candidate if _pio.isfile(candidate) else None
+    # Try the current name first, then any historical name, so a run reused after
+    # the montage rename still resolves the montage the original run wrote.
+    for name in (filename, *LEGACY_MONTAGE_FILENAMES):
+        candidate = os.path.join(fig_dir, f"{name}.png")
+        if _pio.isfile(candidate):
+            return candidate
+    return None
 
 
-def montage_pipeline(*, title=None, filename=DEFAULT_MONTAGE_FILENAME,
+def montage_pipeline(*, title=None, filename=None,
                      max_panels=DEFAULT_MAX_PANELS):
     """Decorate a pipeline so every run emits an overview montage of its key graphs.
 
@@ -367,6 +397,9 @@ def montage_pipeline(*, title=None, filename=DEFAULT_MONTAGE_FILENAME,
             if not (save_on and montage_on):
                 return func(*args, **kwargs)
 
+            # Resolve once per run so build + reuse-lookup agree on the name and a
+            # user's Config.MONTAGE_FILENAME override is picked up at call time.
+            resolved_filename = _montage_filename(filename)
             with capture_session() as state:
                 result = func(*args, **kwargs)
                 if _should_montage(result):
@@ -375,7 +408,7 @@ def montage_pipeline(*, title=None, filename=DEFAULT_MONTAGE_FILENAME,
                             list(state["panels"]),
                             result.get("fig_dir"),
                             title=_run_title(base_title, result),
-                            filename=filename,
+                            filename=resolved_filename,
                             max_panels=max_panels,
                             n_nonkey_omitted=state.get("n_nonkey_omitted", 0),
                         )
@@ -386,7 +419,7 @@ def montage_pipeline(*, title=None, filename=DEFAULT_MONTAGE_FILENAME,
                 else:
                     # A reused run (if_exists='skip') doesn't rebuild — point it at
                     # the montage the original run already wrote, if it survives.
-                    existing = _existing_montage(result, filename)
+                    existing = _existing_montage(result, resolved_filename)
                     if existing:
                         result["montage"] = existing
             return result

@@ -9,6 +9,7 @@ import pytest
 
 from PyFLASH.modelling import run_linear_model_pipeline
 from PyFLASH.pipeline import linear_model
+from PyFLASH import pipeline_montage as pm
 from PyFLASH import report
 from PyFLASH.plotting import _linear_model_adjusted_means_figure
 from PyFLASH.spec import PLOT_REGISTRY, _resolve_func, describe_status
@@ -143,7 +144,7 @@ def test_linear_model_pipeline_saves_adjusted_means_and_plots(tmp_path):
     assert result["adjusted_mean_comparisons"]["p_adjusted"].notna().all()
 
     assert (fig_dir / "Coefficient Forest.svg").exists()
-    assert (fig_dir / "00 - Overview Montage.png").exists()
+    assert (fig_dir / f"{pm.DEFAULT_MONTAGE_FILENAME}.png").exists()
     adjusted_svgs = glob.glob(str(adjusted_dir / "*.svg"))
     assert len(adjusted_svgs) == 2
     svg_text = Path(adjusted_svgs[0]).read_text(encoding="utf-8")

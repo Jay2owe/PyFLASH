@@ -51,7 +51,9 @@ doesn't exist yet. Eight layers:
    it `DESCRIBE_COVERED` — see the `pyflash-add-plot` skill's describe-layer contract.
 8. **Montage layer** — `PyFLASH/pipeline_montage.py`: every analysis pipeline run writes,
    on top of its many individual figures, one **overview montage** —
-   `00 - Overview Montage.png`, sorted to the top of the run's `fig_dir` — tiling the run's
+   `! Overview Montage.png` (the `!` sorts it to the top of the run's `fig_dir`; the name
+   is `Config.MONTAGE_FILENAME`, resolved at run time, so a user can override or restore the
+   old `00 - Overview Montage` without a code edit) — tiling the run's
    most important graphs (coefficient + gate matrices, raw/adjusted matrices, missingness +
    covariation maps, and the top regression scatter plots). Mechanism mirrors the describe
    layer: an opt-in, inert-by-default capture collector taps `utils.save_fig` (the single
