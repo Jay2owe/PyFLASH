@@ -248,6 +248,7 @@ def test_data_overview_section_toggles_skip_work(tmp_path):
         include_covariation=False,
         include_condition_distributions=False,
         include_significance_audit=False,
+        include_scorecard=False,
         include_effect_sizes=False,
         run_label="overview_inventory_only",
         save=True,
@@ -876,3 +877,86 @@ def test_sig_audit_bundle_assembled(tmp_path):
         actual = pipeline_io.sha256_file(
             os.path.join(bundle, "data", "der", row["copied_file_name"]))
         assert row["sha256"] == actual
+
+
+# ── Stage 07: dataset-health scorecard + narrative ───────────────────────────
+def test_scorecard_written_and_on_montage(tmp_path):
+    exp = _overview_dataset(tmp_path)
+    res = pipeline.data_overview(exp, by="conditions", run_label="sc", save=True)
+    sc = res["scorecard"]
+    assert list(sc["axis"]) == ["missingness", "n_adequacy", "normality",
+                                "outliers", "collinearity", "imbalance"]
+    # every axis has a grade, a driving value, and its threshold rule printed.
+    assert set(sc["grade"]) <= {"green", "amber", "red", "grey"}
+    assert (sc["rule"].str.len() > 0).all()
+    assert os.path.isfile(os.path.join(res["data_dir"], "scorecard.csv"))
+    assert os.path.isfile(os.path.join(res["fig_dir"], "Dataset Health.svg"))
+    montage = res.get("montage")
+    assert montage and os.path.isfile(montage)
+    assert res["dataset_health_narrative"]
+    assert res["scorecard"] is not None
+
+
+def test_scorecard_emits_dataset_health_describe_record(tmp_path):
+    import PyFLASH.report as report
+    exp = _overview_dataset(tmp_path)
+    report.start()
+    try:
+        res = pipeline.data_overview(exp, by="conditions",
+                                     run_label="sc_health", save=True)
+        records = report.collect()
+    finally:
+        if report.is_active():
+            report.collect()
+    health = [r for r in records if r.get("kind") == "dataset_health"]
+    assert health, "no dataset_health record emitted"
+    assert "grades" in health[0] and "narrative" in health[0]
+    # narrative in the record matches the returned narrative (single source of truth).
+    assert health[0]["narrative"] == res["dataset_health_narrative"]
+
+
+def test_scorecard_thresholds_are_parameters(tmp_path):
+    # An imbalanced design (16 vs 8 = 2.0x): default amber, but tightening the red
+    # cutoff below 2.0 must flip it to red (thresholds are real parameters).
+    n = 24
+    summary = pd.DataFrame({
+        "AnimalName": [f"S{i:02d}" for i in range(n)],
+        "Condition": (["WT"] * 16 + ["KO"] * 8),
+        "Sex": np.where(np.arange(n) % 2 == 0, "F", "M"),
+        "A": np.random.default_rng(0).normal(10, 2, n),
+    })
+    exp = SimpleNamespace(
+        summary=summary, summaries={"SCN": summary},
+        fig_path=str(tmp_path / "f"), data_path=str(tmp_path / "d"),
+        condition_list=[SimpleNamespace(name="WT"), SimpleNamespace(name="KO")])
+    os.makedirs(exp.fig_path, exist_ok=True)
+    os.makedirs(exp.data_path, exist_ok=True)
+    base = pipeline.data_overview(exp, by="conditions", run_label="sc_a", save=False)
+    assert base["scorecard"].set_index("axis").loc["imbalance", "grade"] == "amber"
+    tight = pipeline.data_overview(
+        exp, by="conditions", run_label="sc_b", save=False,
+        scorecard_thresholds={"imbalance_amber": 1.1, "imbalance_red": 1.9})
+    assert tight["scorecard"].set_index("axis").loc["imbalance", "grade"] == "red"
+
+
+def test_scorecard_narrative_deterministic_and_grounded(tmp_path):
+    from PyFLASH.pipeline import _ovw_scorecard, _ovw_narrative
+    inventory = pd.DataFrame({"column": ["A", "B"], "pct_missing": [50.0, 0.0]})
+    group_counts = pd.DataFrame({
+        "grouping": ["(all)", "Condition", "Condition"],
+        "level": ["(total)", "WT", "KO"], "n_animals": [12, 8, 4]})
+    normality = pd.DataFrame({"is_normal": [True, False, True, True]})
+    covariation = pd.DataFrame({"x": ["A"], "y": ["B"], "abs_r": [0.97]})
+    sc = _ovw_scorecard(inventory, group_counts, normality, covariation,
+                        n_outlier_animals=0, n_animals=12, numeric_cols=["A", "B"],
+                        min_n=3)
+    grades = dict(zip(sc["axis"], sc["grade"]))
+    assert grades["missingness"] == "red"        # 50% >= 30
+    assert grades["n_adequacy"] == "amber"        # smallest group 4: >=3 but <6
+    assert grades["imbalance"] == "amber"         # 8/4 = 2.0: >= amber 1.5, < red 3.0
+    assert grades["collinearity"] == "amber"      # one covarying pair
+    n1 = _ovw_narrative(sc, group_counts, covariation, 12)
+    n2 = _ovw_narrative(sc, group_counts, covariation, 12)
+    assert n1 == n2                               # deterministic
+    assert "12 animal" in n1 and "WT: 8" in n1 and "KO: 4" in n1
+    assert "|r|=0.97" in n1                        # grounded in the computed value

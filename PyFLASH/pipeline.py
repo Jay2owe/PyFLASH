@@ -59,6 +59,7 @@ from PyFLASH.plotting import (
     _effect_forest_figure,
     _stats_matrix_figure,
     _ovw_sig_audit_matrix_figure,
+    _ovw_scorecard_figure,
     _volcano_table_figure,
     _resolve_marker_roi_long,
     _animal_group_map_from_groups,
@@ -3976,6 +3977,145 @@ def _ovw_sig_audit_bundle(experiment, data_dir, significance_audit,
         return None
 
 
+def _ovw_grade(value, amber, red, *, higher_worse=True):
+    """green / amber / red by two thresholds; grey when the value is missing."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "grey"
+    if not np.isfinite(v):
+        return "grey"
+    if higher_worse:
+        return "red" if v >= red else ("amber" if v >= amber else "green")
+    return "red" if v <= red else ("amber" if v <= amber else "green")
+
+
+_OVW_SCORECARD_DEFAULTS = {
+    "missing_amber_pct": 10.0, "missing_red_pct": 30.0,
+    "normal_amber_frac": 0.7, "normal_red_frac": 0.5,
+    "outlier_amber_frac": 0.10, "outlier_red_frac": 0.25,
+    "collinear_amber": 1, "collinear_red": 3,
+    "imbalance_amber": 1.5, "imbalance_red": 3.0,
+}
+
+
+def _ovw_scorecard(inventory, group_counts, normality, covariation,
+                   n_outlier_animals, n_animals, numeric_cols, *,
+                   min_n=3, thresholds=None):
+    """Six-axis traffic-light scorecard over sections data_overview already computed.
+
+    Axes: missingness, N-adequacy, normality pass-rate, outlier load, collinearity,
+    design imbalance. Each row is ``(axis, grade, value, rule)`` with the threshold
+    rule printed on the chip so no cutoff masquerades as truth; every threshold is
+    overridable via ``thresholds``. Graded per-axis — no seductive single letter.
+    """
+    th = dict(_OVW_SCORECARD_DEFAULTS)
+    if thresholds:
+        th.update(thresholds)
+    num = set(numeric_cols or [])
+    rows = []
+
+    miss = np.nan
+    if (isinstance(inventory, pd.DataFrame) and not inventory.empty
+            and "pct_missing" in inventory.columns):
+        sub = (inventory[inventory["column"].isin(num)]
+               if num and "column" in inventory.columns else inventory)
+        vals = pd.to_numeric(sub.get("pct_missing"), errors="coerce")
+        miss = float(vals.max()) if vals.notna().any() else np.nan
+    rows.append(("missingness",
+                 _ovw_grade(miss, th["missing_amber_pct"], th["missing_red_pct"]),
+                 (f"max {miss:.0f}% missing" if np.isfinite(miss) else "n/a"),
+                 f"amber>={th['missing_amber_pct']:g}% red>={th['missing_red_pct']:g}%"))
+
+    grp = pd.DataFrame()
+    if isinstance(group_counts, pd.DataFrame) and not group_counts.empty:
+        grp = (group_counts[group_counts["grouping"].astype(str) != "(all)"]
+               if "grouping" in group_counts.columns else group_counts)
+    gsizes = (pd.to_numeric(grp.get("n_animals"), errors="coerce").dropna()
+              if not grp.empty else pd.Series(dtype=float))
+
+    min_group = float(gsizes.min()) if len(gsizes) else np.nan
+    if not np.isfinite(min_group):
+        n_grade, n_val = "grey", "n/a"
+    elif min_group < min_n:
+        n_grade, n_val = "red", f"smallest group n={min_group:.0f}"
+    elif min_group < 2 * min_n:
+        n_grade, n_val = "amber", f"smallest group n={min_group:.0f}"
+    else:
+        n_grade, n_val = "green", f"smallest group n={min_group:.0f}"
+    rows.append(("n_adequacy", n_grade, n_val, f"red<{min_n} amber<{2 * min_n}"))
+
+    norm_frac = np.nan
+    if (isinstance(normality, pd.DataFrame) and not normality.empty
+            and "is_normal" in normality.columns):
+        isn = normality["is_normal"].astype("boolean")
+        if isn.notna().any():
+            norm_frac = float(isn.mean())
+    rows.append(("normality",
+                 _ovw_grade(norm_frac, th["normal_amber_frac"],
+                            th["normal_red_frac"], higher_worse=False),
+                 (f"{norm_frac * 100:.0f}% normal" if np.isfinite(norm_frac) else "n/a"),
+                 f"amber<={th['normal_amber_frac']:.0%} red<={th['normal_red_frac']:.0%}"))
+
+    out_frac = (float(n_outlier_animals) / float(n_animals)) if n_animals else np.nan
+    rows.append(("outliers",
+                 _ovw_grade(out_frac, th["outlier_amber_frac"], th["outlier_red_frac"]),
+                 (f"{int(n_outlier_animals)}/{int(n_animals)} animals"
+                  if n_animals else "n/a"),
+                 f"amber>={th['outlier_amber_frac']:.0%} red>={th['outlier_red_frac']:.0%}"))
+
+    n_pairs = int(len(covariation)) if isinstance(covariation, pd.DataFrame) else 0
+    rows.append(("collinearity",
+                 _ovw_grade(n_pairs, th["collinear_amber"], th["collinear_red"]),
+                 f"{n_pairs} covarying pair(s)",
+                 f"amber>={th['collinear_amber']} red>={th['collinear_red']}"))
+
+    if len(gsizes) >= 2 and gsizes.min() > 0:
+        ratio = float(gsizes.max() / gsizes.min())
+    else:
+        ratio = np.nan
+    rows.append(("imbalance",
+                 _ovw_grade(ratio, th["imbalance_amber"], th["imbalance_red"]),
+                 (f"{ratio:.1f}x largest/smallest" if np.isfinite(ratio) else "n/a"),
+                 f"amber>={th['imbalance_amber']:g}x red>={th['imbalance_red']:g}x"))
+
+    return pd.DataFrame(rows, columns=["axis", "grade", "value", "rule"])
+
+
+def _ovw_narrative(scorecard, group_counts, covariation, n_animals):
+    """Deterministic plain-English summary from the same computed scorecard values.
+
+    Ordered worst-first (red before amber); every clause is guarded on data presence
+    so the narrative never contradicts a figure (single source of truth).
+    """
+    parts = []
+    conds = []
+    if (isinstance(group_counts, pd.DataFrame)
+            and "grouping" in group_counts.columns):
+        cg = group_counts[group_counts["grouping"].astype(str) == "Condition"]
+        conds = [f"{r['level']}: {int(r['n_animals'])}" for _, r in cg.iterrows()]
+    head = f"This dataset has {int(n_animals)} animal(s)"
+    if conds:
+        head += f" across {len(conds)} condition(s) ({', '.join(conds)})"
+    parts.append(head + ".")
+
+    order = {"red": 0, "amber": 1}
+    flagged = [r for r in scorecard.to_dict("records")
+               if r["grade"] in ("red", "amber")]
+    flagged.sort(key=lambda r: order.get(r["grade"], 9))
+    for r in flagged:
+        parts.append(f"{str(r['axis']).replace('_', ' ').capitalize()} is "
+                     f"{r['grade'].upper()} ({r['value']}).")
+    if isinstance(covariation, pd.DataFrame) and not covariation.empty \
+            and {"x", "y", "abs_r"}.issubset(covariation.columns):
+        top = covariation.iloc[0]
+        parts.append(f"{top['x']} and {top['y']} covary "
+                     f"(|r|={float(top['abs_r']):.2f}).")
+    if not flagged:
+        parts.append("No dataset-health axis is flagged.")
+    return " ".join(parts)
+
+
 @montage_pipeline(title="Data Overview Pipeline")
 def data_overview(
     experiment,
@@ -4033,6 +4173,9 @@ def data_overview(
     plot_condition_variability=True,
     plot_effect_sizes=True,
     plot_significance_audit=True,
+    include_scorecard=True,
+    plot_scorecard=True,
+    scorecard_thresholds=None,
     condition_distribution_plot="raincloud",
     fingerprint_stat="median",
     variability_stat="cv_pct",
@@ -4406,6 +4549,31 @@ def data_overview(
             except Exception:
                 pass
 
+    # Dataset-health scorecard + deterministic narrative: fold the sections already
+    # computed into six traffic-light axes and a plain-English summary, then hand the
+    # structured facts to the describe layer (single source of truth for both).
+    _n_animals = int(len(scope_df)) if scope_df is not None else 0
+    _n_outlier_animals = int(len(outlier_animals)) if outlier_animals is not None else 0
+    scorecard = pd.DataFrame()
+    scorecard_narrative = ""
+    if include_scorecard:
+        scorecard = _ovw_scorecard(
+            inventory, group_counts, normality, covarying,
+            _n_outlier_animals, _n_animals, numeric_cols,
+            min_n=min_n, thresholds=scorecard_thresholds)
+        scorecard_narrative = _ovw_narrative(
+            scorecard, group_counts, covarying, _n_animals)
+        try:
+            from PyFLASH import report as _report
+            _report.emit({
+                "headline": "Dataset health",
+                "kind": "dataset_health",
+                "grades": dict(zip(scorecard["axis"], scorecard["grade"])),
+                "narrative": scorecard_narrative,
+            })
+        except Exception:
+            pass
+
     # ── write tables + figures ──────────────────────────────────────────────
     if save:
         _corr_makedirs(data_dir)
@@ -4470,10 +4638,15 @@ def data_overview(
                     data_dir, f"significance_audit_transitions{spec_tag}.csv"),
                 index=False,
             )
+        if include_scorecard and not scorecard.empty:
+            _corr_to_csv(
+                scorecard,
+                os.path.join(data_dir, f"scorecard{spec_tag}.csv"), index=False)
 
         if any((
             plot_group_counts, plot_availability, plot_descriptives,
             plot_normality, plot_outliers, plot_covariation_pairs,
+            plot_scorecard,
             plot_condition_distributions, plot_condition_distribution_zscores,
             plot_condition_fingerprint, plot_condition_variability,
             plot_effect_sizes, plot_missingness, plot_covariation,
@@ -4638,6 +4811,13 @@ def data_overview(
                 save_fig(tfig, fig_dir, f"Significance Audit Transitions{spec_tag}",
                          montage=True)
                 plt.close(tfig)
+        if plot_scorecard and include_scorecard and not scorecard.empty:
+            scfig = _ovw_scorecard_figure(
+                scorecard, narrative=scorecard_narrative,
+                tick_label_size=tick_label_size, title="Dataset health")
+            if scfig is not None:
+                save_fig(scfig, fig_dir, f"Dataset Health{spec_tag}", montage=True)
+                plt.close(scfig)
         if plot_missingness:
             mfig = _ovw_missingness_figure(
                 scope_df, resolved_columns, tick_label_size,
@@ -4719,6 +4899,9 @@ def data_overview(
         "n_audit_significant": n_audit_significant,
         "n_audit_gained": n_audit_gained,
         "n_audit_lost": n_audit_lost,
+        "scorecard": (dict(zip(scorecard["axis"], scorecard["grade"]))
+                      if not scorecard.empty else {}),
+        "dataset_health_narrative": scorecard_narrative,
         "alpha": float(alpha),
         "plots": {
             "group_counts": bool(plot_group_counts),
@@ -4801,6 +4984,8 @@ def data_overview(
     result["significance_audit_transitions"] = audit_transitions
     result["provenance"] = provenance_record
     result["sig_audit_bundle"] = sig_audit_bundle
+    result["scorecard"] = scorecard
+    result["dataset_health_narrative"] = scorecard_narrative
     return result
 
 

@@ -36,6 +36,11 @@ from PyFLASH.iteration import Context, run
 from PyFLASH.config import Config, apply_matplotlib_fast_path
 apply_matplotlib_fast_path()  # apply path-simplify rcParams + ioff() once, lazily
 from PyFLASH.dataframe import coerce_dataframe_input
+from PyFLASH.aliases import (
+    prefer_alias,
+    resolve_data_column_aliases,
+    resolve_split_filter_aliases,
+)
 from PyFLASH._logging import logger as _log
 from PyFLASH.experiment import _source_panel_order_rows
 from PyFLASH.image_io import read_image_array, resolve_image_worker_count, get_image_shape
@@ -4966,7 +4971,7 @@ def _filter_marker_df_for_context(ctx: Context, df: pd.DataFrame) -> pd.DataFram
 
 
 def plot_images(experiment, markers=None,
-                animal_filter=None, roi_filter=None,
+                animal_filter=None, subject_filter=None, roi_filter=None,
                 save=True, ncols=None,
                 max_images=None, tile_size=4.0,
                 title=None, show=True, verbose=True,
@@ -4989,6 +4994,10 @@ def plot_images(experiment, markers=None,
                 image_workers=None,
                 progress=True,
                 _preview_single_image=False):
+    animal_filter = prefer_alias(
+        animal_filter, subject_filter,
+        current_name="animal_filter", alias_name="subject_filter",
+    )
     if edit_mode:
         if hasattr(experiment, "getImageTable"):
             image_df = experiment.getImageTable(include_summary=True)
@@ -5352,7 +5361,8 @@ def plot_images(experiment, markers=None,
 
 
 def select_representative_images(source, markers=None,
-                                 animal_filter=None, roi_filter=None,
+                                 animal_filter=None, subject_filter=None,
+                                 roi_filter=None,
                                  merge=True,
                                  merge_label="Merge",
                                  stats_columns=None,
@@ -5362,6 +5372,10 @@ def select_representative_images(source, markers=None,
                                  block_layout="horizontal", block_columns=1,
                                  autosave_pickle=True,
                                  progress=True):
+    animal_filter = prefer_alias(
+        animal_filter, subject_filter,
+        current_name="animal_filter", alias_name="subject_filter",
+    )
     import tkinter as tk
     from tkinter import ttk
     from PIL import Image, ImageTk, ImageDraw, ImageFont
@@ -6388,7 +6402,7 @@ def _render_representative_image_blocks(source, image_df: pd.DataFrame, blocks,
 
 
 def plot_representative_images(source, markers=None,
-                               animal_filter=None,
+                               animal_filter=None, subject_filter=None,
                                fast_loading=False, preview_max_dim=None,
                                image_backend="auto", image_workers=None,
                                image_adjustments=None,
@@ -6397,6 +6411,12 @@ def plot_representative_images(source, markers=None,
                                draw_rois=None,
                                progress=True,
                                _preview_single_image=False, **kwargs):
+    if subject_filter is None and "subject_filter" in kwargs:
+        subject_filter = kwargs.pop("subject_filter")
+    animal_filter = prefer_alias(
+        animal_filter, subject_filter,
+        current_name="animal_filter", alias_name="subject_filter",
+    )
     if edit_mode:
         representative_df = _get_representative_image_table(source)
         if representative_df.empty:
@@ -11702,21 +11722,26 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def plot_mean_bars(experiment, filtered_columns=None,
+                   data_cols=None,
                    points=True, normalize=False,
                    point_fill="white", point_edge="group",
                    point_size=9, point_linewidth=3,
-                   specificity=None, roi=None, comparisons=None,
+                   specificity=None, filter_by=None, roi=None, comparisons=None,
                    force_nonparametric=False, ns='ns',
                    posthoc='Conover', posthoc_correction='auto',
                    multiple_comparison='One-Way',
                    bottom_ticks=False, bottom_tick_labels=False,
-                   factor=None, save=True,
+                   factor=None, split_by=None, save=True,
                    column_strings=None, regex_string=None, exclude='',
+                   data_col_contains=None, data_col_regex=None,
+                   data_col_exclude=None,
                    save_normality=True, normality_dpi=96,
                    auto_style=True, style_cycle=None, legend=False,
                    dry_run=False,
                    conditions=None, condition_col="Condition",
                    factor_cols=None, animal_col="AnimalName",
+                   group_list=None, groups=None,
+                   group_col=None, group_cols=None, subject_col=None,
                    dataframe_kwargs=None):
     """
     Bar chart with individual data points for each column × condition.
@@ -11740,12 +11765,37 @@ def plot_mean_bars(experiment, filtered_columns=None,
     default. Set ``point_fill="group"``, ``point_edge="none"``, and tune
     ``point_size``/``point_linewidth`` for filled condition-coloured dots.
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by="conditions",
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="conditions",
+    )
+    if by != "conditions":
+        raise ValueError("plot_mean_bars supports split_by='conditions' or split_by=<group column>.")
     experiment = coerce_dataframe_input(
         experiment,
         conditions=conditions,
         condition_col=condition_col,
         factor_cols=factor_cols,
         animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
         dataframe_kwargs=dataframe_kwargs,
     )
     # ROI queue mode — iterate over ROI bases
@@ -12415,6 +12465,10 @@ def plot_locations(experiment, objects,
         images = objects
     if draw_rois is None and draw_roi is not None:
         draw_rois = draw_roi
+    if separate_by == "subjects":
+        separate_by = "animals"
+    if join_by == "subjects":
+        join_by = "animals"
     legacy_merge_extra = bool(merge_extra_graphs) or bool(overlay_all_extra_graphs)
     image_layout = _normalize_location_image_layout(image_layout)
 
@@ -12775,13 +12829,17 @@ def plot_regressions(experiment, x, y,
                      by='conditions', factor=None,
                      test='pearsonr',
                      normalize_x=True, normalize_y=True,
-                     specificity=None, roi=None, save=True, combine=False,
+                     specificity=None, filter_by=None,
+                     roi=None, save=True, combine=False,
+                     split_by=None,
                      x_range=None, y_range=None,
                      xmin=None, xmax=None, ymin=None, ymax=None,
                      clip_fit_line=True, share_axes=True, margin=0.1,
                      auto_style=True, style_cycle=None,
                      conditions=None, condition_col="Condition",
                      factor_cols=None, animal_col="AnimalName",
+                     group_list=None, groups=None,
+                     group_col=None, group_cols=None, subject_col=None,
                      dataframe_kwargs=None):
     """
     Regression plot: one figure per condition/factor, or a combined overlay.
@@ -12815,12 +12873,25 @@ def plot_regressions(experiment, x, y,
     ``xmax`` / ``ymin`` / ``ymax`` or a registry entry with that bound set)
     are left untouched. Must be < 0.5. Pass ``margin=0`` to disable.
     """
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="conditions",
+    )
     experiment = coerce_dataframe_input(
         experiment,
         conditions=conditions,
         condition_col=condition_col,
         factor_cols=factor_cols,
         animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
         dataframe_kwargs=dataframe_kwargs,
     )
     x_range = _merge_axis_range(x_range, xmin, xmax)
@@ -14157,16 +14228,21 @@ def volcano_action(ctx: Context, state: dict,
 
 
 def plot_volcano(experiment, filtered_columns=None,
-                 by='conditions', factor=None,
+                 data_cols=None,
+                 by='conditions', factor=None, split_by=None,
                  control=None,
-                 specificity=None, roi=None,
+                 specificity=None, filter_by=None, roi=None,
                  force_nonparametric=False,
                  p_threshold=0.05,
                  label_points='significant',
                  save=True,
                  column_strings=None, regex_string=None, exclude='',
+                 data_col_contains=None, data_col_regex=None,
+                 data_col_exclude=None,
                  conditions=None, condition_col="Condition",
                  factor_cols=None, animal_col="AnimalName",
+                 group_list=None, groups=None,
+                 group_col=None, group_cols=None, subject_col=None,
                  dataframe_kwargs=None):
     """
     Volcano plot of signed log(% change vs control) against -log10(p)
@@ -14181,12 +14257,35 @@ def plot_volcano(experiment, filtered_columns=None,
     - 'both'
     - 'none'
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="conditions",
+    )
     experiment = coerce_dataframe_input(
         experiment,
         conditions=conditions,
         condition_col=condition_col,
         factor_cols=factor_cols,
         animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
         dataframe_kwargs=dataframe_kwargs,
     )
     # ROI queue mode — iterate over ROI bases
@@ -14344,10 +14443,13 @@ def plot_volcano(experiment, filtered_columns=None,
 
 
 def plot_radar(experiment, filtered_columns=None,
-               by='conditions', factor=None,
-               specificity=None, roi=None, save=True,
+               data_cols=None,
+               by='conditions', factor=None, split_by=None,
+               specificity=None, filter_by=None, roi=None, save=True,
                combine=False,
                column_strings=None, regex_string=None, exclude='',
+               data_col_contains=None, data_col_regex=None,
+               data_col_exclude=None,
                statistic='mean',
                normalize=True, share_scale=True,
                share_columns_across_panels=True,
@@ -14356,12 +14458,17 @@ def plot_radar(experiment, filtered_columns=None,
                include_N=False,
                show_animal_xs=True, animal_x_marker="x", animal_x_size=38,
                animal_x_alpha=0.75, animal_x_color=None,
+               show_subject_points=None, subject_point_marker=None,
+               subject_point_size=None, subject_point_alpha=None,
+               subject_point_color=None,
                radial_value_radii=(0.30, 1.00), radial_value_color="grey",
                radial_value_size=None,
                figsize=(8, 8),
                auto_style=True, style_cycle=None,
                conditions=None, condition_col="Condition",
                factor_cols=None, animal_col="AnimalName",
+               group_list=None, groups=None,
+               group_col=None, group_cols=None, subject_col=None,
                dataframe_kwargs=None,
                _scale_reference=None, _resolved_columns=None):
     """
@@ -14385,12 +14492,59 @@ def plot_radar(experiment, filtered_columns=None,
     100% of the plotted radius; pass radial_value_radii=None to disable them
     or provide custom fractional radii.
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="conditions",
+    )
+    show_animal_xs = prefer_alias(
+        show_animal_xs, show_subject_points,
+        current_name="show_animal_xs", alias_name="show_subject_points",
+        default=True,
+    )
+    animal_x_marker = prefer_alias(
+        animal_x_marker, subject_point_marker,
+        current_name="animal_x_marker", alias_name="subject_point_marker",
+        default="x",
+    )
+    animal_x_size = prefer_alias(
+        animal_x_size, subject_point_size,
+        current_name="animal_x_size", alias_name="subject_point_size",
+        default=38,
+    )
+    animal_x_alpha = prefer_alias(
+        animal_x_alpha, subject_point_alpha,
+        current_name="animal_x_alpha", alias_name="subject_point_alpha",
+        default=0.75,
+    )
+    animal_x_color = prefer_alias(
+        animal_x_color, subject_point_color,
+        current_name="animal_x_color", alias_name="subject_point_color",
+    )
     experiment = coerce_dataframe_input(
         experiment,
         conditions=conditions,
         condition_col=condition_col,
         factor_cols=factor_cols,
         animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
         dataframe_kwargs=dataframe_kwargs,
     )
     radial_value_radii = _normalize_radar_radial_value_radii(radial_value_radii)
@@ -15367,27 +15521,63 @@ def plot_combo_pies(experiment, marker,
 
 
 def plot_matrices(experiment, filtered_columns=None,
-                  by='conditions', factor=None,
+                  data_cols=None,
+                  by='conditions', factor=None, split_by=None,
                   correlation='pearsonr',
                   first_columns=None, tick_label_size=20,
-                  marker=None, specificity=None, roi=None, save=True,
+                  leading_data_cols=None,
+                  marker=None, specificity=None, filter_by=None, roi=None,
+                  save=True,
                   column_strings=None, regex_string=None, exclude='',
+                  data_col_contains=None, data_col_regex=None,
+                  data_col_exclude=None,
                   prefix_order=None, marker_order=None,
                   share_columns_across_panels=True,
                   triangle=None, show_diagonal=True,
                   show_values=False, value_format=".2f",
                   conditions=None, condition_col="Condition",
                   factor_cols=None, animal_col="AnimalName",
+                  group_list=None, groups=None,
+                  group_col=None, group_cols=None, subject_col=None,
                   dataframe_kwargs=None):
     """
     Correlation matrix: one figure per condition or factor value.
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    first_columns = prefer_alias(
+        first_columns,
+        leading_data_cols,
+        current_name="first_columns",
+        alias_name="leading_data_cols",
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="conditions",
+    )
     experiment = coerce_dataframe_input(
         experiment,
         conditions=conditions,
         condition_col=condition_col,
         factor_cols=factor_cols,
         animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
         dataframe_kwargs=dataframe_kwargs,
     )
     # ROI queue mode — iterate over ROI bases
@@ -16678,18 +16868,28 @@ def plot_matrix_differences(
 def plot_correlation_pipeline(
     experiment,
     filtered_columns=None,
+    data_cols=None,
     against_columns=None,
+    against_data_cols=None,
     by="all",
     factor=None,
     specificity=None,
+    split_by=None,
+    filter_by=None,
     roi=None,
     save=True,
     column_strings=None,
     regex_string=None,
     exclude="",
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
     against_column_strings=None,
     against_regex_string=None,
     against_exclude="",
+    against_data_col_contains=None,
+    against_data_col_regex=None,
+    against_data_col_exclude=None,
     tests=("pearsonr", "spearmanr", "kendalltau"),
     require="and",
     gate="p",
@@ -16719,6 +16919,16 @@ def plot_correlation_pipeline(
     if_exists="overwrite",
     write_manifest=True,
     montage=True,
+    conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
+    dataframe_kwargs=None,
 ):
     """Compatibility wrapper for :func:`PyFLASH.pipeline.correlation`."""
     kwargs = dict(locals())
@@ -18774,16 +18984,22 @@ _PARAM_DESCRIPTIONS = {
     # ── Common to most functions ─────────────────────────────────────
     'experiment':           'Experiment or Batch object containing your data.',
     'source':               'Experiment, Batch, or MiniExperiment data source.',
-    'filtered_columns':     'List of column names to plot (e.g. ["DAPI_Count", "Iba1_Volume"]).',
-    'column_strings':       'Substring filter — include columns whose names contain this string.',
-    'regex_string':         'Regex filter — include columns whose names match this pattern.',
-    'exclude':              'Exclude columns whose names contain this substring.',
-    'specificity':          'Filter data by a factor value. Tuple: ("Time", "WeekEight"). '
+    'data_cols':            'Exact data columns to plot or analyze. Alias of filtered_columns.',
+    'filtered_columns':     'Legacy alias for data_cols: exact column names to plot.',
+    'data_col_contains':    'Substring filter for data column names. Alias of column_strings.',
+    'column_strings':       'Legacy alias for data_col_contains.',
+    'data_col_regex':       'Regex filter for data column names. Alias of regex_string.',
+    'regex_string':         'Legacy alias for data_col_regex.',
+    'data_col_exclude':     'Exclude data columns whose names contain this text. Alias of exclude.',
+    'exclude':              'Legacy data-column exclusion filter.',
+    'filter_by':            'Row filter such as {"Time": "WeekEight"}. Alias of specificity.',
+    'specificity':          'Legacy row filter. Tuple: ("Time", "WeekEight"). '
                             'Queue: [("Time","WeekEight"), ("Time","WeekFour")]; '
                             'pipelines run each queued filter as an independent child run.',
     'save':                 'Whether to save figures to disk (default True).',
-    'factor':               'Group by a factor column instead of Condition (e.g. "Genotype").',
-    'by':                   'Grouping mode: "conditions" (default) or a factor column name.',
+    'split_by':             'Output grouping/paneling: "conditions", "all", or a column name.',
+    'factor':               'Legacy split column. Prefer split_by for public calls.',
+    'by':                   'Legacy grouping mode: "conditions" (default), "all", or a factor mode.',
     'comparisons':          'Explicit pairwise comparisons for stats, e.g. ["1-2", "1-3"].',
     'normalize':            'Normalize values to the first condition (fold-change).',
     'ns':                   'Label for non-significant results (default "ns").',
@@ -18798,10 +19014,13 @@ _PARAM_DESCRIPTIONS = {
     'dry_run':              'Compute stats without rendering; returns a DataFrame summary.',
     'combine':              'Overlay all groups on one panel instead of separate figures.',
     'merge':                'Synonym for combine in some functions.',
-    'conditions':           'Optional PyFLASH conditionList when passing a raw pandas DataFrame directly.',
-    'condition_col':        'Column in a raw DataFrame that identifies the condition/group.',
-    'factor_cols':          'One or more factor columns in a raw DataFrame used to infer crossed conditions.',
-    'animal_col':           'Animal/subject/sample ID column in a raw DataFrame.',
+    'group_list':           'Optional PyFLASH groupList when passing a raw pandas DataFrame directly.',
+    'groups':               'Iterable of group objects for raw DataFrame input. Alias of group_list.',
+    'condition_col':        'Legacy alias for group_col.',
+    'group_cols':           'One or more raw DataFrame columns used to infer crossed groups.',
+    'factor_cols':          'Legacy alias for group_cols.',
+    'subject_col':          'Subject/sample/animal ID column in a raw DataFrame.',
+    'animal_col':           'Legacy alias for subject_col.',
     'dataframe_kwargs':     'Advanced from_dataframe options such as colors, labels, ordering, or output paths.',
     # ── Marker-based functions ───────────────────────────────────────
     'marker':               'Marker name (e.g. "Iba1") or list of markers.',
@@ -18867,11 +19086,16 @@ _PARAM_DESCRIPTIONS = {
     'fill':                 'Fill radar polygons as well as drawing outlines.',
     'point_size':           'Marker size for radar vertices or baseline size for 3D scatter points.',
     'label_wrap':           'Maximum radar-axis label width before wrapping. Use 0 to disable wrapping.',
-    'show_animal_xs':       'For radar plots, overlay one x marker per contributing animal on each axis.',
-    'animal_x_marker':      'Marker style for per-animal radar overlays (default "x").',
-    'animal_x_size':        'Marker size for per-animal radar x overlays. Use 0 to hide them.',
-    'animal_x_alpha':       'Transparency for per-animal radar x overlays.',
-    'animal_x_color':       'Optional color override for per-animal radar x overlays (default group color).',
+    'show_subject_points':  'For radar plots, overlay one marker per contributing subject on each axis.',
+    'show_animal_xs':       'Legacy alias for show_subject_points.',
+    'subject_point_marker': 'Marker style for per-subject radar overlays.',
+    'animal_x_marker':      'Legacy alias for subject_point_marker.',
+    'subject_point_size':   'Marker size for per-subject radar overlays. Use 0 to hide them.',
+    'animal_x_size':        'Legacy alias for subject_point_size.',
+    'subject_point_alpha':  'Transparency for per-subject radar overlays.',
+    'animal_x_alpha':       'Legacy alias for subject_point_alpha.',
+    'subject_point_color':  'Optional color override for per-subject radar overlays.',
+    'animal_x_color':       'Legacy alias for subject_point_color.',
     'radial_value_radii':   'Fractional radar radii to label with values, e.g. (0.30, 1.00). None disables labels.',
     'radial_value_color':   'Color for radar radial value labels (default grey).',
     'radial_value_size':    'Font size for radar radial value labels (default follows tick_label_size).',
@@ -18901,13 +19125,19 @@ _PARAM_DESCRIPTIONS = {
     'show_values':          'Write formatted numeric matrix values inside visible cells.',
     'value_format':         'Format for in-cell matrix numbers, e.g. ".2f" or "{:.3f}".',
     # ── Rectangular matrices ─────────────────────────────────────────
-    'against_columns':          'Columns for the second axis (rows vs columns).',
-    'against_column_strings':   'Substring filter for second-axis columns.',
-    'against_regex_string':     'Regex filter for second-axis columns.',
-    'against_exclude':          'Exclude filter for second-axis columns.',
-    'dependent_variables':      'Outcome columns modelled by linear_model_pipeline, e.g. ["Totalcounts", "Amplitude"].',
-    'predictors':               'Predictor/covariate columns. For linear_model_pipeline these adjust the group effect; for multivariable matrices this is a mapping of predictor-set labels to columns.',
-    'group':                    'Primary grouping column for linear_model_pipeline adjusted means, e.g. "Diagnosis".',
+    'leading_data_cols':        'Columns pinned to the left/top of a matrix. Alias of first_columns.',
+    'against_data_cols':        'Data columns for the second axis (rows vs columns). Alias of against_columns.',
+    'against_columns':          'Legacy alias for against_data_cols.',
+    'against_data_col_contains': 'Substring filter for second-axis data columns.',
+    'against_column_strings':   'Legacy alias for against_data_col_contains.',
+    'against_data_col_regex':   'Regex filter for second-axis data columns.',
+    'against_regex_string':     'Legacy alias for against_data_col_regex.',
+    'against_data_col_exclude': 'Exclude filter for second-axis data columns.',
+    'against_exclude':          'Legacy alias for against_data_col_exclude.',
+    'outcomes':                 'Outcome columns modelled by linear_model. Alias of dependent_variables.',
+    'dependent_variables':      'Legacy alias for outcomes in linear_model.',
+    'predictors':               'Predictor/covariate columns, or candidate predictors in model sweeps.',
+    'group':                    'Legacy primary grouping column for linear_model adjusted means.',
     'categorical':              'Categorical predictors for linear models. "auto" detects text/bool columns; group is treated as categorical.',
     'reference_levels':         'Reference category levels for categorical model terms, e.g. {"Diagnosis": "Control"}.',
     'interactions':             'Model interaction terms, e.g. [("Diagnosis", "Sex")] or formula strings.',
@@ -18930,8 +19160,10 @@ _PARAM_DESCRIPTIONS = {
     'predictor_order':          'Custom ordering for multivariable regression predictor-set labels.',
     'value':                    'Matrix value to colour, e.g. "r2", "adj_r2", "p", or "q".',
     'correction':               'P-value correction for matrix significance annotations: "fdr" or "none".',
-    'possible_predictors':      'Candidate feature columns for iterative_model_sweep; use explicit column names.',
-    'batch_or_df':              'Input for iterative_model_sweep: a PyFLASH batch-like object or a pandas DataFrame.',
+    'candidate_predictors':     'Candidate feature columns for iterative_model_sweep.',
+    'possible_predictors':      'Legacy alias for candidate_predictors in iterative_model_sweep.',
+    'data':                     'Input pandas DataFrame or PyFLASH batch-like object.',
+    'batch_or_df':              'Legacy input name for iterative_model_sweep.',
     'target':                   'Categorical class column to predict in iterative_model_sweep.',
     'predictor_exclude':        'Substring exclusion applied when selecting candidate predictors for model sweeps.',
     'excluded_predictors':      'Explicit predictor column names to remove from a model sweep.',
@@ -18998,14 +19230,15 @@ _PARAM_DESCRIPTIONS = {
     'variability_stat':         'Statistic used in the condition variability heatmap, e.g. "cv_pct" or "iqr".',
     'effect_control':           'Control group for data_overview effect sizes; defaults to the first condition/factor group.',
     'max_plot_items':           'Cap long overview plots to this many columns/items (default 30).',
-    'conditions':               'Subset of conditions to include.',
+    'conditions':               'Legacy group name. In raw DataFrame calls use group_list; in overview calls this can subset groups.',
     'encode_x_categorical':     'Treat x-axis as categorical.',
     'combine_conditions':       'Combine all conditions into one panel.',
     'column_order':             'Custom ordering for primary columns.',
     'against_order':            'Custom ordering for second-axis columns.',
     'blank_panel_on_nan':       'Show blank panel when all values are NaN.',
     # ── Images ───────────────────────────────────────────────────────
-    'animal_filter':        'Show only specific animals (name or list).',
+    'subject_filter':       'Show only specific subjects/samples (name or list). Alias of animal_filter.',
+    'animal_filter':        'Legacy alias for subject_filter.',
     'roi_filter':           'Show only specific ROIs.',
     'ncols':                'Number of columns in the image grid.',
     'max_images':           'Maximum number of images to show.',
@@ -19065,7 +19298,7 @@ _PARAM_DESCRIPTIONS = {
     # ── Rhythm / circadian ───────────────────────────────────────────
     'column':               'For plot_cosinor, the metric column to fit a rhythm to (e.g. an intensity or activity column).',
     'time_col':             'Column holding the time axis (e.g. "Time" with ZT labels, or "Month"); coerced to numbers.',
-    'group_col':            'Column that splits the data into groups to overlay (e.g. "Genotype", "Diagnosis"). None = one rhythm.',
+    'group_col':            'Column that identifies/splits analysis groups, e.g. "Diagnosis" or "Genotype".',
     'period':               'Cycle length in the units of time_col: 24 for a daily rhythm, 12 for a seasonal (monthly) one.',
     'period_free':          'Fit the period freely (free-running tau) instead of fixing it (default False).',
     'time_map':             'Map categorical time labels to numbers, e.g. {"ZT0": 0, "ZT6": 6}; trailing digits are used otherwise.',
@@ -20061,6 +20294,61 @@ def _ovw_sig_audit_matrix_figure(df, *, alpha=0.05, value_col="p",
                     fontsize=max(6, lab - 2), family="monospace",
                     transform=ax_fdr.transAxes)
 
+    fig.tight_layout()
+    return fig
+
+
+_SCORECARD_GRADE_COLORS = {
+    "green": "#2e7d32", "amber": "#d98a17", "red": "#c0392b", "grey": "#9e9e9e",
+}
+
+
+def _ovw_scorecard_figure(scorecard, *, narrative=None, tick_label_size=20,
+                          title="Dataset health"):
+    """Traffic-light chip panel from a scorecard frame (axis / grade / value / rule).
+
+    Each axis is a chip coloured by grade (green/amber/red/grey) with the driving
+    value and the printed threshold rule, so no cutoff masquerades as truth. The
+    deterministic narrative is drawn as a caption beneath. Returns ``None`` when the
+    scorecard is empty.
+    """
+    if scorecard is None or getattr(scorecard, "empty", True):
+        return None
+    from matplotlib.patches import Rectangle
+    rows = scorecard.to_dict("records")
+    n = len(rows)
+    ncols = 3 if n > 4 else max(1, n)
+    nrows = int(np.ceil(n / ncols))
+    lab = max(7, int(tick_label_size) - 6)
+    narr_h = 1.5 if narrative else 0.0
+    fig, ax = plt.subplots(figsize=(ncols * 3.5, nrows * 1.8 + narr_h + 0.6))
+    ax.set_xlim(0, ncols)
+    ax.set_ylim(0, nrows + (narr_h / 1.8))
+    ax.axis("off")
+    for i, r in enumerate(rows):
+        col = i % ncols
+        row = nrows - 1 - (i // ncols)
+        y0 = row + (narr_h / 1.8)
+        color = _SCORECARD_GRADE_COLORS.get(str(r.get("grade")), "#9e9e9e")
+        ax.add_patch(Rectangle((col + 0.05, y0 + 0.08), 0.90, 0.86,
+                               facecolor=color, alpha=0.16,
+                               edgecolor=color, linewidth=2.0))
+        ax.add_patch(Rectangle((col + 0.05, y0 + 0.80), 0.90, 0.14,
+                               facecolor=color, edgecolor="none"))
+        cx = col + 0.5
+        ax.text(cx, y0 + 0.865, str(r.get("axis", "")).replace("_", " ").title(),
+                ha="center", va="center", fontsize=lab, fontweight="bold",
+                color="white")
+        ax.text(cx, y0 + 0.58, str(r.get("grade", "")).upper(), ha="center",
+                va="center", fontsize=lab + 2, fontweight="bold", color=color)
+        ax.text(cx, y0 + 0.37, str(r.get("value", "")), ha="center", va="center",
+                fontsize=max(7, lab - 1))
+        ax.text(cx, y0 + 0.18, str(r.get("rule", "")), ha="center", va="center",
+                fontsize=max(6, lab - 3), style="italic", color="#555555")
+    if narrative:
+        ax.text(0.04, narr_h / 1.8 - 0.15, str(narrative), ha="left", va="top",
+                fontsize=max(7, lab - 1), wrap=True, color="#222222")
+    ax.set_title(title, fontsize=int(tick_label_size), fontweight="bold", pad=12)
     fig.tight_layout()
     return fig
 
