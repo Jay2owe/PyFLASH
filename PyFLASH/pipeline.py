@@ -40,6 +40,7 @@ from PyFLASH.plotting import (
     _corr_value_matrix_label,
     _corr_write_json,
     _correlation_display_name,
+    _enrich_df_grouping_columns,
     _filtered_summary_for_specificity,
     _normalize_correlation_method,
     _prepare_matrix_numeric_df,
@@ -2743,13 +2744,20 @@ def _ovw_groups_from_column(scope_df, num_df, column, specificity):
     return groups
 
 
-def _ovw_distribution_groups(experiment, scope_df, num_df, by, factor, specificity):
+def _ovw_distribution_groups(experiment, scope_df, num_df, by, factor, specificity,
+                             split_by=None, split_mode="cross"):
     """Groups used for condition/factor distribution views.
 
     The broader overview defaults to pooled ``by='all'`` for some analyses, but
     distribution views are most useful split by Condition. When no factor is
     requested and a Condition column exists, use condition groups by default.
+    When ``split_by`` is given it takes precedence over ``by``/``factor`` and the
+    multi-dimension resolver drives the distribution/effect-size sections too, so
+    both group axes stay consistent within a run.
     """
+    if split_by is not None:
+        return _ovw_multi_groups(
+            experiment, scope_df, num_df, split_by, split_mode, specificity)
     pooled = [("All", num_df.index, specificity)]
     if factor:
         groups = _corr_pipeline_groups(
@@ -2773,6 +2781,109 @@ def _ovw_distribution_groups(experiment, scope_df, num_df, by, factor, specifici
     if by_key in scope_df.columns:
         return _ovw_groups_from_column(scope_df, num_df, by_key, specificity) or pooled
     return pooled
+
+
+# Separator joining split-key levels into a composite group label, e.g.
+# ``"WT | Male"`` for a Condition x Sex cross cell. Kept as a single constant so
+# the group builder and the effect-control resolver split/join identically.
+_OVW_COMPOSITE_SEP = " | "
+
+
+def _ovw_ordered_levels(experiment, enriched, key):
+    """Return the present levels of ``key`` in a declared order.
+
+    Prefers the design ordering (``condition_list`` for ``Condition``,
+    ``factorDict`` for a registered factor); any level without a declared order
+    (e.g. an ad-hoc ``Sex`` column) falls back to first-seen.
+    """
+    present = []
+    for v in enriched[key].dropna().tolist():
+        if v not in present:
+            present.append(v)
+    ordered = []
+    if str(key) == "Condition":
+        for cond in getattr(experiment, "condition_list", []) or []:
+            name = getattr(cond, "name", None)
+            match = next((v for v in present if str(v) == str(name)), None)
+            if match is not None and match not in ordered:
+                ordered.append(match)
+    else:
+        factor_dict = getattr(getattr(experiment, "condition_list", None),
+                              "factorDict", {}) or {}
+        for cond in factor_dict.get(key, []) if isinstance(factor_dict, dict) else []:
+            name = getattr(cond, "name", None)
+            match = next((v for v in present if str(v) == str(name)), None)
+            if match is not None and match not in ordered:
+                ordered.append(match)
+    for v in present:
+        if v not in ordered:
+            ordered.append(v)
+    return ordered
+
+
+def _ovw_multi_groups(experiment, scope_df, num_df, split_by, split_mode,
+                      specificity):
+    """Resolve multi-dimension split groups as ``(label, row_index, reg_spec)``.
+
+    ``split_by`` is a single key or a list of keys (each ``"Condition"`` or any
+    summary column / factor). A single key delegates to the one-axis resolver so
+    ``split_by="Condition"`` matches ``by="conditions"`` exactly. With multiple
+    keys:
+
+    - ``split_mode="cross"`` yields the cartesian product, first-key-major, with
+      composite labels (``"WT | Male"``) and AND-intersected row indices; empty
+      product cells are dropped.
+    - ``split_mode="parallel"`` concatenates each axis independently, prefixing
+      labels with the key (``"Sex=Male"``) so axes never collide.
+
+    Raises ``ValueError`` if a key is not resolvable in the summary/factors.
+    """
+    keys = [split_by] if isinstance(split_by, str) else list(split_by)
+    if not keys:
+        raise ValueError("data_overview: split_by is empty; pass a key or list of keys.")
+    if len(keys) == 1:
+        k = str(keys[0])
+        enriched = _enrich_df_grouping_columns(scope_df, experiment, requested_by=k)
+        if k not in enriched.columns:
+            raise ValueError(
+                f"data_overview: split key {k!r} is not resolvable in the summary "
+                f"or factors.")
+        return _corr_pipeline_groups(
+            experiment, scope_df, num_df,
+            ("conditions" if k == "Condition" else "all"),
+            (None if k == "Condition" else k), specificity)
+
+    # Per-key ordered [(key, level, row_index)] axes.
+    level_maps = []
+    for k in keys:
+        k = str(k)
+        enriched = _enrich_df_grouping_columns(scope_df, experiment, requested_by=k)
+        if k not in enriched.columns:
+            raise ValueError(
+                f"data_overview: split key {k!r} is not resolvable in the summary "
+                f"or factors.")
+        axis = []
+        for v in _ovw_ordered_levels(experiment, enriched, k):
+            idx = num_df.index.intersection(enriched.index[enriched[k] == v])
+            axis.append((k, v, idx))
+        level_maps.append(axis)
+
+    groups = []
+    if str(split_mode).strip().lower() == "parallel":
+        for axis in level_maps:                       # concat each axis, prefixed labels
+            for k, v, idx in axis:
+                if len(idx) > 0:
+                    groups.append((f"{k}={v}", idx, specificity))
+    else:                                             # cross: cartesian product, AND indices
+        import itertools
+        for combo in itertools.product(*level_maps):
+            idx = combo[0][2]
+            for _, _, part in combo[1:]:
+                idx = idx.intersection(part)
+            if len(idx) > 0:                          # drop empty product cells
+                label = _OVW_COMPOSITE_SEP.join(str(v) for _, v, _ in combo)
+                groups.append((label, idx, specificity))
+    return groups or [("All", num_df.index, specificity)]
 
 
 def _ovw_condition_distribution_stats(scope_df, numeric_df, numeric_cols, groups):
@@ -3081,16 +3192,55 @@ def _ovw_matrix_figure(matrix, title, tick_label_size, max_items,
 
 
 def _ovw_resolve_effect_control(groups, effect_control):
+    """Resolve the control axis into ``(control_display, contrasts)``.
+
+    ``contrasts`` is a list of ``(control_label, group_label)`` pairs to compare.
+    Composite (crossed) group labels like ``"WT | Male"`` are handled with the
+    minimal robust rule (documented in :func:`data_overview`):
+
+    1. ``effect_control=None`` -> the first group is the single control, compared
+       against every other group.
+    2. ``effect_control`` exactly matches a group label -> that group is the single
+       control (works for a composite named in full, e.g. ``"WT | Male"``).
+    3. otherwise, if ``effect_control`` matches the FIRST split-key component of the
+       composite labels -> it is the control *per remaining-key stratum* (e.g.
+       ``"WT | Male"`` controls ``"KO | Male"`` and ``"WT | Female"`` controls
+       ``"KO | Female"``); ``control_display`` is the matched component string.
+    4. otherwise -> ``ValueError``.
+    """
     labels = [str(g[0]) for g in groups]
     if len(labels) == 0:
-        return None
+        return None, []
     if effect_control is None:
-        return labels[0]
+        control = labels[0]
+        return control, [(control, g) for g in labels if g != control]
     target = str(effect_control).strip().casefold()
-    for label in labels:
-        if str(label).strip().casefold() == target:
-            return label
-    raise ValueError(f"effect_control {effect_control!r} is not one of {labels}.")
+    for label in labels:                              # rule 2: exact label match
+        if label.strip().casefold() == target:
+            return label, [(label, g) for g in labels if g != label]
+
+    # rule 3: match the first component of composite labels -> per-stratum control.
+    if any(_OVW_COMPOSITE_SEP in lbl for lbl in labels):
+        strata = {}                                   # remaining-key suffix -> [(first, label)]
+        for lbl in labels:
+            parts = [p.strip() for p in lbl.split(_OVW_COMPOSITE_SEP)]
+            strata.setdefault(tuple(parts[1:]), []).append((parts[0], lbl))
+        contrasts = []
+        matched = False
+        for _rest, members in strata.items():
+            ctrl_lbl = next((lbl for first, lbl in members
+                             if first.casefold() == target), None)
+            if ctrl_lbl is None:
+                continue
+            matched = True
+            contrasts.extend((ctrl_lbl, lbl) for _first, lbl in members
+                             if lbl != ctrl_lbl)
+        if matched:
+            return str(effect_control), contrasts
+
+    raise ValueError(
+        f"effect_control {effect_control!r} is not a group label or the first "
+        f"split-key component of {labels}.")
 
 
 def _ovw_effect_sizes(numeric_df, numeric_cols, groups, effect_control=None,
@@ -3103,16 +3253,14 @@ def _ovw_effect_sizes(numeric_df, numeric_cols, groups, effect_control=None,
     ]
     if not groups or len(groups) < 2 or not numeric_cols:
         return pd.DataFrame(columns=columns), None
-    control_label = _ovw_resolve_effect_control(groups, effect_control)
+    control_display, contrasts = _ovw_resolve_effect_control(groups, effect_control)
     group_map = {str(glabel): gidx for glabel, gidx, _spec in groups}
-    ctrl_idx = group_map.get(control_label)
-    if ctrl_idx is None:
-        return pd.DataFrame(columns=columns), control_label
 
     rows = []
-    for glabel, gidx, _spec in groups:
-        glabel = str(glabel)
-        if glabel == control_label:
+    for control_label, glabel in contrasts:
+        ctrl_idx = group_map.get(control_label)
+        gidx = group_map.get(glabel)
+        if ctrl_idx is None or gidx is None:
             continue
         for col in numeric_cols:
             ctrl = pd.to_numeric(
@@ -3169,7 +3317,7 @@ def _ovw_effect_sizes(numeric_df, numeric_cols, groups, effect_control=None,
                 "hedges_g_ci_low": ci_low,
                 "hedges_g_ci_high": ci_high,
             })
-    return pd.DataFrame(rows, columns=columns), control_label
+    return pd.DataFrame(rows, columns=columns), control_display
 
 
 @montage_pipeline(title="Data Overview Pipeline")
@@ -3178,6 +3326,9 @@ def data_overview(
     filtered_columns=None,
     by="all",
     factor=None,
+    split_by=None,
+    split_mode="cross",
+    nest=False,
     specificity=None,
     roi=None,
     save=True,
@@ -3274,6 +3425,30 @@ def data_overview(
     condition's tables/figures tagged with a concise specificity suffix in the
     filename, e.g. ``_Dx.AD``, with one combined overview montage).
 
+    ``split_by`` is the multi-dimension successor to ``by``/``factor`` and, when
+    given, takes precedence over both for the group-panelled sections (single-axis
+    ``by``/``factor`` stays the default when ``split_by is None``). It is a key or
+    a list of keys, each ``"Condition"`` or any summary column / factor:
+
+    - ``split_by="Condition"`` reproduces ``by="conditions"`` exactly.
+    - ``split_by=["Condition", "Sex"]`` with ``split_mode="cross"`` (default)
+      panels the cartesian product first-key-major, with composite labels
+      (``"WT | Male"``) over AND-intersected animals; empty product cells drop out.
+    - ``split_mode="parallel"`` instead concatenates each axis independently, its
+      labels prefixed by the key (``"Sex=Male"``) so the axes never collide.
+
+    Levels order by design where declared (``condition_list`` / ``factorDict``) and
+    otherwise first-seen (an ad-hoc key like ``Sex`` has no declared order).
+    ``nest`` is a cosmetic flag reserved for the nested view; the ``cross`` order is
+    already first-key-major, so it currently only distinguishes the run folder.
+
+    ``effect_control`` names the effect-size baseline. With composite (crossed)
+    labels the minimal rule is: an exact group-label match is the single control
+    (name the composite in full, e.g. ``"WT | Male"``); otherwise a match against
+    the FIRST split-key component makes it the control *per remaining-key stratum*
+    (``effect_control="WT"`` -> ``"WT | Male"`` controls ``"KO | Male"`` and
+    ``"WT | Female"`` controls ``"KO | Female"``); anything else raises ``ValueError``.
+
     Run management (``run_label`` / ``if_exists`` / ``save`` / ``write_manifest``)
     and the return shape (a manifest dict with the section DataFrames attached)
     mirror the other pipelines. Outputs land in
@@ -3355,6 +3530,11 @@ def data_overview(
             "variability_stat": str(variability_stat),
             "effect_control": effect_control,
             "max_plot_items": max_plot_items,
+            # Grouping-changing knobs: distinct splits land in distinct folders.
+            "split_by": (split_by if isinstance(split_by, str)
+                         else (list(split_by) if split_by is not None else None)),
+            "split_mode": str(split_mode),
+            "nest": bool(nest),
         },
     )
     if _run_dirs is not None:
@@ -3376,10 +3556,17 @@ def data_overview(
         specificity=(specificity if _tag_specificity else None),
         aliases=getattr(experiment, "aliases", None))
 
-    groups = _corr_pipeline_groups(
-        experiment, scope_df, num_df, by, factor, specificity)
-    distribution_groups = _ovw_distribution_groups(
-        experiment, scope_df, num_df, by, factor, specificity)
+    if split_by is not None:
+        # Multi-dimension splitting drives both group axes; single-axis
+        # by/factor is preserved exactly when split_by is None.
+        groups = _ovw_multi_groups(
+            experiment, scope_df, num_df, split_by, split_mode, specificity)
+        distribution_groups = groups
+    else:
+        groups = _corr_pipeline_groups(
+            experiment, scope_df, num_df, by, factor, specificity)
+        distribution_groups = _ovw_distribution_groups(
+            experiment, scope_df, num_df, by, factor, specificity)
 
     # ── compute requested sections ──────────────────────────────────────────
     inventory = pd.DataFrame()
@@ -3667,6 +3854,10 @@ def data_overview(
         "sections": sections,
         "by": str(by),
         "factor": factor,
+        "split_by": (split_by if isinstance(split_by, str)
+                     else (list(split_by) if split_by is not None else None)),
+        "split_mode": str(split_mode) if split_by is not None else None,
+        "nest": bool(nest),
         "groups": [str(g[0]) for g in groups],
         "condition_distribution_groups": [str(g[0]) for g in distribution_groups],
         "specificity": str(specificity) if specificity is not None else None,

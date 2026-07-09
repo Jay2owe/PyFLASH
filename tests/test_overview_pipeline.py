@@ -345,3 +345,142 @@ def test_data_overview_auto_slug_varies_with_qc_settings(tmp_path):
     r3 = pipeline.data_overview(exp, mad_threshold=3.5, save=False)
     r4 = pipeline.data_overview(exp, mad_threshold=2.0, save=False)
     assert r3["run_label"] != r4["run_label"]
+
+
+# ── Stage 02: flexible condition splitting (split_by / split_mode) ──────────
+
+def test_split_by_condition_matches_by_conditions(tmp_path):
+    # A single split key must reproduce the one-axis by="conditions" grouping
+    # exactly, so the new resolver is a strict superset of the old behaviour.
+    exp = _overview_dataset(tmp_path)
+
+    r_split = pipeline.data_overview(
+        exp, split_by="Condition", run_label="split_cond", save=False)
+    r_by = pipeline.data_overview(
+        exp, by="conditions", run_label="by_cond", save=False)
+
+    assert r_split["groups"] == r_by["groups"] == ["WT", "KO"]
+    assert (r_split["condition_distribution_groups"]
+            == r_by["condition_distribution_groups"] == ["WT", "KO"])
+    assert set(r_split["descriptives"]["group"]) == {"WT", "KO"}
+    assert set(r_split["normality"]["group"]) == {"WT", "KO"}
+
+
+def test_split_by_cross_yields_composite_product_cells(tmp_path):
+    # Condition x Sex crossing yields the full 2x2 product with composite labels
+    # and AND-intersected animals; each cell holds 6 of the 24 animals.
+    exp = _overview_dataset(tmp_path)
+
+    res = pipeline.data_overview(
+        exp, split_by=["Condition", "Sex"], split_mode="cross",
+        run_label="split_cross", save=False)
+
+    expected = ["WT | F", "WT | M", "KO | F", "KO | M"]
+    assert res["groups"] == expected                       # first-key-major order
+    assert res["condition_distribution_groups"] == expected
+    assert set(res["descriptives"]["group"]) == set(expected)
+    cds = res["condition_distributions"]
+    wt_f_a = cds[(cds["group"] == "WT | F") & (cds["column"] == "A")].iloc[0]
+    assert int(wt_f_a["n"]) == 6
+
+
+def test_split_by_cross_drops_empty_product_cells(tmp_path):
+    # When a product cell has no animals (all WT are F, all KO are M) the empty
+    # cells are dropped, leaving only the two populated composites.
+    rng = np.random.default_rng(3)
+    summary = pd.DataFrame({
+        "AnimalName": [f"A{i:02d}" for i in range(12)],
+        "Condition": (["WT"] * 6) + (["KO"] * 6),
+        "Sex": (["F"] * 6) + (["M"] * 6),
+        "numSections": [3] * 12,
+        "X": rng.normal(5.0, 1.0, 12),
+        "Y": rng.normal(2.0, 0.5, 12),
+    })
+    fig_path = str(tmp_path / "Python Figures")
+    data_path = str(tmp_path / "Data and Stats")
+    os.makedirs(fig_path, exist_ok=True)
+    os.makedirs(data_path, exist_ok=True)
+    exp = SimpleNamespace(
+        summary=summary, summaries={"SCN": summary},
+        fig_path=fig_path, data_path=data_path,
+        condition_list=[SimpleNamespace(name="WT"), SimpleNamespace(name="KO")])
+
+    res = pipeline.data_overview(
+        exp, split_by=["Condition", "Sex"], split_mode="cross",
+        include_covariation=False, run_label="split_empty", save=False)
+
+    assert res["groups"] == ["WT | F", "KO | M"]           # WT|M and KO|F dropped
+
+
+def test_split_mode_parallel_concatenates_axes(tmp_path):
+    # parallel mode lists each axis independently with key-prefixed labels so
+    # Condition and Sex axes never collide.
+    exp = _overview_dataset(tmp_path)
+
+    res = pipeline.data_overview(
+        exp, split_by=["Condition", "Sex"], split_mode="parallel",
+        run_label="split_parallel", save=False)
+
+    assert set(res["groups"]) == {
+        "Condition=WT", "Condition=KO", "Sex=F", "Sex=M"}
+    assert set(res["descriptives"]["group"]) == {
+        "Condition=WT", "Condition=KO", "Sex=F", "Sex=M"}
+
+
+def test_split_settings_produce_distinct_run_slugs(tmp_path):
+    # Distinct grouping settings must hash to distinct run folders so a later run
+    # can't reuse (if_exists='skip') a run computed under a different split.
+    exp = _overview_dataset(tmp_path)
+
+    single = pipeline.data_overview(exp, split_by="Condition", save=False)
+    crossed = pipeline.data_overview(
+        exp, split_by=["Condition", "Sex"], split_mode="cross", save=False)
+    parallel = pipeline.data_overview(
+        exp, split_by=["Condition", "Sex"], split_mode="parallel", save=False)
+
+    slugs = {single["run_label"], crossed["run_label"], parallel["run_label"]}
+    assert len(slugs) == 3
+
+
+def test_split_by_unresolvable_key_raises(tmp_path):
+    exp = _overview_dataset(tmp_path)
+
+    with pytest.raises(ValueError):
+        pipeline.data_overview(
+            exp, split_by="NotAColumn", run_label="bad_key", save=False)
+    with pytest.raises(ValueError):
+        pipeline.data_overview(
+            exp, split_by=["Condition", "NotAColumn"], run_label="bad_key2",
+            save=False)
+
+
+def test_split_effect_control_composite_rule(tmp_path):
+    # effect_control="WT" is not a full composite label, so it resolves per
+    # remaining-key (Sex) stratum: WT|F controls KO|F and WT|M controls KO|M.
+    exp = _overview_dataset(tmp_path)
+
+    res = pipeline.data_overview(
+        exp, split_by=["Condition", "Sex"], split_mode="cross",
+        effect_control="WT", run_label="split_ctrl", save=False)
+
+    assert res["effect_control"] == "WT"
+    effects = res["effect_sizes"]
+    assert set(effects["control"]) == {"WT | F", "WT | M"}
+    assert set(effects["group"]) == {"KO | F", "KO | M"}
+    # controls only ever compare within their own Sex stratum.
+    pairs = set(zip(effects["control"], effects["group"]))
+    assert pairs == {("WT | F", "KO | F"), ("WT | M", "KO | M")}
+
+    # An exact composite label names a single control across all cells.
+    res_exact = pipeline.data_overview(
+        exp, split_by=["Condition", "Sex"], split_mode="cross",
+        effect_control="WT | F", run_label="split_ctrl_exact", save=False)
+    assert res_exact["effect_control"] == "WT | F"
+    assert set(res_exact["effect_sizes"]["control"]) == {"WT | F"}
+    assert set(res_exact["effect_sizes"]["group"]) == {"WT | M", "KO | F", "KO | M"}
+
+    # An effect_control that is neither a label nor a first-key component errors.
+    with pytest.raises(ValueError):
+        pipeline.data_overview(
+            exp, split_by=["Condition", "Sex"], split_mode="cross",
+            effect_control="Nope", run_label="split_ctrl_bad", save=False)
