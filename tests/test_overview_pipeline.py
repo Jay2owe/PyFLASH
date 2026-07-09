@@ -249,6 +249,7 @@ def test_data_overview_section_toggles_skip_work(tmp_path):
         include_condition_distributions=False,
         include_significance_audit=False,
         include_scorecard=False,
+        include_readiness=False,
         include_effect_sizes=False,
         run_label="overview_inventory_only",
         save=True,
@@ -960,3 +961,85 @@ def test_scorecard_narrative_deterministic_and_grounded(tmp_path):
     assert n1 == n2                               # deterministic
     assert "12 animal" in n1 and "WT: 8" in n1 and "KO: 4" in n1
     assert "|r|=0.97" in n1                        # grounded in the computed value
+
+
+# ── Stage 08: power / MDE + readiness ────────────────────────────────────────
+def _readiness_dataset(tmp_path, per_group=20):
+    n = per_group * 2
+    rng = np.random.default_rng(0)
+    summary = pd.DataFrame({
+        "AnimalName": [f"S{i:02d}" for i in range(n)],
+        "Condition": (["WT"] * per_group + ["KO"] * per_group),
+        "Normal": rng.normal(10, 2, n),
+        "Skewed": rng.exponential(2, n) + 1.0,     # right-skewed, all > 0 -> transform
+        "Const": np.full(n, 5.0),                   # constant -> drop
+    })
+    exp = SimpleNamespace(
+        summary=summary, summaries={"SCN": summary},
+        fig_path=str(tmp_path / "f"), data_path=str(tmp_path / "d"),
+        condition_list=[SimpleNamespace(name="WT"), SimpleNamespace(name="KO")])
+    os.makedirs(exp.fig_path, exist_ok=True)
+    os.makedirs(exp.data_path, exist_ok=True)
+    return exp
+
+
+def test_mde_is_monotonic_in_n():
+    from PyFLASH.pipeline import _ovw_mde_two_sample
+    mdes = [_ovw_mde_two_sample(k, k) for k in (5, 10, 20, 40)]
+    assert all(np.isfinite(mdes))
+    assert mdes[0] > mdes[1] > mdes[2] > mdes[3]   # more N -> smaller detectable effect
+
+
+def test_power_mde_and_readiness_written(tmp_path):
+    exp = _readiness_dataset(tmp_path)
+    res = pipeline.data_overview(exp, by="conditions", run_label="p8",
+                                 save=True, power=0.8)
+    mde = res["mde_by_marker"]
+    assert set(["marker", "n1", "n2", "mde_g", "underpowered"]).issubset(mde.columns)
+    assert np.isfinite(pd.to_numeric(mde["mde_g"], errors="coerce")).any()
+    assert os.path.isfile(os.path.join(res["data_dir"], "mde_by_marker.csv"))
+    assert os.path.isfile(os.path.join(res["fig_dir"], "Power MDE.svg"))
+
+    rd = res["marker_readiness"].set_index("marker")
+    assert rd.loc["Const", "verdict"] == "drop"          # constant column
+    assert rd.loc["Skewed", "verdict"] == "transform"     # right-skewed
+    assert rd.loc["Normal", "verdict"] == "ready"
+    # transform suggestion reports the resulting skew, and never mutated the data.
+    assert rd.loc["Skewed", "suggested_transform"] in ("log", "sqrt", "log1p", "rank")
+    assert np.isfinite(rd.loc["Skewed", "resulting_skew"])
+    assert exp.summary["Skewed"].notna().all()            # source data untouched
+    assert os.path.isfile(os.path.join(res["data_dir"], "marker_readiness.csv"))
+    assert os.path.isfile(os.path.join(res["fig_dir"], "Marker Readiness.svg"))
+    # readiness informs the scorecard narrative.
+    assert "need attention" in res["dataset_health_narrative"]
+
+
+def test_readiness_transform_prefers_log_and_guards_domain():
+    from PyFLASH.pipeline import _ovw_best_transform
+    rng = np.random.default_rng(1)
+    # log-normal (all positive, right-skewed) -> log should tame it well.
+    pos = np.exp(rng.normal(0, 1, 200))
+    name, res_skew = _ovw_best_transform(pos)
+    assert name in ("log", "sqrt")                        # magnitude-preserving preferred
+    assert res_skew < 0.5
+    # non-positive domain -> log/sqrt invalid, must still suggest something valid.
+    mixed = rng.normal(0, 3, 200)
+    name2, res2 = _ovw_best_transform(mixed)
+    assert name2 in ("log1p", "rank", "sqrt")             # never plain log on <=0 data
+    assert np.isfinite(res2)
+
+
+def test_power_mde_emits_describe_records(tmp_path):
+    import PyFLASH.report as report
+    exp = _readiness_dataset(tmp_path)
+    report.start()
+    try:
+        res = pipeline.data_overview(exp, by="conditions",
+                                     run_label="p8_rec", save=True)
+        records = report.collect()
+    finally:
+        if report.is_active():
+            report.collect()
+    kinds = {r.get("kind") for r in records}
+    assert "power_mde" in kinds and "marker_readiness" in kinds
+    assert res["readiness_verdicts"].get("drop", 0) >= 1

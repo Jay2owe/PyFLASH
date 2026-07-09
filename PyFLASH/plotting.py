@@ -16941,21 +16941,36 @@ def plot_correlation_pipeline(
 def plot_multivariable_regression_matrix(
     experiment,
     filtered_columns=None,
+    data_cols=None,
     predictors=None,
     by='conditions',
     factor=None,
     specificity=None,
+    split_by=None,
+    filter_by=None,
     roi=None,
     save=True,
     column_strings=None,
     regex_string=None,
     exclude='',
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
     min_n=None,
     value='r2',
     correction='fdr',
     alpha=0.05,
     tick_label_size=20,
     conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
+    dataframe_kwargs=None,
     combine_conditions=True,
     column_order=None,
     predictor_order=None,
@@ -16971,6 +16986,36 @@ def plot_multivariable_regression_matrix(
         {"Month": ["month_sin", "month_cos"],
          "Season": ["season_sin", "season_cos"]}
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by='conditions',
+    )
+    experiment = coerce_dataframe_input(
+        experiment,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     # ROI queue mode - iterate over ROI bases.
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -17378,10 +17423,14 @@ def plot_multivariable_regression_matrix(
 def plot_rect_matrices(
     experiment,
     filtered_columns=None,
+    data_cols=None,
     against_columns=None,
+    against_data_cols=None,
     by='conditions',
     factor=None,
     specificity=None,
+    split_by=None,
+    filter_by=None,
     roi=None,
     save=True,
     correlation='pearsonr',
@@ -17389,10 +17438,25 @@ def plot_rect_matrices(
     column_strings=None,
     regex_string=None,
     exclude='',
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
     against_column_strings=None,
     against_regex_string=None,
     against_exclude='',
+    against_data_col_contains=None,
+    against_data_col_regex=None,
+    against_data_col_exclude=None,
     conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
+    dataframe_kwargs=None,
     encode_x_categorical=True,
     combine_conditions=True,
     column_order=None,
@@ -17413,6 +17477,48 @@ def plot_rect_matrices(
     - blank_panel_on_nan: keep requested columns and annotate only NaN
       matrix cells with "NaN" (instead of dropping columns).
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    against_columns, against_column_strings, against_regex_string, against_exclude = (
+        resolve_data_column_aliases(
+            filtered_columns=against_columns,
+            column_strings=against_column_strings,
+            regex_string=against_regex_string,
+            exclude=against_exclude,
+            data_cols=against_data_cols,
+            data_col_contains=against_data_col_contains,
+            data_col_regex=against_data_col_regex,
+            data_col_exclude=against_data_col_exclude,
+        )
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by='conditions',
+    )
+    experiment = coerce_dataframe_input(
+        experiment,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -20353,6 +20459,88 @@ def _ovw_scorecard_figure(scorecard, *, narrative=None, tick_label_size=20,
     return fig
 
 
+def _ovw_mde_figure(mde, *, mde_threshold=0.8, power=0.8, tick_label_size=20,
+                    title="Minimum detectable effect"):
+    """Per-marker minimum detectable |Hedges g| bars with an underpowered floor.
+
+    Bars are the largest MDE across a marker's contrasts (worst case), sorted
+    worst-first; a dashed line marks ``mde_threshold``; non-normal markers are
+    greyed and the caption states the underpowered count and the approximate
+    (parametric two-sample) framing. Returns ``None`` when there is nothing to draw.
+    """
+    if mde is None or getattr(mde, "empty", True) or "mde_g" not in mde.columns:
+        return None
+    d = mde.copy()
+    d["mde_g"] = pd.to_numeric(d["mde_g"], errors="coerce")
+    d = d[np.isfinite(d["mde_g"])]
+    if d.empty:
+        return None
+    nn = (d.groupby("marker")["non_normal"].any() if "non_normal" in d.columns
+          else pd.Series(False, index=d["marker"].unique()))
+    agg = (d.groupby("marker")["mde_g"].max().to_frame("mde_g")
+           .assign(non_normal=nn).reset_index()
+           .sort_values("mde_g", ascending=True))
+    lab = max(7, int(tick_label_size) - 6)
+    fig, ax = plt.subplots(figsize=(8.5, max(3.0, 0.42 * len(agg) + 2.0)))
+    ypos = list(range(len(agg)))
+    colors = ["#9e9e9e" if bool(x) else "#3a6ea5" for x in agg["non_normal"]]
+    ax.barh(ypos, agg["mde_g"], color=colors, edgecolor="none")
+    ax.axvline(float(mde_threshold), color="#c0392b", ls="--", lw=1.3,
+               label=f"underpowered above g={mde_threshold:g}")
+    ax.set_yticks(ypos)
+    ax.set_yticklabels([str(m)[:26] for m in agg["marker"]], fontsize=lab)
+    ax.set_xlabel("Minimum detectable |Hedges g|", fontsize=lab)
+    n_under = int((agg["mde_g"] > float(mde_threshold)).sum())
+    ax.set_title(title, fontsize=int(tick_label_size), fontweight="bold")
+    ax.text(0.5, -0.16,
+            f"{n_under} of {len(agg)} markers underpowered — approximate "
+            f"(parametric two-sample), power={power:g}. Grey = non-normal.",
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=max(6, lab - 2), style="italic")
+    ax.legend(fontsize=max(6, lab - 2), frameon=False, loc="lower right")
+    for sp_ in ("top", "right"):
+        ax.spines[sp_].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+_READINESS_COLORS = {
+    "ready": "#2e7d32", "transform": "#d98a17",
+    "caution": "#e67e22", "drop": "#c0392b",
+}
+
+
+def _ovw_readiness_figure(readiness, *, tick_label_size=20,
+                          title="Marker readiness"):
+    """Colour-coded verdict table (ready / transform / caution / drop + reason)."""
+    if readiness is None or getattr(readiness, "empty", True):
+        return None
+    from matplotlib.patches import Rectangle
+    order = {"drop": 0, "caution": 1, "transform": 2, "ready": 3}
+    d = readiness.copy()
+    d["_o"] = d["verdict"].map(lambda v: order.get(str(v), 9))
+    d = d.sort_values("_o")
+    lab = max(7, int(tick_label_size) - 6)
+    fig, ax = plt.subplots(figsize=(9.5, max(2.6, 0.5 * len(d) + 1.2)))
+    ax.axis("off")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, len(d))
+    for i, (_, r) in enumerate(d.iterrows()):
+        y = len(d) - 1 - i
+        col = _READINESS_COLORS.get(str(r.get("verdict")), "#9e9e9e")
+        ax.add_patch(Rectangle((0.005, y + 0.08), 0.99, 0.84, facecolor=col,
+                               alpha=0.15, edgecolor=col, linewidth=1.2))
+        ax.text(0.02, y + 0.5, str(r.get("marker", ""))[:20], va="center",
+                ha="left", fontsize=lab, fontweight="bold")
+        ax.text(0.26, y + 0.5, str(r.get("verdict", "")).upper(), va="center",
+                ha="left", fontsize=lab, color=col, fontweight="bold")
+        ax.text(0.42, y + 0.5, str(r.get("reason", ""))[:66], va="center",
+                ha="left", fontsize=max(6, lab - 2), color="#333333")
+    ax.set_title(title, fontsize=int(tick_label_size), fontweight="bold", pad=10)
+    fig.tight_layout()
+    return fig
+
+
 def _volcano_table_figure(sub, value_col, alpha, title, tick_label_size=20):
     """Volcano from a precomputed table (``hedges_g`` on x, ``-log10(value_col)``
     on y). Used by the pipeline for its q-gated volcanos; the standalone volcano
@@ -20519,9 +20707,16 @@ def _gc_plot_prepare(experiment, filtered_columns, column_strings, regex_string,
     return _roi_base, scope_df, num_df, numeric_cols, groups
 
 
-def plot_superplot(experiment, filtered_columns=None, by='conditions', factor=None,
-                   specificity=None, roi=None, column_strings=None, regex_string=None,
-                   exclude='', tick_label_size=20, save=True):
+def plot_superplot(experiment, filtered_columns=None, data_cols=None,
+                   by='conditions', factor=None, specificity=None,
+                   split_by=None, filter_by=None, roi=None,
+                   column_strings=None, regex_string=None, exclude='',
+                   data_col_contains=None, data_col_regex=None,
+                   data_col_exclude=None, tick_label_size=20, save=True,
+                   condition_col="Condition", factor_cols=None,
+                   animal_col="AnimalName", group_list=None, groups=None,
+                   group_col=None, group_cols=None, subject_col=None,
+                   dataframe_kwargs=None):
     """SuperPlot per marker: ROI-level points coloured by animal over each animal's
     mean and the group mean (Lord et al. 2020). Shows biological (animal) vs technical
     (ROI) spread for the chosen grouping. Needs ROI-level data
@@ -20529,6 +20724,36 @@ def plot_superplot(experiment, filtered_columns=None, by='conditions', factor=No
 
     Returns ``{marker: fig}`` (or a nested dict in ROI/specificity-queue modes).
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by='conditions',
+    )
+    experiment = coerce_dataframe_input(
+        experiment,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
         return {rb: plot_superplot(
@@ -20571,15 +20796,52 @@ def plot_superplot(experiment, filtered_columns=None, by='conditions', factor=No
     return out
 
 
-def plot_effect_forest(experiment, filtered_columns=None, by='conditions', factor=None,
-                       specificity=None, roi=None, control=None, alpha=0.05,
+def plot_effect_forest(experiment, filtered_columns=None, data_cols=None,
+                       by='conditions', factor=None,
+                       specificity=None, split_by=None, filter_by=None,
+                       roi=None, control=None, alpha=0.05,
                        max_items=30, effect_ci=True, n_resamples=2000, min_n=3,
                        tick_label_size=20, save=True, column_strings=None,
-                       regex_string=None, exclude=''):
+                       regex_string=None, exclude='', data_col_contains=None,
+                       data_col_regex=None, data_col_exclude=None,
+                       condition_col="Condition", factor_cols=None,
+                       animal_col="AnimalName", group_list=None, groups=None,
+                       group_col=None, group_cols=None, subject_col=None,
+                       dataframe_kwargs=None):
     """Forest plot of animal-level effect sizes (Hedges g + bootstrap CI), one row per
     marker x group-vs-``control``, ranked by |effect|. The inferential, significance-
     marked variant is produced by ``pipeline.group_comparison``; this standalone view
     is descriptive. Returns the figure (or a queue dict)."""
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by='conditions',
+    )
+    experiment = coerce_dataframe_input(
+        experiment,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
         return {rb: plot_effect_forest(
@@ -20622,14 +20884,51 @@ def plot_effect_forest(experiment, filtered_columns=None, by='conditions', facto
     return fig
 
 
-def plot_group_matrix(experiment, filtered_columns=None, by='conditions', factor=None,
-                      specificity=None, roi=None, control=None, alpha=0.05,
+def plot_group_matrix(experiment, filtered_columns=None, data_cols=None,
+                      by='conditions', factor=None,
+                      specificity=None, split_by=None, filter_by=None,
+                      roi=None, control=None, alpha=0.05,
                       effect_ci=False, n_resamples=2000, min_n=3, tick_label_size=20,
-                      save=True, column_strings=None, regex_string=None, exclude=''):
+                      save=True, column_strings=None, regex_string=None, exclude='',
+                      data_col_contains=None, data_col_regex=None,
+                      data_col_exclude=None, condition_col="Condition",
+                      factor_cols=None, animal_col="AnimalName",
+                      group_list=None, groups=None, group_col=None,
+                      group_cols=None, subject_col=None, dataframe_kwargs=None):
     """Marker x (group-vs-``control``) heatmap of signed Hedges g — an at-a-glance map
     of which markers move in which groups, in the gate-matrix idiom. The inferential,
     asterisked variant is produced by ``pipeline.group_comparison``; this standalone
     view is descriptive. Returns the figure (or a queue dict)."""
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by='conditions',
+    )
+    experiment = coerce_dataframe_input(
+        experiment,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
         return {rb: plot_group_matrix(

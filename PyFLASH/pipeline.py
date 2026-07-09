@@ -60,6 +60,8 @@ from PyFLASH.plotting import (
     _stats_matrix_figure,
     _ovw_sig_audit_matrix_figure,
     _ovw_scorecard_figure,
+    _ovw_mde_figure,
+    _ovw_readiness_figure,
     _volcano_table_figure,
     _resolve_marker_roi_long,
     _animal_group_map_from_groups,
@@ -4116,6 +4118,180 @@ def _ovw_narrative(scorecard, group_counts, covariation, n_animals):
     return " ".join(parts)
 
 
+def _ovw_safe_int(x, default=0):
+    try:
+        v = float(x)
+        return int(v) if np.isfinite(v) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _ovw_mde_two_sample(n1, n2, alpha=0.05, power=0.8):
+    """Smallest |Hedges g| a two-sample t-test detects at (n1, n2, alpha, power)."""
+    n1, n2 = int(n1), int(n2)
+    if n1 < 2 or n2 < 2:
+        return float("nan")
+    try:
+        from statsmodels.stats.power import TTestIndPower
+        return float(TTestIndPower().solve_power(
+            effect_size=None, nobs1=n1, alpha=float(alpha), power=float(power),
+            ratio=n2 / n1))
+    except Exception:
+        return float("nan")
+
+
+def _ovw_power_mde(availability, group_counts, numeric_cols, normality, *,
+                   alpha=0.05, power=0.8, control=None, mde_threshold=0.8):
+    """Per-marker minimum detectable effect for control-vs-each condition contrasts.
+
+    Uses each marker's per-condition available N (from ``availability_by_condition``,
+    else the design group sizes). Approximate parametric two-sample framing — markers
+    the normality section flags non-normal are tagged so the figure greys them.
+    Returns marker / contrast / n1 / n2 / mde_g / non_normal / underpowered.
+    """
+    cols = ["marker", "contrast", "n1", "n2", "mde_g", "non_normal", "underpowered"]
+    levels = []
+    if isinstance(availability, pd.DataFrame) and availability.shape[1] >= 2:
+        levels = [str(c) for c in availability.columns]
+    elif (isinstance(group_counts, pd.DataFrame)
+          and "grouping" in group_counts.columns):
+        cg = group_counts[group_counts["grouping"].astype(str) == "Condition"]
+        levels = [str(v) for v in cg["level"]]
+    if len(levels) < 2:
+        return pd.DataFrame(columns=cols)
+    ctrl = str(control) if control is not None and str(control) in levels else levels[0]
+    others = [lv for lv in levels if lv != ctrl]
+
+    non_normal = set()
+    if isinstance(normality, pd.DataFrame) and "is_normal" in normality.columns:
+        bad = normality[normality["is_normal"] == False]  # noqa: E712
+        non_normal = set(bad["column"].astype(str))
+    cond_n = {}
+    if isinstance(group_counts, pd.DataFrame) and "grouping" in group_counts.columns:
+        cg = group_counts[group_counts["grouping"].astype(str) == "Condition"]
+        cond_n = {str(r["level"]): _ovw_safe_int(r["n_animals"])
+                  for _, r in cg.iterrows()}
+
+    rows = []
+    have_av = (isinstance(availability, pd.DataFrame)
+               and not availability.empty)
+    for marker in (numeric_cols or []):
+        for other in others:
+            if have_av and marker in availability.index:
+                n1 = _ovw_safe_int(availability.loc[marker].get(ctrl))
+                n2 = _ovw_safe_int(availability.loc[marker].get(other))
+            else:
+                n1, n2 = cond_n.get(ctrl, 0), cond_n.get(other, 0)
+            mde = _ovw_mde_two_sample(n1, n2, alpha, power)
+            rows.append(dict(
+                marker=marker, contrast=f"{other} vs {ctrl}", n1=n1, n2=n2,
+                mde_g=mde, non_normal=(marker in non_normal),
+                underpowered=bool(np.isfinite(mde) and mde > mde_threshold)))
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _ovw_best_transform(arr):
+    """Return (transform_name, |skew| after it) minimising skew; guards the domain."""
+    from scipy import stats as _sp
+    arr = np.asarray(arr, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if len(arr) < 3:
+        return None, float("nan")
+    cands = {}
+    if np.all(arr > 0):
+        cands["log"] = np.log(arr)
+        cands["sqrt"] = np.sqrt(arr)
+    elif np.all(arr >= 0):
+        cands["sqrt"] = np.sqrt(arr)
+        cands["log1p"] = np.log1p(arr)
+    cands["rank"] = _sp.rankdata(arr)          # always valid (non-positive domains)
+
+    def _sk(t):
+        try:
+            return abs(float(_sp.skew(t)))
+        except Exception:
+            return float("inf")
+
+    scored = [(name, _sk(t)) for name, t in cands.items()]
+    scored = [(n, s) for n, s in scored if np.isfinite(s)]
+    if not scored:
+        return None, float("nan")
+    # Prefer a magnitude-preserving transform (log/sqrt/log1p) when it gets skew
+    # acceptably low; only fall to rank (which flattens to ~0 skew but discards
+    # magnitude) when no parametric transform is good enough.
+    param = [(n, s) for n, s in scored if n != "rank"]
+    if param:
+        bp, bps = min(param, key=lambda kv: kv[1])
+        if bps <= 0.5:
+            return bp, bps
+    best, best_s = min(scored, key=lambda kv: kv[1])
+    return best, best_s
+
+
+def _ovw_readiness(inventory, num_df, numeric_cols, covariation, *,
+                   missing_caution_pct=40.0, skew_transform=1.0):
+    """Per-marker analysis-readiness verdict (ready / transform / caution / drop).
+
+    Verdicts come from signals already computed: role (constant / all-missing ->
+    drop), collinearity (the more-missing member of a covarying pair -> drop the
+    redundant twin), missingness (> ``missing_caution_pct`` -> caution), and skew
+    (> ``skew_transform`` -> transform, with a log/sqrt/rank trial reporting the
+    resulting skew). Advice only — never mutates data. Non-positive domains fall to
+    log1p/rank so a suggestion is always valid.
+    """
+    inv = (inventory.set_index("column")
+           if isinstance(inventory, pd.DataFrame) and "column" in inventory.columns
+           else pd.DataFrame())
+
+    def _miss(m):
+        try:
+            return float(inv.loc[m, "pct_missing"])
+        except Exception:
+            return 0.0
+
+    redundant = {}
+    if (isinstance(covariation, pd.DataFrame) and not covariation.empty
+            and {"x", "y"}.issubset(covariation.columns)):
+        for _, r in covariation.iterrows():
+            x, y = str(r["x"]), str(r["y"])
+            drop_m, keep_m = (x, y) if _miss(x) >= _miss(y) else (y, x)
+            redundant.setdefault(drop_m, keep_m)
+
+    rows = []
+    from scipy import stats as _sp
+    for marker in (numeric_cols or []):
+        role = (str(inv.loc[marker, "role"])
+                if marker in inv.index and "role" in inv.columns else "numeric")
+        pct_missing = _miss(marker)
+        arr = (pd.to_numeric(num_df[marker], errors="coerce").to_numpy()
+               if isinstance(num_df, pd.DataFrame) and marker in num_df.columns
+               else np.array([], dtype=float))
+        arr = arr[np.isfinite(arr)]
+        skew = float(_sp.skew(arr)) if len(arr) >= 3 else float("nan")
+        suggested, res_skew = "", float("nan")
+        if role in ("constant", "all_missing"):
+            verdict, reason = "drop", f"{role} column"
+        elif marker in redundant:
+            verdict = "drop"
+            reason = f"redundant (collinear with {redundant[marker]}; keep less-missing twin)"
+        elif pct_missing > missing_caution_pct:
+            verdict, reason = "caution", f"{pct_missing:.0f}% missing"
+        elif np.isfinite(skew) and abs(skew) > skew_transform:
+            suggested, res_skew = _ovw_best_transform(arr)
+            suggested = suggested or ""
+            verdict = "transform"
+            reason = (f"skew {skew:.1f}; try {suggested} (skew {skew:.1f}->{res_skew:.1f})"
+                      if suggested else f"skew {skew:.1f}; consider a transform")
+        else:
+            verdict, reason = "ready", "ok"
+        rows.append(dict(marker=marker, verdict=verdict, reason=reason, role=role,
+                         pct_missing=pct_missing, skew=skew,
+                         suggested_transform=suggested, resulting_skew=res_skew))
+    return pd.DataFrame(rows, columns=["marker", "verdict", "reason", "role",
+                                       "pct_missing", "skew",
+                                       "suggested_transform", "resulting_skew"])
+
+
 @montage_pipeline(title="Data Overview Pipeline")
 def data_overview(
     experiment,
@@ -4176,6 +4352,10 @@ def data_overview(
     include_scorecard=True,
     plot_scorecard=True,
     scorecard_thresholds=None,
+    include_readiness=True,
+    plot_readiness=True,
+    power=0.8,
+    mde_threshold=0.8,
     condition_distribution_plot="raincloud",
     fingerprint_stat="median",
     variability_stat="cv_pct",
@@ -4574,6 +4754,41 @@ def data_overview(
         except Exception:
             pass
 
+    # Power / MDE + analysis-readiness: what the design cannot detect (per-marker
+    # minimum detectable effect from the actual Ns) and what each marker needs
+    # (ready / transform / caution / drop). Advice only — never mutates data. Feeds
+    # the scorecard narrative and the describe layer.
+    mde_by_marker = pd.DataFrame()
+    marker_readiness = pd.DataFrame()
+    if include_readiness and numeric_cols:
+        mde_by_marker = _ovw_power_mde(
+            availability, group_counts, numeric_cols, normality,
+            alpha=alpha, power=power, mde_threshold=mde_threshold)
+        marker_readiness = _ovw_readiness(
+            inventory, num_df, numeric_cols, covarying)
+        if not marker_readiness.empty:
+            vc = marker_readiness["verdict"].value_counts()
+            bits = [f"{int(vc[k])} {k}" for k in ("drop", "caution", "transform")
+                    if vc.get(k)]
+            if bits and scorecard_narrative:
+                scorecard_narrative += (f" {sum(int(vc[k]) for k in ('drop', 'caution', 'transform') if vc.get(k))}"
+                                        f" marker(s) need attention ({', '.join(bits)}).")
+        try:
+            from PyFLASH import report as _report
+            if not mde_by_marker.empty:
+                _report.emit({
+                    "headline": "Power / MDE", "kind": "power_mde",
+                    "power": float(power),
+                    "n_underpowered": int(mde_by_marker["underpowered"].sum()),
+                    "n_tested": int(mde_by_marker["marker"].nunique())})
+            if not marker_readiness.empty:
+                _report.emit({
+                    "headline": "Marker readiness", "kind": "marker_readiness",
+                    "verdicts": {str(k): int(v) for k, v in
+                                 marker_readiness["verdict"].value_counts().items()}})
+        except Exception:
+            pass
+
     # ── write tables + figures ──────────────────────────────────────────────
     if save:
         _corr_makedirs(data_dir)
@@ -4642,6 +4857,14 @@ def data_overview(
             _corr_to_csv(
                 scorecard,
                 os.path.join(data_dir, f"scorecard{spec_tag}.csv"), index=False)
+        if include_readiness and not mde_by_marker.empty:
+            _corr_to_csv(
+                mde_by_marker,
+                os.path.join(data_dir, f"mde_by_marker{spec_tag}.csv"), index=False)
+        if include_readiness and not marker_readiness.empty:
+            _corr_to_csv(
+                marker_readiness,
+                os.path.join(data_dir, f"marker_readiness{spec_tag}.csv"), index=False)
 
         if any((
             plot_group_counts, plot_availability, plot_descriptives,
@@ -4650,7 +4873,7 @@ def data_overview(
             plot_condition_distributions, plot_condition_distribution_zscores,
             plot_condition_fingerprint, plot_condition_variability,
             plot_effect_sizes, plot_missingness, plot_covariation,
-            plot_significance_audit,
+            plot_significance_audit, plot_readiness,
         )):
             _corr_makedirs(fig_dir)
         figure_numeric_cols = _ovw_numeric_figure_columns(numeric_cols, inventory)
@@ -4818,6 +5041,19 @@ def data_overview(
             if scfig is not None:
                 save_fig(scfig, fig_dir, f"Dataset Health{spec_tag}", montage=True)
                 plt.close(scfig)
+        if plot_readiness and include_readiness and not mde_by_marker.empty:
+            pfig = _ovw_mde_figure(
+                mde_by_marker, mde_threshold=mde_threshold, power=power,
+                tick_label_size=tick_label_size)
+            if pfig is not None:
+                save_fig(pfig, fig_dir, f"Power MDE{spec_tag}", montage=True)
+                plt.close(pfig)
+        if plot_readiness and include_readiness and not marker_readiness.empty:
+            rfig = _ovw_readiness_figure(
+                marker_readiness, tick_label_size=tick_label_size)
+            if rfig is not None:
+                save_fig(rfig, fig_dir, f"Marker Readiness{spec_tag}", montage=True)
+                plt.close(rfig)
         if plot_missingness:
             mfig = _ovw_missingness_figure(
                 scope_df, resolved_columns, tick_label_size,
@@ -4902,6 +5138,12 @@ def data_overview(
         "scorecard": (dict(zip(scorecard["axis"], scorecard["grade"]))
                       if not scorecard.empty else {}),
         "dataset_health_narrative": scorecard_narrative,
+        "n_underpowered": (int(mde_by_marker["underpowered"].sum())
+                           if not mde_by_marker.empty else 0),
+        "readiness_verdicts": ({str(k): int(v) for k, v in
+                                marker_readiness["verdict"].value_counts().items()}
+                               if not marker_readiness.empty else {}),
+        "power": float(power),
         "alpha": float(alpha),
         "plots": {
             "group_counts": bool(plot_group_counts),
@@ -4986,6 +5228,8 @@ def data_overview(
     result["sig_audit_bundle"] = sig_audit_bundle
     result["scorecard"] = scorecard
     result["dataset_health_narrative"] = scorecard_narrative
+    result["mde_by_marker"] = mde_by_marker
+    result["marker_readiness"] = marker_readiness
     return result
 
 
