@@ -484,3 +484,147 @@ def test_split_effect_control_composite_rule(tmp_path):
         pipeline.data_overview(
             exp, split_by=["Condition", "Sex"], split_mode="cross",
             effect_control="Nope", run_label="split_ctrl_bad", save=False)
+
+
+# ── Stage 03: significance audit (auto-select test + concordance + FDR) ──────
+
+_AUDIT_COLUMNS = {
+    "marker", "contrast", "left_group", "right_group", "n_left", "n_right",
+    "test", "test_partner", "statistic", "p", "p_partner", "q", "reject_fdr",
+    "effect_metric", "effect_value", "effect_ci_low", "effect_ci_high",
+    "significant", "concordant", "alpha",
+}
+
+# The exact test-name strings PyFLASH.stats.multipleComparisons returns.
+_AUDIT_TESTS = {
+    "Independent T-Test", "Mann-Whitney U", "One-Way ANOVA", "Kruskal-Wallis",
+}
+
+
+def _skewed_three_group_dataset(tmp_path, n_per=8):
+    """Three condition groups; ``Skew`` is heavily right-skewed so the pooled
+    normality screen fails and the audit must select a non-parametric test."""
+    rng = np.random.default_rng(11)
+    names = ["G1", "G2", "G3"]
+    conditions, skew, norm = [], [], []
+    for i, g in enumerate(names):
+        conditions += [g] * n_per
+        skew.append(rng.exponential(scale=1.5 + 0.4 * i, size=n_per))  # non-normal
+        norm.append(rng.normal(10.0 + 0.3 * i, 1.0, size=n_per))
+    n = n_per * len(names)
+    summary = pd.DataFrame({
+        "AnimalName": [f"A{i:02d}" for i in range(n)],
+        "Condition": conditions,
+        "numSections": rng.integers(2, 5, n),
+        "Skew": np.concatenate(skew),
+        "Norm": np.concatenate(norm),
+    })
+    fig_path = str(tmp_path / "Python Figures")
+    data_path = str(tmp_path / "Data and Stats")
+    os.makedirs(fig_path, exist_ok=True)
+    os.makedirs(data_path, exist_ok=True)
+    return SimpleNamespace(
+        summary=summary, summaries={"SCN": summary},
+        fig_path=fig_path, data_path=data_path,
+        condition_list=[SimpleNamespace(name=g) for g in names])
+
+
+def test_significance_audit_frame_shape_and_annotation(tmp_path):
+    exp = _overview_dataset(tmp_path)
+
+    res = pipeline.data_overview(
+        exp, by="conditions", include_significance_audit=True,
+        run_label="audit_basic", save=False)
+
+    audit = res["significance_audit"]
+    assert isinstance(audit, pd.DataFrame) and not audit.empty
+    assert _AUDIT_COLUMNS.issubset(set(audit.columns))
+
+    # One row per (marker, contrast): 2 groups -> exactly one contrast per marker.
+    assert audit.groupby("marker").size().max() == 1
+    for col in ("A", "B", "C"):
+        rows = audit[audit["marker"] == col]
+        assert len(rows) == 1
+        row = rows.iloc[0]
+        assert row["contrast"] == "KO vs WT"
+        assert row["left_group"] == "KO" and row["right_group"] == "WT"
+        # Auto-selected 2-group parametric test, annotated with the exact string.
+        assert row["test"] in _AUDIT_TESTS
+        assert row["test"] == "Independent T-Test"
+        assert np.isfinite(row["p"])
+        # Partner family (non-parametric) run so a concordance flag can be formed.
+        assert row["test_partner"] == "Mann-Whitney U"
+        assert np.isfinite(row["p_partner"])
+        assert bool(row["concordant"]) in (True, False)
+        # Matched effect size + bootstrap CI.
+        assert row["effect_metric"] == "hedges_g"
+        assert np.isfinite(row["effect_value"])
+        assert np.isfinite(row["effect_ci_low"]) and np.isfinite(row["effect_ci_high"])
+        assert float(row["alpha"]) == 0.05
+        assert bool(row["significant"]) in (True, False)
+
+
+def test_significance_audit_screen_adds_fdr_with_p_counterpart(tmp_path):
+    exp = _overview_dataset(tmp_path)
+
+    res = pipeline.data_overview(
+        exp, by="conditions", include_significance_audit=True, screen=True,
+        run_label="audit_screen", save=False)
+
+    audit = res["significance_audit"]
+    assert {"q", "reject_fdr"}.issubset(set(audit.columns))
+    tested = audit[pd.to_numeric(audit["p"], errors="coerce").notna()]
+    assert not tested.empty
+    # Every q has a finite p counterpart, and q is populated when screening.
+    assert pd.to_numeric(tested["q"], errors="coerce").notna().any()
+    assert pd.to_numeric(tested["q"], errors="coerce").notna().all()
+    assert tested["reject_fdr"].isin([True, False]).all()
+
+
+def test_significance_audit_gate_fdr_requires_screen(tmp_path):
+    exp = _overview_dataset(tmp_path)
+
+    with pytest.raises(ValueError):
+        pipeline.data_overview(
+            exp, by="conditions", include_significance_audit=True,
+            gate="fdr", screen=False, run_label="audit_gate_bad", save=False)
+
+
+def test_significance_audit_selects_nonparametric_for_skewed_marker(tmp_path):
+    exp = _skewed_three_group_dataset(tmp_path)
+
+    res = pipeline.data_overview(
+        exp, by="conditions", include_significance_audit=True,
+        run_label="audit_kw", save=False)
+
+    audit = res["significance_audit"]
+    skew = audit[audit["marker"] == "Skew"]
+    # 3 groups -> 3 all-pairs contrasts, each selecting the non-parametric test.
+    assert len(skew) == 3
+    assert set(skew["test"]) == {"Kruskal-Wallis"}
+    assert set(skew["effect_metric"]) == {"rank_biserial"}
+    assert skew["effect_value"].apply(np.isfinite).all()
+    # The parametric partner (Welch t) is recorded so concordance can be judged.
+    assert set(skew["test_partner"]) == {"Welch's t-test"}
+    assert skew["concordant"].isin([True, False]).all()
+
+
+def test_significance_audit_writes_csv_and_emits_describe_record(tmp_path):
+    import PyFLASH.report as report
+
+    exp = _overview_dataset(tmp_path)
+    report.start()
+    try:
+        res = pipeline.data_overview(
+            exp, by="conditions", include_significance_audit=True,
+            run_label="audit_describe", save=True)
+        records = report.collect()
+    finally:
+        if report.is_active():
+            report.collect()
+
+    assert os.path.isfile(os.path.join(res["data_dir"], "significance_audit.csv"))
+    # Routing the audit through multipleComparisons emits a structured record per
+    # marker when the collector is armed -> a non-zero, non-empty describe run.
+    assert len(records) > 0
+    assert res["n_audit_tests"] > 0

@@ -31,6 +31,7 @@ PLOT_REGISTRY = {
     'ridgeline': 'plot_ridgeline',
     'ecdf': 'plot_ecdf',
     'regressions': 'plot_regressions',
+    'scatter_3d': 'plot_scatter_3d',
     'pie_charts': 'plot_pie_charts',
     'combo_pies': 'plot_combo_pies',
     'locations': 'plot_locations',
@@ -54,6 +55,7 @@ PLOT_REGISTRY = {
     'group_comparison_pipeline': 'PyFLASH.pipeline.group_comparison',
     'linear_model_pipeline': 'PyFLASH.pipeline.linear_model',
     'rhythm_pipeline': 'PyFLASH.pipeline.rhythm',
+    'iterative_model_sweep': 'PyFLASH.modelling.iterative_model_sweep',
 }
 
 # ── Describe-layer coverage (the structured-results / "describe" feature) ────
@@ -85,6 +87,11 @@ DESCRIBE_COVERED = {
     'adjusted_correlation_pipeline',
     'group_comparison_pipeline',
     'linear_model_pipeline',
+    'iterative_model_sweep',
+    # data_overview's significance-audit section runs the auto-selected test per
+    # marker through multipleComparisons, which emits a structured record when
+    # PyFLASH.report is armed (default-off section; inert otherwise).
+    'data_overview_pipeline',
     # Rhythm module: cosinor fits and circular tests emit structured records via
     # report.emit (plots) and the pipeline return manifest.
     'cosinor',
@@ -95,13 +102,14 @@ DESCRIBE_EXEMPT = {
     'condition_key', 'images', 'representative_images', 'locations',
     'coloc_upset', 'coloc_sankey', 'pie_charts', 'combo_pies',
     'histograms', 'ridgeline', 'ecdf', 'radar', 'power_curve',
+    'scatter_3d',
     # Descriptive group-comparison views (raw points / effect sizes, no test).
     # The inferential capture lives in the group_comparison pipeline (COVERED).
     'superplot', 'effect_forest', 'group_matrix',
 }
 DESCRIBE_UNREVIEWED = {
     'matrices', 'rect_matrices', 'matrix_differences',
-    'volcano', 'marker_pca', 'timecourse', 'data_overview_pipeline',
+    'volcano', 'marker_pca', 'timecourse',
 }
 
 

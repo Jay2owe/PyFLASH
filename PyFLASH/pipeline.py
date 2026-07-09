@@ -8,6 +8,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 
 from PyFLASH._logging import logger as _log
+from PyFLASH.dataframe import coerce_dataframe_input
 from PyFLASH.modelling import (
     _fit_linear_models,
     _linear_model_reference_value,
@@ -323,6 +324,11 @@ def correlation(
     if_exists="overwrite",
     write_manifest=True,
     montage=True,
+    conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    dataframe_kwargs=None,
     _run_dirs=None,
     _tag_specificity=False,
     _slug_specificity=None,
@@ -402,6 +408,14 @@ def correlation(
     Returns a dict with the resolved run label, output directories, per-group
     counts, and the pairwise / selected-pair DataFrames.
     """
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     if is_specificity_queue(specificity):
         kwargs = dict(locals())
         kwargs.pop("experiment")
@@ -1667,6 +1681,11 @@ def adjusted_correlation(
     write_manifest=True,
     verbose=True,
     montage=True,
+    conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    dataframe_kwargs=None,
     _run_dirs=None,
     _tag_specificity=False,
     _slug_specificity=None,
@@ -3320,6 +3339,225 @@ def _ovw_effect_sizes(numeric_df, numeric_cols, groups, effect_control=None,
     return pd.DataFrame(rows, columns=columns), control_display
 
 
+# ── Significance audit (Stage 03) ────────────────────────────────────────────
+# The honest inferential layer data_overview lacks: per marker the shared engine
+# (PyFLASH.stats.multipleComparisons) auto-selects the test (Student's/Welch t or
+# Mann-Whitney for 2 groups; One-Way ANOVA or Kruskal-Wallis for 3+), we record
+# the selected test's p, the matched effect size + CI, and — so a reviewer can see
+# when a verdict hinges on the distributional assumption — the OTHER test family's
+# p and a concordance flag. Test SELECTION is never re-implemented here; it is read
+# straight off multipleComparisons. N = animal (arrays built via _gc_group_arrays).
+_OVW_AUDIT_COLUMNS = [
+    "marker", "contrast", "left_group", "right_group", "n_left", "n_right",
+    "test", "test_partner", "statistic", "p", "p_partner", "q", "reject_fdr",
+    "effect_metric", "effect_value", "effect_ci_low", "effect_ci_high",
+    "significant", "concordant", "alpha",
+]
+
+
+def _ovw_audit_statistics(test, post_hoc, results_dict, tokens):
+    """Per-token test statistic + omnibus statistic from a ``multipleComparisons``
+    ``results_dict`` (the statistic sibling of :func:`_gc_extract_auto`, which
+    parses the p-values)."""
+    def _f(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    omnibus = float("nan")
+    stat_list = None
+    if test == "Independent T-Test":
+        entry = results_dict.get("Independent T Test")
+        if entry is not None:
+            omnibus = _f(entry[0])
+            stat_list = [_f(entry[0])]
+    elif test == "Mann-Whitney U":
+        entry = results_dict.get("Mann-Whitney U")
+        if entry is not None and isinstance(entry[0], (list, tuple)):
+            stat_list = [_f(s) for s in entry[0]]
+            omnibus = stat_list[0] if stat_list else float("nan")
+    elif test == "One-Way ANOVA":
+        owa = results_dict.get("OWA")
+        if owa is not None:
+            omnibus = _f(owa[0])
+        tukey = results_dict.get("Tukey")
+        if tukey is not None and isinstance(tukey[0], (list, tuple)):
+            stat_list = [_f(s) for s in tukey[0]]
+    elif test == "Kruskal-Wallis":
+        kw = results_dict.get("KW")
+        if kw is not None:
+            omnibus = _f(kw[0])
+        # KW post-hoc statistic cells are placeholders (1); the omnibus H is the
+        # meaningful statistic, shared across the marker's contrasts.
+        stat_list = None
+    if stat_list is None:
+        stat_list = [omnibus] * len(tokens)
+    if len(stat_list) < len(tokens):
+        stat_list = stat_list + [float("nan")] * (len(tokens) - len(stat_list))
+    return omnibus, {tok: stat_list[i] for i, tok in enumerate(tokens)}
+
+
+def _ovw_partner_p(a, b, *, parametric_primary):
+    """Two-sided p from the OTHER test family for one contrast (fully guarded).
+
+    Concordance asks whether the significance verdict flips between the parametric
+    and non-parametric family on the SAME two groups, so the partner is a direct
+    pairwise test (cost-negligible at animal-level N): Mann-Whitney U when the
+    primary was parametric, Welch's t-test when it was non-parametric. Returns
+    ``(p, test_name)``; ``(nan, name)`` on any failure so a partner error can never
+    break the primary result.
+    """
+    from scipy import stats as _sps
+
+    a = np.asarray(a, float)
+    b = np.asarray(b, float)
+    if parametric_primary:
+        name = "Mann-Whitney U"
+        try:
+            _u, p = _sps.mannwhitneyu(a, b, alternative="two-sided")
+            return float(p), name
+        except Exception:
+            return float("nan"), name
+    name = "Welch's t-test"
+    try:
+        _t, p = _sps.ttest_ind(a, b, equal_var=False)
+        return float(p), name
+    except Exception:
+        return float("nan"), name
+
+
+def _ovw_significance_audit(experiment, scope_df, num_df, numeric_cols, groups, *,
+                            comparisons=None, control=None, alpha=0.05,
+                            screen=False, gate="p", min_n=3, run_both=True,
+                            effect_ci=True, n_resamples=5000):
+    """Per-marker mean-comparison audit over the resolved overview ``groups``.
+
+    For every numeric marker the shared engine auto-selects the test, and for every
+    resolved contrast we record its p, the matched animal-level effect size
+    (Hedges g for parametric / rank-biserial for non-parametric) with a bootstrap
+    CI, and — when ``run_both`` — the partner family's p plus a ``concordant`` flag
+    (``(p < alpha) == (p_partner < alpha)``). A contrast whose either group has
+    fewer than ``min_n`` animals yields a neutral NaN-p row, never a spurious "not
+    significant". When ``screen``, a per-contrast FDR q across markers is added.
+    Returns a tidy frame with one row per (marker, contrast); see
+    :data:`_OVW_AUDIT_COLUMNS`. ``scope_df`` is accepted for signature parity with
+    the other overview compute helpers; the arrays are read from ``num_df``.
+    """
+    from PyFLASH.stats import multipleComparisons
+
+    labels = [str(g[0]) for g in groups]
+    if len(labels) < 2 or not numeric_cols:
+        return pd.DataFrame(columns=_OVW_AUDIT_COLUMNS)
+    control_label = _gc_resolve_control(labels, control)
+    pairs = _gc_resolve_comparisons(comparisons, labels, control_label)
+    if not pairs:
+        return pd.DataFrame(columns=_OVW_AUDIT_COLUMNS)
+
+    rows = []
+    for col in numeric_cols:
+        arrays = _gc_group_arrays(num_df, col, groups)
+        involved, tokens, surv = _gc_marker_tokens(pairs, arrays, min_n)
+        tok_by_pair = {pr: tok for pr, tok in zip(surv, tokens)}
+        marker_test = None
+        parametric = True
+        pair_p, pair_stat = {}, {}
+        if surv:
+            # Name each series with the marker so the auto-emitted describe record
+            # (multipleComparisons emits when PyFLASH.report is armed) carries the
+            # marker as its metric — this is what satisfies describe coverage.
+            dfs = [pd.Series(arrays[l], name=str(col)) for l in involved]
+            try:
+                test, post_hoc, _ann, results_dict = multipleComparisons(
+                    experiment, dfs, None, None, None, None,
+                    multiple_comparison="One-Way", comparisons=tokens,
+                    group_labels=involved, save_normality=False, draw=False,
+                    verbose=False)
+            except Exception:
+                test = "Error"
+            if test not in ("Error", "N/A"):
+                marker_test = test
+                parametric = test in _GC_PARAMETRIC_TESTS
+                _omni_p, pair_p = _gc_extract_auto(test, post_hoc, results_dict, tokens)
+                _omni_s, pair_stat = _ovw_audit_statistics(
+                    test, post_hoc, results_dict, tokens)
+
+        for ref, grp in pairs:
+            tok = tok_by_pair.get((ref, grp))
+            gref = arrays.get(ref, np.asarray([], float))
+            ggrp = arrays.get(grp, np.asarray([], float))
+            row = {
+                "marker": str(col),
+                "contrast": f"{grp} vs {ref}",
+                "left_group": str(grp),
+                "right_group": str(ref),
+                "n_left": int(len(ggrp)),
+                "n_right": int(len(gref)),
+                "test": (marker_test if tok is not None and marker_test else "N/A"),
+                "test_partner": None,
+                "statistic": float("nan"),
+                "p": float("nan"),
+                "p_partner": float("nan"),
+                "q": float("nan"),
+                "reject_fdr": False,
+                "effect_metric": None,
+                "effect_value": float("nan"),
+                "effect_ci_low": float("nan"),
+                "effect_ci_high": float("nan"),
+                "significant": np.nan,
+                "concordant": np.nan,
+                "alpha": float(alpha),
+            }
+            if tok is None or marker_test is None:
+                rows.append(row)          # sparse / dropped -> neutral NaN row
+                continue
+            p = float(pair_p.get(tok, float("nan")))
+            row["p"] = p
+            row["statistic"] = float(pair_stat.get(tok, float("nan")))
+            eff = _gc_effect(ggrp, gref, parametric=parametric,
+                             ci=(effect_ci and parametric), n_resamples=n_resamples)
+            if parametric:
+                row["effect_metric"] = "hedges_g"
+                row["effect_value"] = eff["hedges_g"]
+                row["effect_ci_low"] = eff["ci_low"]
+                row["effect_ci_high"] = eff["ci_high"]
+            else:
+                row["effect_metric"] = "rank_biserial"
+                row["effect_value"] = eff["rank_biserial"]
+                # rank-biserial has no effect_ci support -> CI stays NaN.
+            if run_both:
+                pp, partner_name = _ovw_partner_p(
+                    ggrp, gref, parametric_primary=parametric)
+                row["test_partner"] = partner_name
+                row["p_partner"] = pp
+                if np.isfinite(p) and np.isfinite(pp):
+                    row["concordant"] = bool((p < alpha) == (pp < alpha))
+            rows.append(row)
+
+    df = pd.DataFrame(rows, columns=_OVW_AUDIT_COLUMNS)
+    if df.empty:
+        return df
+
+    if screen:
+        from PyFLASH.stats_extra import apply_fdr
+
+        keys = [f"{m}||{c}" for m, c in zip(df["marker"], df["contrast"])]
+        pvals = {k: float(v) for k, v in zip(keys, df["p"])}
+        fams = {k: str(c) for k, c in zip(keys, df["contrast"])}
+        fdr = apply_fdr(pvals, families=fams, alpha=float(alpha))
+        qmap = dict(zip(fdr["label"], fdr["p_adjusted"]))
+        df["q"] = [qmap.get(k, float("nan")) for k in keys]
+        qnum = pd.to_numeric(df["q"], errors="coerce")
+        df["reject_fdr"] = (qnum < float(alpha)).where(qnum.notna(), other=False)
+
+    gate_col = "q" if str(gate).strip().lower() == "fdr" else "p"
+    gv = pd.to_numeric(df[gate_col], errors="coerce")
+    # Keep the significance verdict NaN (neutral) wherever the gated value is
+    # missing — a sparse / degenerate contrast must never read as "not significant".
+    df["significant"] = (gv < float(alpha)).where(gv.notna(), other=np.nan)
+    return df
+
+
 @montage_pipeline(title="Data Overview Pipeline")
 def data_overview(
     experiment,
@@ -3343,6 +3581,12 @@ def data_overview(
     include_covariation=True,
     include_condition_distributions=True,
     include_effect_sizes=True,
+    include_significance_audit=False,
+    audit_comparisons=None,
+    audit_control=None,
+    screen=False,
+    gate="p",
+    run_both=True,
     outlier_methods=("rout",),
     iqr_k=1.5,
     mad_threshold=3.5,
@@ -3375,6 +3619,11 @@ def data_overview(
     write_manifest=True,
     verbose=True,
     montage=True,
+    conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    dataframe_kwargs=None,
     _run_dirs=None,
     _tag_specificity=False,
     _slug_specificity=None,
@@ -3449,17 +3698,50 @@ def data_overview(
     (``effect_control="WT"`` -> ``"WT | Male"`` controls ``"KO | Male"`` and
     ``"WT | Female"`` controls ``"KO | Female"``); anything else raises ``ValueError``.
 
+    ``include_significance_audit`` (default off) adds the inferential sibling of the
+    effect-size section: per marker the shared engine
+    (:func:`PyFLASH.stats.multipleComparisons`) auto-selects the test (Student's/
+    Welch t or Mann-Whitney for 2 groups; One-Way ANOVA or Kruskal-Wallis for 3+),
+    and a tidy ``significance_audit`` frame records the selected test, its p, the
+    matched effect size (Hedges g / rank-biserial) + CI, the partner family's p and
+    a ``concordant`` flag (does the verdict survive swapping the distributional
+    assumption?). The audit tests the same group axis as the effect sizes (N =
+    animal). ``audit_control`` / ``audit_comparisons`` pick the contrasts
+    (control-vs-each or all-pairs, as for :func:`group_comparison`). ``screen`` /
+    ``gate`` mirror :func:`group_comparison`: different markers are not a family, so
+    a per-contrast FDR ``q`` across markers is added only under ``screen=True``, and
+    ``gate='fdr'`` (flag significance on ``q``) requires ``screen=True``.
+
     Run management (``run_label`` / ``if_exists`` / ``save`` / ``write_manifest``)
     and the return shape (a manifest dict with the section DataFrames attached)
     mirror the other pipelines. Outputs land in
     ``Python Figures/Data Overview Pipeline/<run>/``.
     """
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     if is_specificity_queue(specificity):
         kwargs = dict(locals())
         kwargs.pop("experiment")
         return _pipeline_specificity_queue(
             data_overview, experiment, specificity, kwargs, "data_overview",
             append_index=_ovw_append_runs_index)
+
+    # Significance-audit multiplicity guard (mirrors group_comparison): different
+    # markers are not a family by default, so a cross-marker q is only computed
+    # under an explicit screen. p is always reported; every q has a p counterpart.
+    gate = str(gate).strip().lower()
+    if gate not in ("p", "fdr"):
+        raise ValueError(f"gate must be 'p' or 'fdr'; got {gate!r}.")
+    if gate == "fdr" and not screen:
+        raise ValueError(
+            "gate='fdr' requires screen=True (no cross-marker q is computed "
+            "otherwise — different markers are not a family by default).")
 
     _roi_base = _resolve_roi_bases(roi, experiment)[0]
     scope_df = _filtered_summary_for_specificity(
@@ -3497,6 +3779,7 @@ def data_overview(
         ("covariation", include_covariation),
         ("condition_distributions", include_condition_distributions),
         ("effect_sizes", include_effect_sizes),
+        ("significance_audit", include_significance_audit),
     ) if on]
 
     label = run_label or _ovw_slug(
@@ -3530,6 +3813,12 @@ def data_overview(
             "variability_stat": str(variability_stat),
             "effect_control": effect_control,
             "max_plot_items": max_plot_items,
+            # Significance-audit knobs: distinct audit settings -> distinct folders.
+            "include_significance_audit": bool(include_significance_audit),
+            "audit_screen": bool(screen),
+            "audit_gate": str(gate),
+            "audit_run_both": bool(run_both),
+            "audit_control": audit_control,
             # Grouping-changing knobs: distinct splits land in distinct folders.
             "split_by": (split_by if isinstance(split_by, str)
                          else (list(split_by) if split_by is not None else None)),
@@ -3623,6 +3912,15 @@ def data_overview(
             num_df, numeric_cols, distribution_groups,
             effect_control=effect_control, min_n=min_n)
 
+    # Inferential sibling of the effect-size section: shares its group axis
+    # (distribution_groups) so the descriptive g and the tested p line up.
+    significance_audit = pd.DataFrame()
+    if include_significance_audit and numeric_cols:
+        significance_audit = _ovw_significance_audit(
+            experiment, scope_df, num_df, numeric_cols, distribution_groups,
+            comparisons=audit_comparisons, control=audit_control, alpha=alpha,
+            screen=screen, gate=gate, min_n=min_n, run_both=run_both)
+
     # ── write tables + figures ──────────────────────────────────────────────
     if save:
         _corr_makedirs(data_dir)
@@ -3672,6 +3970,12 @@ def data_overview(
             _corr_to_csv(
                 effect_sizes,
                 os.path.join(data_dir, f"effect_sizes{spec_tag}.csv"),
+                index=False,
+            )
+        if include_significance_audit and not significance_audit.empty:
+            _corr_to_csv(
+                significance_audit,
+                os.path.join(data_dir, f"significance_audit{spec_tag}.csv"),
                 index=False,
             )
 
@@ -3838,6 +4142,13 @@ def data_overview(
     n_outlier_animals = int(len(outlier_animals)) if outlier_animals is not None else 0
     n_covarying_pairs = int(len(covarying)) if covarying is not None else 0
     n_effect_sizes = int(len(effect_sizes)) if effect_sizes is not None else 0
+    if significance_audit is not None and not significance_audit.empty:
+        _audit_p = pd.to_numeric(significance_audit["p"], errors="coerce")
+        n_audit_tests = int(_audit_p.notna().sum())
+        n_audit_significant = int((significance_audit["significant"] == True).sum())  # noqa: E712
+    else:
+        n_audit_tests = 0
+        n_audit_significant = 0
 
     manifest = {
         "run_label": resolved_label,
@@ -3875,6 +4186,11 @@ def data_overview(
         "n_condition_distribution_rows": int(len(condition_distributions)),
         "n_effect_sizes": n_effect_sizes,
         "effect_control": resolved_effect_control,
+        "include_significance_audit": bool(include_significance_audit),
+        "audit_screen": bool(screen),
+        "audit_gate": gate,
+        "n_audit_tests": n_audit_tests,
+        "n_audit_significant": n_audit_significant,
         "alpha": float(alpha),
         "plots": {
             "group_counts": bool(plot_group_counts),
@@ -3923,6 +4239,7 @@ def data_overview(
     result["condition_fingerprint"] = condition_fingerprint
     result["condition_variability"] = condition_variability
     result["effect_sizes"] = effect_sizes
+    result["significance_audit"] = significance_audit
     return result
 
 
@@ -4276,6 +4593,11 @@ def group_comparison(
     save=True,
     write_manifest=True,
     montage=True,
+    conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    dataframe_kwargs=None,
     _run_dirs=None,
     _tag_specificity=False,
     _slug_specificity=None,
@@ -4334,6 +4656,14 @@ def group_comparison(
       brackets; the results table, volcano, forest and stats matrix are
       authoritative for the selected ``comparisons``/``control`` contrasts.
     """
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     if is_specificity_queue(specificity):
         kwargs = dict(locals())
         kwargs.pop("experiment")
@@ -5488,11 +5818,24 @@ def linear_model(
     write_manifest=True,
     montage=True,
     verbose=True,
+    conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    dataframe_kwargs=None,
     _run_dirs=None,
     _tag_specificity=False,
     _slug_specificity=None,
 ):
     """Adjusted linear-model pipeline with coefficient and adjusted-mean plots."""
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     if is_specificity_queue(specificity):
         kwargs = dict(locals())
         kwargs.pop("experiment")
