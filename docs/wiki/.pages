@@ -1,0 +1,19 @@
+nav:
+  - Home: README.md
+  - Getting Started: getting-started
+  - API Reference: api-reference.md
+  - Object Model: object-model.md
+  - Object Types: object-types
+  - Data Structures: data-structures
+  - Parameters: parameters
+  - Plot Types: plot-types
+  - Functions: functions
+  - Statistics: statistics
+  - Outputs: outputs
+  - Workflows: workflows
+  - Gallery: gallery
+  - Concepts: concepts
+  - Troubleshooting: troubleshooting
+  - Glossary: glossary
+  - Developer: developer
+  - ...

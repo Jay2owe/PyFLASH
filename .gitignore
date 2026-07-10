@@ -47,6 +47,18 @@ docs/pyflash-ui/
 .runtime/
 scripts/
 docs/
+!docs/
+docs/*
+!docs/wiki/
+!docs/wiki/**
+# docs-site build inputs live directly under docs/ and must be tracked
+!docs/requirements.txt
+# ...but never commit compiled Python cruft inside the wiki examples
+docs/wiki/**/__pycache__/
+docs/wiki/**/*.pyc
 
 # transient debug traces
 tmp_*.txt
+
+# MkDocs build output (docs site is built by Read the Docs / CI, not committed)
+/site/

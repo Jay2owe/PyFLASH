@@ -57,6 +57,7 @@ pyflash-ui = "PyFLASH.ui:main"
 
 [project.urls]
 Homepage = "https://github.com/Jay2owe/PyFLASH"
+Documentation = "https://pyflash-analysis.readthedocs.io/"
 Repository = "https://github.com/Jay2owe/PyFLASH"
 Issues = "https://github.com/Jay2owe/PyFLASH/issues"
 

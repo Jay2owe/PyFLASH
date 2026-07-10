@@ -1,0 +1,4 @@
+# Documentation site build dependencies (MkDocs + Material theme).
+# Used by Read the Docs (.readthedocs.yaml) and for local `mkdocs serve`.
+mkdocs-material>=9.5
+mkdocs-awesome-pages-plugin>=2.9
