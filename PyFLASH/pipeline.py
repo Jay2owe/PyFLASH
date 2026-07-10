@@ -4788,16 +4788,8 @@ def data_overview(
             min_n=min_n, thresholds=scorecard_thresholds)
         scorecard_narrative = _ovw_narrative(
             scorecard, group_counts, covarying, _n_animals)
-        try:
-            from PyFLASH import report as _report
-            _report.emit({
-                "headline": "Dataset health",
-                "kind": "dataset_health",
-                "grades": dict(zip(scorecard["axis"], scorecard["grade"])),
-                "narrative": scorecard_narrative,
-            })
-        except Exception:
-            pass
+        # The dataset_health record is emitted below, AFTER the Stage-08 readiness
+        # clause is appended, so the emitted narrative matches the returned one.
 
     # Power / MDE + analysis-readiness: what the design cannot detect (per-marker
     # minimum detectable effect from the actual Ns) and what each marker needs
@@ -4831,6 +4823,20 @@ def data_overview(
                     "headline": "Marker readiness", "kind": "marker_readiness",
                     "verdicts": {str(k): int(v) for k, v in
                                  marker_readiness["verdict"].value_counts().items()}})
+        except Exception:
+            pass
+
+    # Emit dataset_health now the narrative is final (it may carry the readiness
+    # clause) so the describe record equals result["dataset_health_narrative"].
+    if include_scorecard and not scorecard.empty:
+        try:
+            from PyFLASH import report as _report
+            _report.emit({
+                "headline": "Dataset health",
+                "kind": "dataset_health",
+                "grades": dict(zip(scorecard["axis"], scorecard["grade"])),
+                "narrative": scorecard_narrative,
+            })
         except Exception:
             pass
 
