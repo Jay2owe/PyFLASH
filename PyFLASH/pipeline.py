@@ -1,6 +1,7 @@
 """Composable high-level PyFLASH analysis pipelines."""
 
 import os
+from collections.abc import Mapping
 from types import SimpleNamespace
 
 import numpy as np
@@ -75,6 +76,7 @@ from PyFLASH.plotting import (
 from PyFLASH.utils import (
     build_pipeline_suffix,
     build_specificity_alias,
+    flatten_specificity_values,
     filter_df_by_specificity,
     is_excluded_mask,
     is_specificity_queue,
@@ -155,12 +157,23 @@ def _pipeline_specificity_queue(func, experiment, specificity, kwargs, pipeline_
     def _len_or_none(value):
         return len(value) if isinstance(value, (list, tuple)) else None
 
+    def _serialise_spec(spec):
+        if isinstance(spec, dict):
+            return {
+                str(key): flatten_specificity_values(
+                    list(value) if isinstance(value, (list, tuple, set)) else [value]
+                )
+                for key, value in spec.items()
+            }
+        return list(spec) if spec is not None else None
+
     child_results = []
     conditions = []
     shared = None  # (fig_dir, data_dir, run_label) resolved by the first condition
     for spec in specs:
         child_kwargs = dict(kwargs)
         child_kwargs["specificity"] = spec
+        child_kwargs["filter_by"] = None
         # The shared folder is auto-named (run_label=None) from the *first* child's
         # slug; feed it the whole queue so two queues that share a first condition
         # but differ later still resolve to distinct folders.
@@ -182,7 +195,7 @@ def _pipeline_specificity_queue(func, experiment, specificity, kwargs, pipeline_
         if shared is None and rd:
             shared = (rd.get("fig_dir"), rd.get("data_dir"), rd.get("run_label"))
         cond = {
-            "specificity": list(spec) if spec is not None else None,
+            "specificity": _serialise_spec(spec),
             "spec_tag": build_specificity_alias(spec, aliases),
             "run_label": rd.get("run_label"),
             "n_rows": rd.get("n_rows"),
@@ -238,7 +251,7 @@ def _pipeline_specificity_queue(func, experiment, specificity, kwargs, pipeline_
         "run_label": resolved_label,
         "fig_dir": fig_dir,
         "data_dir": data_dir,
-        "specificity": [list(s) if s is not None else None for s in specs],
+        "specificity": [_serialise_spec(s) for s in specs],
         "conditions": conditions,
         "n_conditions": len(specs),
         "reused": False,
@@ -842,6 +855,20 @@ def _corr_queue_specificity_scope(specificity):
     specs = list(iter_specificities(specificity))
     if not specs:
         return None
+    if isinstance(specs[0], Mapping):
+        if any(not isinstance(spec, Mapping) or len(spec) != 1 for spec in specs):
+            return None
+        items = [next(iter(spec.items())) for spec in specs]
+        key = items[0][0]
+        if any(str(item_key) != str(key) for item_key, _ in items):
+            return None
+        values = []
+        for _, value in items:
+            if isinstance(value, (list, tuple, set, pd.Index, np.ndarray, pd.Series)):
+                values.extend(list(value))
+            else:
+                values.append(value)
+        return (key, values) if values else None
     key = specs[0][0]
     values = []
     for spec in specs:
@@ -3556,7 +3583,14 @@ def _ovw_significance_audit(experiment, scope_df, num_df, numeric_cols, groups, 
     labels = [str(g[0]) for g in groups]
     if len(labels) < 2 or not numeric_cols:
         return pd.DataFrame(columns=_OVW_AUDIT_COLUMNS)
-    control_label = _gc_resolve_control(labels, control)
+    try:
+        control_label = _gc_resolve_control(labels, control)
+    except ValueError:
+        # A composite/split label set (e.g. "WT | M") or a label set missing the
+        # named control: fall back to the default reference rather than raising
+        # into the run. (The transition builder skips strata missing the control
+        # up front, so this only bites the flat crossed-split audit.)
+        control_label = None
     pairs = _gc_resolve_comparisons(comparisons, labels, control_label)
     if not pairs:
         return pd.DataFrame(columns=_OVW_AUDIT_COLUMNS)
@@ -3808,6 +3842,12 @@ def _ovw_audit_axis_transitions(experiment, scope_df, num_df, numeric_cols,
                    for (lab, gidx, spec) in cond_groups]
             grp = [g for g in grp if len(g[1]) > 0]
             if len(grp) < 2:
+                continue
+            # Skip an incomplete stratum missing the requested control so its
+            # per-stratum contrasts stay aligned with the baseline (else the missing
+            # control would silently re-reference and misclassify a cell as "lost").
+            if control is not None and str(control).strip().casefold() not in {
+                    str(g[0]).strip().casefold() for g in grp}:
                 continue
             a_lvl = _audit(grp)
             if a_lvl is not None and not a_lvl.empty:
@@ -4133,9 +4173,14 @@ def _ovw_mde_two_sample(n1, n2, alpha=0.05, power=0.8):
         return float("nan")
     try:
         from statsmodels.stats.power import TTestIndPower
-        return float(TTestIndPower().solve_power(
+        d = float(TTestIndPower().solve_power(
             effect_size=None, nobs1=n1, alpha=float(alpha), power=float(power),
             ratio=n2 / n1))
+        # solve_power returns Cohen's d; apply the Hedges small-sample correction so
+        # the floor is on the same g scale as the audit's reported effect sizes.
+        dof = n1 + n2 - 2
+        j = 1.0 - 3.0 / (4.0 * dof - 1.0) if dof > 0 else 1.0
+        return d * j
     except Exception:
         return float("nan")
 

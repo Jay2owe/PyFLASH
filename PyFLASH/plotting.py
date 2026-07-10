@@ -8,7 +8,7 @@ One-liners compose: run() + setup + action + teardown.
 
 Usage:
     # One-liner
-    plot_mean_bars(batch1, filtered_cols, specificity=('Time', 'WeekEight'))
+    plot_mean_bars(batch1, data_cols=['Marker_Mean'], filter_by={'Time': 'WeekEight'})
 
     # Or use the action directly in a custom pipeline
     from PyFLASH.plotting import bar_chart_action
@@ -37,6 +37,7 @@ from PyFLASH.config import Config, apply_matplotlib_fast_path
 apply_matplotlib_fast_path()  # apply path-simplify rcParams + ioff() once, lazily
 from PyFLASH.dataframe import coerce_dataframe_input
 from PyFLASH.aliases import (
+    normalize_filter_by,
     prefer_alias,
     resolve_data_column_aliases,
     resolve_split_filter_aliases,
@@ -16688,19 +16689,29 @@ def _corr_pipeline_append_runs_index(experiment, manifest):
 def plot_matrix_differences(
     experiment,
     filtered_columns=None,
+    data_cols=None,
     against_columns=None,
+    against_data_cols=None,
     by="conditions",
     factor=None,
     comparisons=None,
     specificity=None,
+    split_by=None,
+    filter_by=None,
     roi=None,
     save=True,
     column_strings=None,
     regex_string=None,
     exclude="",
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
     against_column_strings=None,
     against_regex_string=None,
     against_exclude="",
+    against_data_col_contains=None,
+    against_data_col_regex=None,
+    against_data_col_exclude=None,
     correlation="pearsonr",
     alpha=0.05,
     min_n=3,
@@ -16714,6 +16725,15 @@ def plot_matrix_differences(
     plot_gate_matrix=True,
     tick_label_size=20,
     run_label=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
+    dataframe_kwargs=None,
 ):
     """Compare correlation matrices between conditions/factor groups.
 
@@ -16725,6 +16745,48 @@ def plot_matrix_differences(
     heatmaps too. Spearman/Kendall difference matrices are descriptive unless a
     future test backend is added.
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    against_columns, against_column_strings, against_regex_string, against_exclude = (
+        resolve_data_column_aliases(
+            filtered_columns=against_columns,
+            column_strings=against_column_strings,
+            regex_string=against_regex_string,
+            exclude=against_exclude,
+            data_cols=against_data_cols,
+            data_col_contains=against_data_col_contains,
+            data_col_regex=against_data_col_regex,
+            data_col_exclude=against_data_col_exclude,
+        )
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="conditions",
+    )
+    experiment = coerce_dataframe_input(
+        experiment,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     methods = [_normalize_correlation_method(t)
                for t in ([correlation] if isinstance(correlation, str) else list(correlation))]
     if not methods:
@@ -19625,12 +19687,17 @@ def plot_power_curve(batch=None, *, effect_sizes=(0.2, 0.5, 0.8), n_range=(2, 30
     return (fig, data) if return_data else fig
 
 
-def plot_marker_pca(batch, columns=None, column_strings=None, regex_string=None,
-                    exclude='', hue_column="Condition", specificity=None,
+def plot_marker_pca(batch, columns=None, data_cols=None, column_strings=None,
+                    regex_string=None, exclude='', data_col_contains=None,
+                    data_col_regex=None, data_col_exclude=None,
+                    hue_column="Condition", specificity=None, filter_by=None,
                     standardize=True, n_components=2, annotate_loadings=True,
                     max_loadings=12, palette=None, title=None,
                     save=False, save_path=None, save_name=None, dpi=600,
-                    return_data=False):
+                    return_data=False, condition_col="Condition",
+                    factor_cols=None, animal_col="AnimalName",
+                    group_list=None, groups=None, group_col=None,
+                    group_cols=None, subject_col=None, dataframe_kwargs=None):
     """PCA biplot of animal-level marker profiles, coloured by ``hue_column``.
 
     Builds the feature matrix from ``batch.summary`` (one row per animal),
@@ -19641,6 +19708,34 @@ def plot_marker_pca(batch, columns=None, column_strings=None, regex_string=None,
     """
     from sklearn.decomposition import PCA
 
+    columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
+    batch = coerce_dataframe_input(
+        batch,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     summary = getattr(batch, "summary", None)
     if not isinstance(summary, pd.DataFrame) or summary.empty:
         raise ValueError("batch.summary must be a non-empty DataFrame.")
@@ -19712,10 +19807,13 @@ def plot_marker_pca(batch, columns=None, column_strings=None, regex_string=None,
 
 
 def plot_timecourse(batch, column, time_col="Time", group_col="Genotype",
-                    model="auto", specificity=None, time_map=None,
-                    animal_col="AnimalName", palette=None, show_points=True,
-                    title=None, save=False, save_path=None, save_name=None,
-                    dpi=600, return_data=False):
+                    model="auto", specificity=None, filter_by=None,
+                    time_map=None, animal_col="AnimalName", subject_col=None,
+                    palette=None, show_points=True, title=None, save=False,
+                    save_path=None, save_name=None, dpi=600,
+                    return_data=False, condition_col="Condition",
+                    factor_cols=None, group_list=None, groups=None,
+                    group_cols=None, dataframe_kwargs=None):
     """Fit and plot a growth curve per group across an ordered time factor.
 
     Fits :func:`PyFLASH.stats_extra.fit_growth_curve` to the animal-level points
@@ -19726,6 +19824,24 @@ def plot_timecourse(batch, column, time_col="Time", group_col="Genotype",
     """
     from PyFLASH.stats_extra import _resolve_numeric_time, fit_growth_curve
 
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
+    batch = coerce_dataframe_input(
+        batch,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     summary = getattr(batch, "summary", None)
     if not isinstance(summary, pd.DataFrame) or summary.empty:
         raise ValueError("batch.summary must be a non-empty DataFrame.")
@@ -20266,10 +20382,14 @@ def _ovw_audit_status_frame(df, *, alpha=0.05, value_col="p",
         code = r["_code"]
         status[i, j] = int(code) if np.isfinite(code) else STATUS_NS
         if bool(r["_sig"]) and np.isfinite(r["_p"]):
-            annot[i][j] = "✱"  # ✱
+            annot[i][j] = "✱"  # ✱ p < alpha
         elif show_borderline and np.isfinite(r["_p"]) and \
                 float(alpha) <= float(r["_p"]) < 2.0 * float(alpha):
             annot[i][j] = _fmt_borderline_p(r["_p"])
+        elif not np.isfinite(r["_p"]):
+            # Not tested (sparse group below min_n): mark it so a grey cell is not
+            # read as a tested "not significant" verdict.
+            annot[i][j] = "·"
 
     test_tags, concord = [], []
     for m in markers:
@@ -20289,11 +20409,15 @@ def _ovw_audit_status_frame(df, *, alpha=0.05, value_col="p",
     fdr = []
     if "q" in d.columns and pd.to_numeric(d["q"], errors="coerce").notna().any():
         q = pd.to_numeric(d["q"], errors="coerce")
+        # Count raw-p passes from the actual raw p column, not value_col (which is q
+        # when gate='fdr'), so the "raw -> q" sidebar counts are honest either way.
+        raw_p = pd.to_numeric(d["p"], errors="coerce") if "p" in d.columns else d["_p"]
         for c in contrasts:
             sub = d[d["contrast"] == c]
+            rsub = raw_p[sub.index]
             qsub = q[sub.index]
-            n = int(sub["_p"].notna().sum())
-            raw_pass = int((sub["_p"] < float(alpha)).sum())
+            n = int(rsub.notna().sum())
+            raw_pass = int((rsub < float(alpha)).sum())
             q_pass = int((qsub < float(alpha)).sum())
             fdr.append((c, raw_pass, q_pass, n))
 
@@ -21059,10 +21183,11 @@ def _cosinor_axes(ax, df, value, time_col, group_col, period, period_free,
 
 
 def plot_cosinor(experiment, column, time_col="Time", group_col=None, period=24.0,
-                 period_free=False, specificity=None, time_map=None, palette=None,
-                 show_points=True, night_shade="auto", title=None, save=True,
-                 save_path=None, save_name=None, subfolder=None, montage=False,
-                 dpi=600, return_data=False):
+                 period_free=False, specificity=None, filter_by=None,
+                 time_map=None, palette=None, show_points=True,
+                 night_shade="auto", title=None, save=True, save_path=None,
+                 save_name=None, subfolder=None, montage=False, dpi=600,
+                 return_data=False):
     """Cosinor rhythm plot: per-timepoint mean ± SEM with a fitted cosine per group.
 
     Period-generic: ``period=24`` for a daily rhythm, ``12`` for a circannual
@@ -21072,6 +21197,12 @@ def plot_cosinor(experiment, column, time_col="Time", group_col=None, period=24.
     F-test). ``night_shade='auto'`` shades ZT12–24 for a 24 h period.
     Returns the figure (or ``(fig, {group: fit})`` when ``return_data=True``).
     """
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
     if is_specificity_queue(specificity):
         return {spec: plot_cosinor(
             experiment, column, time_col=time_col, group_col=group_col, period=period,
@@ -21184,7 +21315,7 @@ def _acrophase_clock_axes(ax, df, phase_col, group_col, period, radius_col, pale
 
 def plot_acrophase_clock(experiment, phase_col="Acrophase (h)", group_col=None,
                          period=24.0, radius_col=None, group_order=None,
-                         specificity=None, palette=None,
+                         specificity=None, filter_by=None, palette=None,
                          title=None, save=True, save_path=None, save_name=None,
                          subfolder=None, montage=False, dpi=600, return_data=False):
     """Circular clock plot of per-subject peak phase, grouped and tested.
@@ -21199,6 +21330,12 @@ def plot_acrophase_clock(experiment, phase_col="Acrophase (h)", group_col=None,
     the colour/legend order. Reads a subject-level frame (``experiment.summary`` or
     a DataFrame). Returns the figure (or ``(fig, stats)`` when ``return_data=True``).
     """
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
     if is_specificity_queue(specificity):
         return {spec: plot_acrophase_clock(
             experiment, phase_col=phase_col, group_col=group_col, period=period,
