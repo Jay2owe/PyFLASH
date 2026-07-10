@@ -1,6 +1,11 @@
 # PyFLASH
 
+[![Documentation Status](https://readthedocs.org/projects/pyflash/badge/?version=latest)](https://pyflash.readthedocs.io/en/latest/)
+[![PyPI](https://img.shields.io/pypi/v/PyFLASH-analysis)](https://pypi.org/project/PyFLASH-analysis/)
+
 A Python package for processing and analyzing immunofluorescence (IF) confocal microscopy data exported from the FLASH ImageJ Plugin.
+
+📖 **[Documentation](https://pyflash.readthedocs.io/)**
 
 ## What it does
 
@@ -65,6 +70,26 @@ plot_matrices(batch, cols)
 # Export
 batch.export_all_excel()
 save_state(batch, "my_batch.pkl")
+```
+
+## Plot styling
+
+Use `rc_params()` for Matplotlib-level style such as fonts, tick widths, spines,
+and editable SVG text. Use the PyFLASH style layer for shared PyFLASH plot
+semantics such as condition hatch cycles, scatter marker defaults, matrix
+colormaps, and overview status colours:
+
+```python
+from PyFLASH import set_pyflash_style, pyflash_style_context
+
+set_pyflash_style(
+    bar_point_fill="group",
+    bar_point_edge="none",
+    scatter_3d_edge="group",
+)
+
+with pyflash_style_context(matrix_cmap="viridis"):
+    plot_matrices(batch, cols)
 ```
 
 ### Crossed (factorial) designs

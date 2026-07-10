@@ -1,6 +1,6 @@
 site_name: PyFLASH
 site_description: Processing and analysis of immunofluorescence confocal microscopy data exported from FLASH/ImageJ workflows.
-site_url: https://pyflash-analysis.readthedocs.io/
+site_url: https://pyflash.readthedocs.io/
 site_author: Brancaccio Lab
 
 repo_url: https://github.com/Jay2owe/PyFLASH
