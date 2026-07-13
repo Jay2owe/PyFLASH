@@ -201,6 +201,6 @@ if st.button("Save selections", type="primary"):
     st.success("Saved to the current project (persists across pages).")
 
 st.caption(
-    "Selections are held in this session's project. Conditions are defined on "
+    "Selections are held in this session's project. Groups are defined on "
     "the next page; the batch is built on the Batch page."
 )

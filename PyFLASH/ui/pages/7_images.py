@@ -3,7 +3,7 @@
 Reads the ``Batch``/``Experiment`` placed in ``st.session_state["batch"]`` by
 the Project or Process page. Three sections:
 
-* **Browse** — ``plot_images`` grid filtered by markers / animal / ROI, with
+* **Browse** — ``plot_images`` grid filtered by markers / subject / ROI, with
   tile and fast-loading options. Saved to ``batch.fig_path`` and embedded via
   the Stage 07 figure helper.
 * **Representative panels** — ``plot_representative_images`` for the chosen
@@ -165,7 +165,7 @@ with tab_browse:
     st.subheader("Browse image grid")
     st.caption(
         "Render a grid of imported images (`plot_images`), optionally filtered "
-        "by marker, animal and ROI."
+        "by marker, subject and ROI."
     )
 
     br_markers = _csv_list(st.text_input(
@@ -174,8 +174,8 @@ with tab_browse:
         help="Exact marker names to include, e.g. 'DAPI, mCherry'.",
     ))
     col_a, col_r = st.columns(2)
-    br_animal = col_a.text_input(
-        "Animal filter (substring)", value="", key="img_browse_animal",
+    br_subject = col_a.text_input(
+        "Subject filter (substring)", value="", key="img_browse_subject",
     ).strip() or None
     br_roi = col_r.text_input(
         "ROI filter (substring)", value="", key="img_browse_roi",
@@ -214,7 +214,7 @@ with tab_browse:
 
     if st.button("Render grid", type="primary", key="img_browse_run"):
         kw = {
-            "animal_filter": br_animal,
+            "subject_filter": br_subject,
             "roi_filter": br_roi,
             "tile_size": float(br_tile),
             "fast_loading": bool(br_fast),
@@ -284,8 +284,8 @@ with tab_rep:
         key="img_rep_markers",
         help="Exact marker names whose representative panels to render.",
     ))
-    rep_animal = st.text_input(
-        "Animal filter (substring)", value="", key="img_rep_animal",
+    rep_subject = st.text_input(
+        "Subject filter (substring)", value="", key="img_rep_subject",
     ).strip() or None
     col_rf, col_rp = st.columns(2)
     rep_fast = col_rf.toggle(
@@ -306,7 +306,7 @@ with tab_rep:
                 "selections in the notebook first; they will carry over here."
             )
         else:
-            kw = {"animal_filter": rep_animal, "fast_loading": bool(rep_fast)}
+            kw = {"subject_filter": rep_subject, "fast_loading": bool(rep_fast)}
             if rep_preview:
                 kw["preview_max_dim"] = int(rep_preview)
             _run_and_embed(
@@ -359,12 +359,13 @@ with tab_loc:
                  "Required.",
         ))
         col_sep, col_join = st.columns(2)
-        loc_separate = col_sep.selectbox(
-            "Separate by", ["conditions", "animals"], index=0,
+        loc_group_options = {"Groups": "groups", "Subjects": "subjects"}
+        loc_separate_label = col_sep.selectbox(
+            "Separate by", list(loc_group_options), index=0,
             key="img_loc_separate",
         )
-        loc_join = col_join.selectbox(
-            "Join by", ["animals", "conditions"], index=0,
+        loc_join_label = col_join.selectbox(
+            "Join by", ["Subjects", "Groups"], index=0,
             key="img_loc_join",
         )
         col_co, col_an = st.columns(2)
@@ -382,8 +383,8 @@ with tab_loc:
                 st.warning("Enter at least one object marker to plot.")
             else:
                 kw = {
-                    "separate_by": loc_separate,
-                    "join_by": loc_join,
+                    "separate_by": loc_group_options[loc_separate_label],
+                    "join_by": loc_group_options[loc_join_label],
                     "colocalise": bool(loc_coloc),
                     "annotate": bool(loc_annotate),
                 }

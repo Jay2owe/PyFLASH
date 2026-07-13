@@ -1,7 +1,7 @@
 """Process page — run ``create_batch`` and hold the resulting Batch in session.
 
 This is the heart of "create a new analysis without code": it takes the
-experiment folders (Experiments page) and conditions (Conditions page) held in
+experiment folders (Experiments page) and groups (Groups page) held in
 the session ``Project`` and runs :func:`PyFLASH.factory.create_batch` via
 ``services.run_create_batch``. PyFLASH's progress/log output is captured into a
 buffer (``services.capture_output``) and shown as a code block inside a
@@ -10,7 +10,7 @@ buffer (``services.capture_output``) and shown as a code block inside a
 
 On success the built ``Batch`` is stored in ``st.session_state["batch"]`` so the
 Summary / Export / Plot pages can reuse it without reloading, and the
-``_last_process_summary`` ("N experiments | M animals") line is surfaced. A
+``_last_process_summary`` ("N experiments | M subjects") line is surfaced. A
 cache hit (an existing ``<name>.pkl`` returned instantly with ``rerun=False``)
 is detected and labelled. Errors (e.g. ``ValueError: No experiment folders
 found``) are caught and shown as a clean message, not a stack trace.
@@ -51,7 +51,7 @@ def _is_cache_hit(log_text: str) -> bool:
 
 st.header("Process")
 st.caption(
-    "Build the batch from the experiment folders and conditions you set up on "
+    "Build the batch from the experiment folders and groups you set up on "
     "the previous pages. This runs create_batch and may take a while on a fresh "
     "dataset; a cached pickle (if any) is returned quickly."
 )
@@ -64,7 +64,7 @@ problems = []
 if not project.batch_path:
     problems.append("a batch root folder (Experiments page)")
 if not project.conditions:
-    problems.append("a conditions design (Conditions page)")
+    problems.append("a group design (Groups page)")
 
 if problems:
     st.warning(
@@ -78,7 +78,7 @@ if project.conditions:
     try:
         condition_list = services.build_conditions(project.conditions)
     except Exception as exc:  # builder ValueError incl. difflib suggestions
-        st.error(f"Could not build the conditions design: {exc}")
+        st.error(f"Could not build the group design: {exc}")
 
 # ── What will be built ──────────────────────────────────────────────────────
 
@@ -101,8 +101,8 @@ with col_b:
 if condition_list is not None:
     preview = services.preview_conditions(condition_list)
     names = [c["name"] for c in preview["conditions"]]
-    st.markdown(f"**Conditions:** {', '.join(names)}"
-                if names else "**Conditions:** (none)")
+    st.markdown(f"**Groups:** {', '.join(names)}"
+                if names else "**Groups:** (none)")
 
 # ── Run options ─────────────────────────────────────────────────────────────
 

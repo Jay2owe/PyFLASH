@@ -591,10 +591,10 @@ def _build_plot_kwargs(func, params: dict) -> dict:
 
     The three rules, in order:
 
-    * ``"columns"`` is remapped to ``"filtered_columns"`` when the function takes
-      ``filtered_columns`` (the notebook/spec name) but not ``columns``.
-    * ``"specificity"`` values are converted from JSON/YAML lists to the tuple /
-      list-of-tuples form the plot functions expect, via
+    * public aliases such as ``"columns"``, ``"data_cols"``, and ``"filter_by"``
+      are resolved with the same alias table used by spec files.
+    * resolved ``"filter_by"`` / ``"specificity"`` values are converted from
+      JSON/YAML lists to the tuple / list-of-tuples form the plot functions expect, via
       :func:`PyFLASH.spec._convert_specificity`.
     * any key not present in the function signature is dropped (unknown keys are
       silently ignored, matching ``run_spec``'s final ``{k: v ... if k in
@@ -612,19 +612,19 @@ def _build_plot_kwargs(func, params: dict) -> dict:
     dict
         Kwargs safe to splat into ``func(experiment, **kwargs)``.
     """
-    from PyFLASH.spec import _convert_specificity
+    from PyFLASH.spec import (
+        _normalize_spec_param_value,
+        _resolve_param_alias,
+        _set_resolved_kwarg,
+    )
 
     valid_params = set(inspect.signature(func).parameters)
     kwargs = {}
+    kwargs_sources = {}
     for key, value in params.items():
-        param_key = key
-        if (key == "columns"
-                and "columns" not in valid_params
-                and "filtered_columns" in valid_params):
-            param_key = "filtered_columns"
-        if key == "specificity":
-            value = _convert_specificity(value)
-        kwargs[param_key] = value
+        param_key = _resolve_param_alias(key, valid_params, value)
+        value = _normalize_spec_param_value(key, param_key, value)
+        _set_resolved_kwarg(kwargs, kwargs_sources, param_key, value, key)
     return {k: v for k, v in kwargs.items() if k in valid_params}
 
 

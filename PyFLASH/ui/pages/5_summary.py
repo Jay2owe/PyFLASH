@@ -30,7 +30,7 @@ display = col_display.toggle(
 with st.expander("Column filter (optional)"):
     st.caption(
         "Keep only columns containing any of these substrings (comma-separated). "
-        "AnimalName and Condition are always kept."
+        "Subject and group columns are always kept."
     )
     include_raw = st.text_input("Include columns containing", value="")
     exclude_raw = st.text_input("Exclude columns containing", value="")

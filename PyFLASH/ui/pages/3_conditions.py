@@ -1,4 +1,4 @@
-"""Conditions page — build a ConditionBuilder design in a grid, with preview.
+"""Groups page: build a ConditionBuilder design in a grid, with preview.
 
 Defines the experimental conditions for a batch without hand-writing
 ``ConditionBuilder(...).add(...).compare(...)`` chains. The user fills a grid of
@@ -146,7 +146,7 @@ def _comparison_picker(entries, modes, key_prefix):
         spec["pairs"] = [[a, b] for a, b in picked]
     elif mode == "vs_control":
         control = st.selectbox(
-            "Control condition", shorts or [""], key=f"{key_prefix}_control")
+            "Control group", shorts or [""], key=f"{key_prefix}_control")
         spec["control"] = control
     return spec
 
@@ -185,11 +185,11 @@ def _render_preview(spec):
         st.error(str(exc))
         return
     except Exception as exc:  # pragma: no cover - defensive UI guard
-        st.error(f"Could not build conditions: {exc}")
+        st.error(f"Could not build groups: {exc}")
         return
 
     if cl is None:
-        st.info("Add at least one condition to see a preview.")
+        st.info("Add at least one group to see a preview.")
         return
 
     preview = services.preview_conditions(cl)
@@ -226,10 +226,10 @@ def _render_preview(spec):
 
 # ── Page body ───────────────────────────────────────────────────────────────
 
-st.header("Conditions")
+st.header("Groups")
 st.caption(
-    "Define your experimental conditions in a grid and choose how to compare "
-    "them. The design is rebuilt and previewed live, then saved to the project."
+    "Define your experimental groups in a grid and choose how to compare them. "
+    "The design is rebuilt and previewed live, then saved to the project."
 )
 
 project = _project()
@@ -251,7 +251,7 @@ if design.startswith("Single"):
 else:
     st.caption(
         "Build two factors; they are crossed into a factorial design via "
-        "ConditionBuilder.cross. Comparisons use named conditions (and an "
+        "GroupBuilder.cross. Comparisons use named groups (and an "
         "optional 'within' factor) rather than raw indices."
     )
     factors_seed = existing.get("factors", [{}, {}]) if existing.get("crossed") \
@@ -290,9 +290,9 @@ else:
     order_options = ["(default)"] + [f1.get("factor", ""), f2.get("factor", "")]
     order_options = [o for o in order_options if o]
     order_by = st.selectbox(
-        "Order conditions by factor (order_by)",
+        "Order groups by factor (order_by)",
         order_options,
-        help="Regroup crossed conditions by this factor (default groups by "
+        help="Regroup crossed groups by this factor (default groups by "
              "the first factor).",
     )
 
@@ -331,16 +331,16 @@ else:
 
 # ── Persist the spec into the session project ───────────────────────────────
 
-if st.button("Save conditions", type="primary", disabled=bool(all_dupes)):
+if st.button("Save groups", type="primary", disabled=bool(all_dupes)):
     try:
         # Final validation: must build cleanly before we persist the spec.
         services.build_conditions(spec)
     except ValueError as exc:
         st.error(f"Not saved — {exc}")
     except Exception as exc:  # pragma: no cover - defensive UI guard
-        st.error(f"Not saved — could not build conditions: {exc}")
+        st.error(f"Not saved — could not build groups: {exc}")
     else:
         project.conditions = spec
         st.session_state["project"] = project
-        st.success("Conditions saved to the current project (persists across "
+        st.success("Groups saved to the current project (persists across "
                    "pages). The batch is built on the Batch page.")

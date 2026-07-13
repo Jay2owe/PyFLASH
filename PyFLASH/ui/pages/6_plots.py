@@ -102,12 +102,12 @@ def _csv_list(raw):
     return [s.strip() for s in (raw or "").split(",") if s.strip()] or None
 
 
-def _parse_specificity(raw):
-    """Parse a 'Key, Value[, Value...]' specificity field into a list (or None).
+def _parse_filter_by(raw):
+    """Parse a 'Key, Value[, Value...]' row-filter field into a list (or None).
 
     Returns the raw token list (e.g. ``["Time", "WeekEight"]``);
-    ``services.run_quick_plot`` converts it to the tuple form core expects via
-    ``_convert_specificity``. Multi-filter queues are out of scope for the form.
+    ``services.run_quick_plot`` converts it to the tuple form core expects.
+    Multi-filter queues are out of scope for the form.
     """
     return _csv_list(raw)
 
@@ -266,32 +266,32 @@ with tab_spec:
 
 # Form builders for the common plot types. Each returns a params dict keyed by
 # spec-style names; services._build_plot_kwargs maps/filters them to the real
-# signature (e.g. 'columns' -> 'filtered_columns', specificity list -> tuple).
+# signature (e.g. 'columns' -> 'filtered_columns', filter_by list -> tuple).
 
 FORM_TYPES = ("mean_bars", "matrices", "regressions", "volcano", "histograms")
 
 
-def _common_specificity_factor():
-    """Shared specificity + factor inputs used by several forms."""
-    spec_raw = st.text_input(
-        "Specificity (Key, Value)", value="",
+def _common_filter_factor():
+    """Shared row-filter + factor inputs used by several forms."""
+    filter_raw = st.text_input(
+        "Filter by (Key, Value)", value="",
         help="Optional row filter, e.g. 'Time, WeekEight'. Converted to a "
              "tuple before the plot is called.",
-        key="qp_specificity",
+        key="qp_filter_by",
     )
     factor = st.text_input(
         "Factor (grouping column)", value="",
-        help="Optional column to group by instead of Condition.",
+        help="Optional column to group by instead of the full group design.",
         key="qp_factor",
     ).strip() or None
-    return _parse_specificity(spec_raw), factor
+    return _parse_filter_by(filter_raw), factor
 
 
 def _form_columns_based(label):
-    """Form for the filtered-columns plots (mean_bars / volcano / matrices)."""
+    """Form for the data-column plots (mean_bars / volcano / matrices)."""
     columns = _csv_list(st.text_input(
         "Columns (exact names, comma-separated)", value="",
-        help="Leave blank to use column_strings / all numeric columns.",
+        help="Leave blank to use column-name contains filters or all numeric columns.",
         key=f"qp_{label}_columns",
     ))
     column_strings = _csv_list(st.text_input(
@@ -303,16 +303,16 @@ def _form_columns_based(label):
         "Exclude columns containing", value="",
         key=f"qp_{label}_exclude",
     ).strip()
-    specificity, factor = _common_specificity_factor()
+    filter_by, factor = _common_filter_factor()
     params = {}
     if columns:
-        params["columns"] = columns
+        params["data_cols"] = columns
     if column_strings:
-        params["column_strings"] = column_strings
+        params["data_col_contains"] = column_strings
     if exclude:
-        params["exclude"] = exclude
-    if specificity:
-        params["specificity"] = specificity
+        params["data_col_exclude"] = exclude
+    if filter_by:
+        params["filter_by"] = filter_by
     if factor:
         params["factor"] = factor
     return params
@@ -330,7 +330,7 @@ def _form_mean_bars():
 def _form_volcano():
     params = _form_columns_based("volcano")
     control = st.text_input(
-        "Control condition (optional)", value="", key="qp_volcano_control",
+        "Control group (optional)", value="", key="qp_volcano_control",
     ).strip()
     if control:
         params["control"] = control
@@ -358,14 +358,14 @@ def _form_regressions():
         "Test", ["pearsonr", "spearmanr", "kendalltau"],
         index=0, key="qp_reg_test",
     )
-    specificity, factor = _common_specificity_factor()
+    filter_by, factor = _common_filter_factor()
     params = {"test": test}
     if x:
         params["x"] = x
     if y:
         params["y"] = y
-    if specificity:
-        params["specificity"] = specificity
+    if filter_by:
+        params["filter_by"] = filter_by
     if factor:
         params["factor"] = factor
     return params
@@ -377,14 +377,14 @@ def _form_histograms():
     bins = st.number_input("Bins", min_value=1, max_value=1000, value=30,
                            step=1, key="qp_hist_bins")
     kde = st.toggle("KDE overlay", value=False, key="qp_hist_kde")
-    specificity, factor = _common_specificity_factor()
+    filter_by, factor = _common_filter_factor()
     params = {"bins": int(bins), "kde": kde}
     if marker:
         params["marker"] = marker
     if x_attr:
         params["x_attr"] = x_attr
-    if specificity:
-        params["specificity"] = specificity
+    if filter_by:
+        params["filter_by"] = filter_by
     if factor:
         params["factor"] = factor
     return params
