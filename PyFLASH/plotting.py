@@ -35,6 +35,15 @@ from matplotlib.ticker import LinearLocator
 from PyFLASH.iteration import Context, run
 from PyFLASH.config import Config, apply_matplotlib_fast_path
 apply_matplotlib_fast_path()  # apply path-simplify rcParams + ioff() once, lazily
+from PyFLASH.aesthetics import (
+    apply_pyflash_figure_geometry,
+    apply_pyflash_matplotlib_style,
+    pyflash_figure_size,
+    pyflash_point_size,
+    pyflash_savefig_kwargs,
+    pyflash_significance_annotation,
+    pyflash_style_value,
+)
 from PyFLASH.dataframe import coerce_dataframe_input
 from PyFLASH.aliases import (
     normalize_filter_by,
@@ -65,14 +74,13 @@ from PyFLASH.utils import (
     iter_specificities, filter_df_by_specificity,
     specificity_path_parts, resolve_column_key, raw_coloc_column_aliases,
     build_subfolder, resolve_roi_bases, is_excluded_mask,
-    rc_params as _rc_params,
 )
 
 # Apply the house aesthetic once on first plotting import so figures made
 # outside the notebook (pipelines, the runner, tests) share the same uniform
-# look the notebook sets. A later explicit rc_params(...) call still overrides.
+# look. A later explicit set_pyflash_style(...) call still overrides.
 if getattr(Config, "HOUSE_STYLE", True):
-    _rc_params()
+    apply_pyflash_matplotlib_style()
 
 
 # ── Optional Altair dependency for interactive HTML export ───────────
@@ -3526,12 +3534,12 @@ def _representative_stats_header_text(stats_columns=None) -> str:
     requests = _normalize_representative_stats_columns(stats_columns)
     labels = [get_display_name(col, minimal=True) for col in requests]
     if len(labels) == 0:
-        return "Representative metrics across conditions"
+        return "Representative metrics across groups"
     if len(labels) == 1:
-        return f"{labels[0]} across conditions"
+        return f"{labels[0]} across groups"
     if len(labels) == 2:
-        return f"{labels[0]} and {labels[1]} across conditions"
-    return f"{', '.join(labels[:-1])}, and {labels[-1]} across conditions"
+        return f"{labels[0]} and {labels[1]} across groups"
+    return f"{', '.join(labels[:-1])}, and {labels[-1]} across groups"
 
 
 def _resolve_representative_summary_specs(source, blocks, marker_order, stats_columns=None):
@@ -4013,11 +4021,11 @@ def _scatter_point_sizes(
     df: pd.DataFrame,
     *,
     size_by=None,
-    point_size=40,
+    point_area=None,
     size_factor=1.0,
     size_norm=None,
 ) -> np.ndarray:
-    """Resolve marker sizes for 3D scatter, optionally scaling by a data column."""
+    """Resolve 3D scatter marker areas, optionally scaling by a data column."""
     n = int(len(df))
     if n <= 0:
         return np.asarray([], dtype=float)
@@ -4029,7 +4037,9 @@ def _scatter_point_sizes(
     if not np.isfinite(factor) or factor <= 0:
         factor = 1.0
 
-    base_size = max(float(point_size), 1.0) * factor
+    if point_area is None:
+        point_area = pyflash_point_size(backend="area")
+    base_size = max(float(point_area), 1.0) * factor
     out = np.full(n, base_size, dtype=float)
     if size_by is None:
         return out
@@ -4210,7 +4220,7 @@ def _radar_values_for_frame(df, columns, statistic, *, normalize=True,
 
 def _radar_animal_value_records(source_df, columns, statistic, *, normalize=True,
                                 scale_reference=None):
-    """Return per-animal radar values for overlay markers."""
+    """Return per-subject radar values for overlay markers."""
     if not isinstance(source_df, pd.DataFrame) or "AnimalName" not in source_df.columns:
         return []
 
@@ -4337,7 +4347,7 @@ def _style_radar_axis(ax, columns, *, normalize=True, tick_label_size=10, label_
 
 
 def _radar_group_order(experiment, summary, *, factor=None):
-    """Return plotted group names in PyFLASH condition/factor order."""
+    """Return plotted group names in PyFLASH group/factor order."""
     if not isinstance(summary, pd.DataFrame) or summary.empty:
         return []
     if factor is not None:
@@ -8550,7 +8560,7 @@ def _location_contrast_edgecolor(color, black_background=False):
 
 
 def _filter_image_df_for_context(ctx: Context, df: pd.DataFrame) -> pd.DataFrame:
-    """Apply condition/factor/animal/region filtering to an imported image table."""
+    """Apply group/factor/subject/region filtering to an imported image table."""
     out = df
 
     def _norm(series: pd.Series) -> pd.Series:
@@ -9919,6 +9929,28 @@ def _save_plotly_figure(fig, save_path, image_name, subfolder=None, verbose=True
     svg_path = os.path.join(target_dir, f"{image_name}.svg")
     try:
         fig.write_image(svg_path, format="svg")
+        if str(pyflash_style_value("save_bbox", "fixed")).strip().lower() != "tight":
+            size = pyflash_figure_size()
+            if size is not None:
+                width_pt = round(float(size[0]) * 72.0, 6)
+                height_pt = round(float(size[1]) * 72.0, 6)
+                try:
+                    text = open(svg_path, encoding="utf-8").read()
+                    text = re.sub(
+                        r'(<svg\b[^>]*?)\swidth="[^"]+"',
+                        rf'\1 width="{width_pt:g}pt"',
+                        text,
+                        count=1,
+                    )
+                    text = re.sub(
+                        r'(<svg\b[^>]*?)\sheight="[^"]+"',
+                        rf'\1 height="{height_pt:g}pt"',
+                        text,
+                        count=1,
+                    )
+                    open(svg_path, "w", encoding="utf-8").write(text)
+                except Exception:
+                    pass
         if verbose:
             _log.confirm(f"Figure saved to {svg_path}")
         return svg_path
@@ -9934,6 +9966,18 @@ def _save_plotly_figure(fig, save_path, image_name, subfolder=None, verbose=True
 # ACTION FUNCTIONS
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
+def _resolve_auto_style(auto_style=None) -> bool:
+    """Resolve the global/explicit condition-style toggle."""
+    if auto_style is None:
+        return bool(pyflash_style_value("auto_style", True))
+    return bool(auto_style)
+
+
+def _style_default(key, explicit=None):
+    """Use an explicit plot kwarg when supplied, else the PyFLASH style value."""
+    return pyflash_style_value(key) if explicit is None else explicit
+
+
 def _bar_style_cycle(style_cycle=None) -> list:
     """Resolve the style-collision cycle, falling back to the default order.
 
@@ -9945,6 +9989,9 @@ def _bar_style_cycle(style_cycle=None) -> list:
     """
     if style_cycle:
         return [str(s) for s in style_cycle if str(s)]
+    cycle = pyflash_style_value("condition_style_cycle", None)
+    if cycle:
+        return [str(s) for s in cycle if str(s)]
     return ["fill", "hollow", "///", "...", "xxx", "\\\\\\"]
 
 
@@ -10046,7 +10093,7 @@ def _style_render(style) -> dict:
     return {"filled": True, "hatch": style, "linestyle": ":", "marker_filled": True}
 
 
-def _style_map_for(conditions, auto_style=True, style_cycle=None, present=None) -> dict:
+def _style_map_for(conditions, auto_style=None, style_cycle=None, present=None) -> dict:
     """Bucket *conditions* by colour and resolve a style for each, by name.
 
     With *auto_style* off every member collapses to ``"fill"`` — matching the
@@ -10059,14 +10106,14 @@ def _style_map_for(conditions, auto_style=True, style_cycle=None, present=None) 
     if present is not None:
         conditions = [c for c in conditions if str(getattr(c, "name", "")) in present]
     order = [str(getattr(c, "name", "")) for c in conditions]
-    if not auto_style:
+    if not _resolve_auto_style(auto_style):
         return {name: "fill" for name in order}
     color_map = {str(getattr(c, "name", "")): getattr(c, "color", "") for c in conditions}
     explicit = {str(getattr(c, "name", "")): getattr(c, "style", "fill") for c in conditions}
     return _resolve_group_styles(order, color_map, explicit, style_cycle=style_cycle)
 
 
-def _condition_style_map(experiment, auto_style=True, style_cycle=None, present=None) -> dict:
+def _condition_style_map(experiment, auto_style=None, style_cycle=None, present=None) -> dict:
     """Resolve each condition's style over ``condition_list`` (or *present* subset).
 
     Buckets conditions by colour and varies only true (colour, style)
@@ -10078,7 +10125,7 @@ def _condition_style_map(experiment, auto_style=True, style_cycle=None, present=
                           present=present)
 
 
-def _factor_style_map(experiment, factor, auto_style=True, style_cycle=None,
+def _factor_style_map(experiment, factor, auto_style=None, style_cycle=None,
                       present=None) -> dict:
     """Resolve each level of a single *factor* to a style, by level name.
 
@@ -10112,7 +10159,7 @@ def _present_group_names(ctx: Context, column) -> set | None:
 
 
 def _resolved_condition_style(ctx: Context, state: dict,
-                              auto_style=True, style_cycle=None) -> str:
+                              auto_style=None, style_cycle=None) -> str:
     """Style token for the current group, caching the resolved map in *state*.
 
     Factor mode resolves over the factor's levels; condition mode over the whole
@@ -10153,7 +10200,7 @@ def _style_patch(color, style, label=None):
 
 def _condition_style_handles(experiment, names=None, labels=None,
                              color_map=None, style_map=None,
-                             auto_style=True, style_cycle=None):
+                             auto_style=None, style_cycle=None):
     """Build (handles, labels) for a colour+style condition key.
 
     Pass explicit ``names``/``color_map``/``style_map`` (e.g. the bar plot's
@@ -10199,8 +10246,8 @@ def _apply_pie_wedge_style(wedges, style, color):
 
 def bar_chart_action(ctx: Context, state: dict,
                      points=True, normalize=False,
-                     point_fill="white", point_edge="group",
-                     point_size=9, point_linewidth=3, **kwargs):
+                     point_fill=None, point_edge=None,
+                     point_size=None, point_linewidth=None, **kwargs):
     """
     Plot a single bar + scatter points for one condition within one column.
 
@@ -10241,7 +10288,7 @@ def bar_chart_action(ctx: Context, state: dict,
     if style and style != 'fill':
         _apply_bar_style(ax.patches[n_patches_before:], style, color)
 
-    # Points (per animal)
+    # Points (per subject)
     scatter = None
     if points:
         tmp = df[['AnimalName', col]].copy()
@@ -10249,6 +10296,10 @@ def bar_chart_action(ctx: Context, state: dict,
         animal_means = tmp.groupby('AnimalName')[col].mean().dropna()
         if len(animal_means) == 0:
             animal_means = pd.Series(dtype=float)
+        point_fill = _style_default("bar_point_fill", point_fill)
+        point_edge = _style_default("bar_point_edge", point_edge)
+        point_size = pyflash_point_size(point_size, backend="points")
+        point_linewidth = _style_default("bar_point_linewidth", point_linewidth)
         point_face = _resolve_bar_point_color(point_fill, color, "white")
         point_edge = _resolve_bar_point_color(point_edge, color, "group")
         scatter = sns.swarmplot(
@@ -10279,10 +10330,17 @@ def scatter_action(ctx: Context, state: dict,
     specificity = kwargs.get('specificity_filter', kwargs.get('specificity'))
     df = _filter_df_by_specificity(df, specificity)
     color = ctx.color
+    point_size = kwargs.get("point_size", None)
+    point_alpha = kwargs.get("point_alpha", kwargs.get("alpha", None))
+    jitter = kwargs.get("jitter", None)
 
     plot = sns.stripplot(
         x=ctx.condition_index, y=y, data=df,
-        color=color, s=7, alpha=0.6, jitter=0.3, ax=ax,
+        color=color,
+        s=pyflash_point_size(point_size, backend="points"),
+        alpha=_style_default("scatter_alpha", point_alpha),
+        jitter=_style_default("scatter_jitter", jitter),
+        ax=ax,
     )
     sns.despine(trim=False, ax=ax)
     return {'scatter': plot}
@@ -10357,7 +10415,7 @@ def ridgeline_action(ctx: Context, state: dict,
                      marker=None, x=None, x_grid=None,
                      ridge_height=0.85, alpha=0.55,
                      line_width=1.5, bw_adjust=1.0, **kwargs):
-    """Plot one ridgeline density for the current condition/factor group."""
+    """Plot one ridgeline density for the current group or factor level."""
     ax = _resolve_action_axis(state, 0)
     if ax is None:
         raise IndexError("No valid axis available for ridgeline_action.")
@@ -10404,7 +10462,7 @@ def pie_chart_action(ctx: Context, state: dict,
                      start_angle=90, line_width=1.0,
                      plot_format='pie', as_counts=None,
                      order=None, **kwargs):
-    """Plot a pie chart for one condition/factor group."""
+    """Plot a pie chart for one group or factor level."""
     idx = ctx.factor_index if ctx.factor_value is not None else ctx.condition_index
     ax = _resolve_action_axis(state, idx)
     if ax is None:
@@ -10463,7 +10521,7 @@ def pie_chart_action(ctx: Context, state: dict,
             }
             state.setdefault("pie_bar_group_colors", {})[group_name] = group_color
             state.setdefault("pie_bar_group_styles", {})[group_name] = _resolved_condition_style(
-                ctx, state, kwargs.get('auto_style', True), kwargs.get('style_cycle'))
+                ctx, state, kwargs.get('auto_style'), kwargs.get('style_cycle'))
             state.setdefault("pie_bar_group_n_animals", {})[group_name] = n_animals
             state.setdefault("pie_bar_category_order", [])
             state.setdefault("pie_bar_category_pairs", [])
@@ -10489,7 +10547,7 @@ def pie_chart_action(ctx: Context, state: dict,
                 show_pct=show_pct,
             )
             _pie_style = _resolved_condition_style(
-                ctx, state, kwargs.get('auto_style', True), kwargs.get('style_cycle'))
+                ctx, state, kwargs.get('auto_style'), kwargs.get('style_cycle'))
             _wedges = ax.pie(
                 counts,
                 labels=labels,
@@ -10609,7 +10667,7 @@ def combo_pie_action(ctx: Context, state: dict,
             }
             state.setdefault("pie_bar_group_colors", {})[group_name] = group_color
             state.setdefault("pie_bar_group_styles", {})[group_name] = _resolved_condition_style(
-                ctx, state, kwargs.get('auto_style', True), kwargs.get('style_cycle'))
+                ctx, state, kwargs.get('auto_style'), kwargs.get('style_cycle'))
             state.setdefault("pie_bar_group_n_animals", {})[group_name] = n_animals
             state.setdefault("pie_bar_category_order", [])
             state.setdefault("pie_bar_category_pairs", [])
@@ -10634,7 +10692,7 @@ def combo_pie_action(ctx: Context, state: dict,
                 show_pct=show_pct,
             )
             _pie_style = _resolved_condition_style(
-                ctx, state, kwargs.get('auto_style', True), kwargs.get('style_cycle'))
+                ctx, state, kwargs.get('auto_style'), kwargs.get('style_cycle'))
             _wedges = ax.pie(
                 counts,
                 labels=labels,
@@ -10672,14 +10730,14 @@ def combo_pie_action(ctx: Context, state: dict,
 
 def radar_action(ctx: Context, state: dict,
                  filtered_columns=None, statistic="mean", normalize=True,
-                 fill=True, alpha=0.20, line_width=2.0, point_size=28,
+                 fill=True, alpha=0.20, line_width=2.0, point_size=None,
                  tick_label_size=10, label_wrap=18, include_N=False,
                  show_animal_xs=True, animal_x_marker="x", animal_x_size=38,
                  animal_x_alpha=0.75, animal_x_color=None,
                  radial_value_radii=(0.30, 1.00), radial_value_color="grey",
                  radial_value_size=None,
                  **kwargs):
-    """Plot one radar polygon for one condition/factor group."""
+    """Plot one radar polygon for one group or factor level."""
     by = 'factor' if ctx.factor_value is not None else 'condition'
     idx = ctx.factor_index if by == 'factor' else ctx.condition_index
     combine = bool(kwargs.get('combine', False))
@@ -10695,7 +10753,7 @@ def radar_action(ctx: Context, state: dict,
     source_df = ctx.factor_df if by == 'factor' else ctx.condition_df
     group_name, group_color = _resolve_group_label_color(ctx)
     _render = _style_render(_resolved_condition_style(
-        ctx, state, kwargs.get('auto_style', True), kwargs.get('style_cycle')))
+        ctx, state, kwargs.get('auto_style'), kwargs.get('style_cycle')))
     scale_reference = kwargs.get('scale_reference')
     if bool(normalize) and scale_reference is None:
         scale_reference = _compute_radar_scale_reference(source_df, columns)
@@ -10778,16 +10836,17 @@ def radar_action(ctx: Context, state: dict,
             for poly in polys:
                 poly.set_hatch(_render["hatch"])
                 poly.set_edgecolor(group_color)
-    if point_size is not None and float(point_size) > 0:
+    marker_area = pyflash_point_size(point_size, backend="area")
+    if marker_area > 0:
         if _render["marker_filled"]:
             ax.scatter(
-                angles, values, color=group_color, s=float(point_size),
+                angles, values, color=group_color, s=marker_area,
                 edgecolor='black', linewidth=0.4, zorder=4,
             )
         else:
             ax.scatter(
                 angles, values, facecolors='none', edgecolors=group_color,
-                s=float(point_size), linewidth=1.2, zorder=4,
+                s=marker_area, linewidth=1.2, zorder=4,
             )
     if (
         bool(show_animal_xs)
@@ -10832,7 +10891,7 @@ def radar_action(ctx: Context, state: dict,
 def regression_action(ctx: Context, state: dict,
                       x=None, y=None, normalize_x=True, normalize_y=True,
                       test=None, **kwargs):
-    """Plot a regression for one condition/factor."""
+    """Plot a regression for one group/factor."""
     by = 'factor' if ctx.factor_value is not None else 'condition'
     idx = ctx.factor_index if by == 'factor' else ctx.condition_index
     combine = bool(kwargs.get('combine', False))
@@ -10852,6 +10911,13 @@ def regression_action(ctx: Context, state: dict,
     df = df.dropna(subset=[x, y])
     df[x] = _normalize_regression_series(df[x], normalize_x, axis_name=x)
     df[y] = _normalize_regression_series(df[y], normalize_y, axis_name=y)
+
+    if kwargs.get('marginal_hist', False):
+        state.setdefault('regression_marginal_entries', []).append({
+            'x': df[x].to_numpy(dtype=float, copy=True),
+            'y': df[y].to_numpy(dtype=float, copy=True),
+            'color': group_color,
+        })
 
     # Fall back to the experiment-level axis registry when no explicit bounds
     # were supplied. Normalization remaps values, so the registry is only a
@@ -10874,16 +10940,30 @@ def regression_action(ctx: Context, state: dict,
     color = group_color
     line_count_before = len(ax.lines)
     coll_count_before = len(ax.collections)
+    point_size = pyflash_point_size(kwargs.get("point_size"), backend="area")
+    point_alpha = _style_default("regression_point_alpha", kwargs.get("point_alpha"))
+    point_edge = _style_default("regression_point_edge", kwargs.get("point_edge"))
+    point_linewidth = _style_default(
+        "regression_point_linewidth", kwargs.get("point_linewidth"))
+    line_width = _style_default("regression_line_width", kwargs.get("line_width"))
+    scatter_kws = {'s': point_size}
+    if point_alpha is not None:
+        scatter_kws['alpha'] = point_alpha
+    resolved_edge = _resolve_bar_point_color(point_edge, color, None)
+    if resolved_edge is not None:
+        scatter_kws['edgecolors'] = resolved_edge
+    if point_linewidth is not None:
+        scatter_kws['linewidths'] = point_linewidth
     if len(df) >= 2:
         reg = sns.regplot(
             x=x, y=y, data=df, ax=ax, color=color, ci=None,
-            scatter_kws={'s': 400},
-            line_kws={'lw': 6.75},
+            scatter_kws=scatter_kws,
+            line_kws={'lw': line_width},
         )
     else:
         reg = sns.regplot(
             x=x, y=y, data=df, ax=ax, color=color, ci=None, fit_reg=False,
-            scatter_kws={'s': 400},
+            scatter_kws=scatter_kws,
         )
 
     fit_line = ax.lines[-1] if len(df) >= 2 and len(ax.lines) > line_count_before else None
@@ -10891,11 +10971,17 @@ def regression_action(ctx: Context, state: dict,
     # Second visual channel: open markers + dashed/dotted fit line when this
     # condition shares a colour with another (e.g. crossed designs in combine).
     _render = _style_render(_resolved_condition_style(
-        ctx, state, kwargs.get('auto_style', True), kwargs.get('style_cycle')))
+        ctx, state, kwargs.get('auto_style'), kwargs.get('style_cycle')))
     if not _render["marker_filled"]:
+        open_lw = _style_default(
+            "regression_open_marker_linewidth", kwargs.get("open_marker_linewidth"))
         for coll in ax.collections[coll_count_before:]:
             coll.set_facecolors('none')
             coll.set_edgecolors(color)
+            try:
+                coll.set_linewidths(open_lw)
+            except Exception:
+                pass
     if fit_line is not None and _render["linestyle"] != "-":
         fit_line.set_linestyle(_render["linestyle"])
 
@@ -10915,28 +11001,11 @@ def regression_action(ctx: Context, state: dict,
         corr = np.nan
         pval = np.nan
 
-    corr_text = _format_regression_rvalue(corr)
-    sig_text = _get_annotation(float(pval), ns='') if np.isfinite(pval) else ''
-    stats_text = f'r = {corr_text}{(" " + sig_text) if sig_text else ""}'
-
     entry = {'group': group_name, 'p': pval, 'r': corr}
     if combine:
         state['regression_stats_entries'] = state.get('regression_stats_entries', []) + [entry]
-        note_idx = state.get('combine_rho_note_idx', 0)
-        y_pos = max(0.02, 0.96 - (note_idx * 0.055))
-        ax.annotate(
-            f'{group_name}: {stats_text}',
-            xy=(0.98, y_pos), xycoords='axes fraction',
-            fontsize=13, ha='right', va='top', weight='bold', color=color,
-        )
-        state['combine_rho_note_idx'] = note_idx + 1
     else:
         state['regression_stats_entries'] = [entry]
-        ax.annotate(
-            stats_text,
-            xy=(0.98, 0.95), xycoords='axes fraction',
-            fontsize=22, ha='right', va='top', weight='bold',
-        )
 
     set_display_name(ax, y, x, compact_per=True, fontdict={'weight': 'normal'}, size=25)
     sns.despine(trim=False, ax=ax)
@@ -10955,6 +11024,64 @@ def regression_action(ctx: Context, state: dict,
         'p': pval,
         'group': group_name,
     }
+
+
+def _regression_marginal_bin_edges(entries, axis_name, bins=20):
+    """Return shared, finite histogram edges for regression marginals."""
+    arrays = []
+    for entry in entries:
+        values = np.asarray(entry.get(axis_name, []), dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size:
+            arrays.append(values)
+    if not arrays:
+        return None
+
+    pooled = np.concatenate(arrays)
+    try:
+        return np.histogram_bin_edges(pooled, bins=bins)
+    except (TypeError, ValueError, FloatingPointError):
+        return None
+
+
+def _draw_regression_marginals(state, bins=20):
+    """Draw group-coloured x/y histograms around a regression axis."""
+    top_ax = state.get('marginal_x_ax')
+    right_ax = state.get('marginal_y_ax')
+    if top_ax is None or right_ax is None:
+        return
+
+    entries = state.get('regression_marginal_entries', [])
+    x_edges = _regression_marginal_bin_edges(entries, 'x', bins=bins)
+    y_edges = _regression_marginal_bin_edges(entries, 'y', bins=bins)
+    for entry in entries:
+        color = entry.get('color')
+        x_values = np.asarray(entry.get('x', []), dtype=float)
+        x_values = x_values[np.isfinite(x_values)]
+        if x_edges is not None and x_values.size:
+            top_ax.hist(
+                x_values, bins=x_edges, color=color, alpha=0.35,
+                edgecolor='none', linewidth=0,
+            )
+
+        y_values = np.asarray(entry.get('y', []), dtype=float)
+        y_values = y_values[np.isfinite(y_values)]
+        if y_edges is not None and y_values.size:
+            right_ax.hist(
+                y_values, bins=y_edges, orientation='horizontal',
+                color=color, alpha=0.35, edgecolor='none', linewidth=0,
+            )
+
+    top_ax.tick_params(axis='both', which='both', bottom=False, left=False,
+                       labelbottom=False, labelleft=False)
+    right_ax.tick_params(axis='both', which='both', bottom=False, left=False,
+                         labelbottom=False, labelleft=False)
+    top_ax.set_xlabel('')
+    top_ax.set_ylabel('')
+    right_ax.set_xlabel('')
+    right_ax.set_ylabel('')
+    sns.despine(ax=top_ax, top=True, right=True, bottom=True, left=True)
+    sns.despine(ax=right_ax, top=True, right=True, bottom=True, left=True)
 
 
 def _format_side_stats_pvalue(p):
@@ -10984,17 +11111,21 @@ def _regression_test_display_name(test):
     return _correlation_display_name(test)
 
 
-def _annotate_regression_stats_summary(ax, entries, test):
-    """Draw regression stats to the right of the axes, mirroring mean-bar stats."""
+def _annotate_regression_stats_summary(ax, entries, test, inside=False):
+    """Draw regression stats beside the axes, or inset them when requested."""
     lines = [f"Test: {_regression_test_display_name(test)}"]
     for entry in entries or []:
         label = str(entry.get("group") or "Group")
-        lines.append(f"{label}: p={_format_side_stats_pvalue(entry.get('p'))}")
+        lines.append(
+            f"{label}: r={_format_regression_rvalue(entry.get('r'))}, "
+            f"p={_format_side_stats_pvalue(entry.get('p'))}"
+        )
 
+    x, y, ha = (0.98, 0.98, "right") if inside else (1.02, 1.0, "left")
     ax.text(
-        1.02, 1.0, "\n".join(lines),
+        x, y, "\n".join(lines),
         transform=ax.transAxes,
-        ha="left", va="top",
+        ha=ha, va="top",
         fontsize=10,
         bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85},
         clip_on=False,
@@ -11005,7 +11136,7 @@ def scatter_3d_action(ctx: Context, state: dict,
                       x=None, y=None, z=None,
                       normalize_x=False, normalize_y=False, normalize_z=False,
                       **kwargs):
-    """Plot a 3D scatter for one condition/factor."""
+    """Plot a 3D scatter for one group/factor."""
     by = 'factor' if ctx.factor_value is not None else 'condition'
     idx = ctx.factor_index if by == 'factor' else ctx.condition_index
     combine = bool(kwargs.get('combine', False))
@@ -11041,13 +11172,17 @@ def scatter_3d_action(ctx: Context, state: dict,
     if df.empty:
         return {'scatter': None, 'group': group_name}
 
-    point_size = kwargs.get('point_size', 40)
+    point_size = pyflash_point_size(kwargs.get('point_size'), backend="area")
     size_factor = kwargs.get('size_factor', 1.0)
-    alpha = kwargs.get('alpha', 0.7)
+    alpha = _style_default("scatter_3d_alpha", kwargs.get('alpha'))
+    point_edge = _style_default("scatter_3d_edge", kwargs.get('point_edge'))
+    point_linewidth = _style_default(
+        "scatter_3d_linewidth", kwargs.get('point_linewidth'))
+    edge_color = _resolve_bar_point_color(point_edge, group_color, "white")
     sizes = _scatter_point_sizes(
         df,
         size_by=size_by,
-        point_size=point_size,
+        point_area=point_size,
         size_factor=size_factor,
         size_norm=state.get('size_norm'),
     )
@@ -11055,7 +11190,7 @@ def scatter_3d_action(ctx: Context, state: dict,
         df[x], df[y], df[z],
         c=group_color, s=sizes, alpha=alpha,
         label=group_name,
-        edgecolors='white', linewidths=0.3,
+        edgecolors=edge_color, linewidths=point_linewidth,
     )
 
     if x_range is not None and len(x_range) == 2:
@@ -11354,7 +11489,7 @@ def matrix_action(ctx: Context, state: dict,
                   show_values=False,
                   value_format=".2f",
                   **kwargs):
-    """Plot a correlation matrix for one condition/factor."""
+    """Plot a correlation matrix for one group/factor."""
     ax = state['ax']
     fig = state['fig']
     correlation = _normalize_correlation_method(correlation)
@@ -11466,7 +11601,7 @@ def matrix_action(ctx: Context, state: dict,
     # title/colorbar fonts, minimal tick labels) lives in the shared renderer so
     # plot_matrices and the pipeline matrices look identical.
     _, _, heatmap = _render_value_matrix(
-        corr, ax=ax, fig=fig, cmap='coolwarm', vmin=-1, vmax=1,
+        corr, ax=ax, fig=fig, cmap=kwargs.get('cmap'), vmin=-1, vmax=1,
         colorbar_label=coeff_label, title=_title, annotations=annot,
         tick_label_size=tick_label_size, triangle=triangle_mode,
         show_diagonal=show_diagonal, show_values=show_values,
@@ -11476,17 +11611,7 @@ def matrix_action(ctx: Context, state: dict,
 
 
 def _get_annotation(p, ns='ns'):
-    if ns == 'p':
-        ns = round(p, 3)
-    if p < 0.0001:
-        return '****'
-    elif p < 0.001:
-        return '***'
-    elif p < 0.01:
-        return '**'
-    elif p < 0.05:
-        return '*'
-    return ns
+    return pyflash_significance_annotation(p, ns=ns)
 
 
 def _normalize_matrix_triangle(triangle):
@@ -11548,7 +11673,7 @@ def _matrix_variant_label(triangle='full', show_diagonal=True, show_values=False
     return " ".join(parts)
 
 
-def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
+def _render_value_matrix(matrix, *, ax=None, fig=None, cmap=None,
                          vmin=None, vmax=None, colorbar_label=None, title=None,
                          annotations=None, tick_label_size=20, square=True,
                          linewidths=0.5, minimal_labels=True,
@@ -11594,6 +11719,12 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
     """
     if hasattr(matrix, "apply"):
         matrix = matrix.apply(lambda s: pd.to_numeric(s, errors="coerce"))
+    cmap = _style_default("matrix_cmap", cmap)
+    value_color = pyflash_style_value("matrix_value_color", "black")
+    annotation_color = pyflash_style_value("matrix_annotation_color", "black")
+    nan_text_color = pyflash_style_value("matrix_nan_text_color", "#7A7A7A")
+    matrix_x_rotation = pyflash_style_value("matrix_x_tick_rotation", 60)
+    matrix_y_rotation = pyflash_style_value("matrix_y_tick_rotation", 0)
     ycols = list(matrix.index)
     xcols = list(matrix.columns)
     ny, nx = len(ycols), len(xcols)
@@ -11616,9 +11747,9 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
     # proportionate on small ones, rather than tracking tick_label_size.
     tick_fs = max(9, int(tick_label_size))
     _fig_scale = min(36.0, max(6.0, n * 0.45))
-    title_fs = int(max(18, min(34, _fig_scale * 1.7)))
-    cbar_label_fs = int(max(18, min(30, _fig_scale * 1.55)))
-    cbar_tick_fs = int(max(18, min(26, _fig_scale * 1.25)))
+    title_fs = int(max(16, min(34, _fig_scale * 1.7)))
+    cbar_label_fs = int(max(14, min(30, _fig_scale * 1.55)))
+    cbar_tick_fs = int(max(16, min(26, _fig_scale * 1.25)))
     star_fs = min(25, max(8, int(220 / n)))
     value_fs = min(20, max(8, int(180 / n)))
 
@@ -11695,26 +11826,26 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
                     value_y = i + (0.64 if annotation_text else 0.5)
                     ax.text(j + 0.5, value_y, value_txt,
                             ha="center", va="center",
-                            fontsize=value_fs, color="black",
+                            fontsize=value_fs, color=value_color,
                             fontweight="bold")
             elif nan_text and not value_is_finite:
                 ax.text(j + 0.5, i + 0.5, str(nan_text),
                         ha="center", va="center",
                         fontsize=max(8, int(value_fs * 0.9)),
-                        color="#7A7A7A", fontweight="bold")
+                        color=nan_text_color, fontweight="bold")
             if annotation_text:
                 star_y = i + (0.27 if bool(show_values) and value_is_finite else 0.6)
                 ax.text(j + 0.5, star_y, annotation_text,
                         ha="center", va="center",
-                        fontsize=star_fs, color="black", fontweight="bold")
+                        fontsize=star_fs, color=annotation_color, fontweight="bold")
 
     labels_x = [get_display_name(c, minimal=minimal_labels) for c in xcols]
     labels_y = [get_display_name(c, minimal=minimal_labels) for c in ycols]
     ax.set_xticks(np.arange(nx, dtype=float) + 0.5)
     ax.set_yticks(np.arange(ny, dtype=float) + 0.5)
-    ax.set_xticklabels(labels_x, rotation=60, ha="right", va="top",
+    ax.set_xticklabels(labels_x, rotation=matrix_x_rotation, ha="right", va="top",
                        rotation_mode="anchor", fontsize=tick_fs)
-    ax.set_yticklabels(labels_y, rotation=0, ha="right", fontsize=tick_fs)
+    ax.set_yticklabels(labels_y, rotation=matrix_y_rotation, ha="right", fontsize=tick_fs)
     return fig, ax, heatmap
 
 
@@ -11725,8 +11856,8 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap="coolwarm",
 def plot_mean_bars(experiment, filtered_columns=None,
                    data_cols=None,
                    points=True, normalize=False,
-                   point_fill="white", point_edge="group",
-                   point_size=9, point_linewidth=3,
+                   point_fill=None, point_edge=None,
+                   point_size=None, point_linewidth=None,
                    specificity=None, filter_by=None, roi=None, comparisons=None,
                    force_nonparametric=False, ns='ns',
                    posthoc='Conover', posthoc_correction='auto',
@@ -11737,7 +11868,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                    data_col_contains=None, data_col_regex=None,
                    data_col_exclude=None,
                    save_normality=True, normality_dpi=96,
-                   auto_style=True, style_cycle=None, legend=False,
+                   auto_style=None, style_cycle=None, legend=False,
                    dry_run=False,
                    conditions=None, condition_col="Condition",
                    factor_cols=None, animal_col="AnimalName",
@@ -11745,11 +11876,11 @@ def plot_mean_bars(experiment, filtered_columns=None,
                    group_col=None, group_cols=None, subject_col=None,
                    dataframe_kwargs=None):
     """
-    Bar chart with individual data points for each column × condition.
+    Bar chart with individual data points for each column x group.
 
-    One figure per column, all conditions side by side.
+    One figure per column, all groups side by side.
 
-    Conditions carry a second visual channel beyond ``color`` — a ``style``
+    Groups carry a second visual channel beyond ``color`` — a ``style``
     ("fill", "hollow", or a matplotlib hatch like "///"). When *auto_style* is
     True (default), any two conditions that would otherwise share a colour *and*
     style (e.g. the diagnosis×sex bars of a crossed design, which all inherit
@@ -11940,7 +12071,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
             group_label_map = _condition_label_map(ctx.experiment)
         # Second visual channel: vary style only where conditions collide on
         # (colour, style). No-collision designs keep every bar solid.
-        if auto_style:
+        if _resolve_auto_style(auto_style):
             group_style_map = _resolve_group_styles(
                 group_order, group_color_map, explicit_styles, style_cycle=style_cycle,
             )
@@ -12031,7 +12162,8 @@ def plot_mean_bars(experiment, filtered_columns=None,
             ax.set_xticks(range(len(group_order)))
             ax.set_xticklabels(
                 [group_label_map.get(str(name), str(name)) for name in group_order],
-                rotation=60, ha='right',
+                rotation=pyflash_style_value("x_tick_label_rotation", 60),
+                ha=pyflash_style_value("x_tick_label_ha", "right"),
             )
         ax.tick_params(
             axis='x',
@@ -12341,11 +12473,11 @@ def plot_mean_bars(experiment, filtered_columns=None,
 
 
 def plot_condition_key(experiment, save=True, save_path=None,
-                       filename="condition_key", auto_style=True, style_cycle=None,
+                       filename="condition_key", auto_style=None, style_cycle=None,
                        ncol=1, title=None, dpi=200):
-    """Render a standalone colour+style key (legend) for the conditions.
+    """Render a standalone colour+style key (legend) for the groups.
 
-    Each condition becomes a swatch whose fill / outline / hatch matches how its
+    Each group becomes a swatch whose fill / outline / hatch matches how its
     bars (and radar/pie/regression marks) render — so a figure assembled
     externally can carry a legend that conveys *both* channels: colour for the
     primary factor and texture for the secondary. Mirrors the same collision
@@ -12356,7 +12488,7 @@ def plot_condition_key(experiment, save=True, save_path=None,
     handles, labels = _condition_style_handles(
         experiment, auto_style=auto_style, style_cycle=style_cycle)
     if not handles:
-        raise ValueError("No conditions to build a key from.")
+        raise ValueError("No groups to build a key from.")
 
     ncol = max(1, int(ncol))
     nrow = int(np.ceil(len(handles) / ncol))
@@ -12372,14 +12504,15 @@ def plot_condition_key(experiment, save=True, save_path=None,
     path = save_path or os.path.join(
         getattr(experiment, "fig_path", "."), f"{filename}.png")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    apply_pyflash_figure_geometry(fig)
+    fig.savefig(path, **pyflash_savefig_kwargs(dpi=dpi, transparent=False))
     plt.close(fig)
     _log.confirm(f"[plot_condition_key] Saved key to {path}")
     return path
 
 
 def plot_locations(experiment, objects,
-                   separate_by='conditions', join_by='animals',
+                   separate_by='groups', join_by='subjects',
                    merge=True, colocalise=True, annotate=True,
                    extra_graphs=None,
                    images=None,
@@ -12397,7 +12530,7 @@ def plot_locations(experiment, objects,
                    image_adjustments=None,
                    edit_mode=False,
                    use_existing_edits=False,
-                   specificity=None, roi=None,
+                   specificity=None, filter_by=None, roi=None,
                    extra_graph=None,
                    merge_extra_graphs=None,
                    overlay_with_images=None,
@@ -12405,7 +12538,7 @@ def plot_locations(experiment, objects,
                    overlay_all_extra_graphs=None,
                    _return_fig=False):
     """
-    Spatial scatter plots: one figure per condition, one row per animal.
+    Spatial scatter plots: one figure per group, one row per subject.
 
     If `annotate=True`, each marker panel is labeled in the top-left in white.
     `objects`, `images`, and `extra_graphs` all accept lists where tuple items
@@ -12466,10 +12599,20 @@ def plot_locations(experiment, objects,
         images = objects
     if draw_rois is None and draw_roi is not None:
         draw_rois = draw_roi
+    if separate_by in {"groups", "group"}:
+        separate_by = "conditions"
+    if join_by in {"groups", "group"}:
+        join_by = "conditions"
     if separate_by == "subjects":
         separate_by = "animals"
     if join_by == "subjects":
         join_by = "animals"
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
     legacy_merge_extra = bool(merge_extra_graphs) or bool(overlay_all_extra_graphs)
     image_layout = _normalize_location_image_layout(image_layout)
 
@@ -12832,24 +12975,31 @@ def plot_regressions(experiment, x, y,
                      normalize_x=True, normalize_y=True,
                      specificity=None, filter_by=None,
                      roi=None, save=True, combine=False,
+                     marginal_hist=False,
                      split_by=None,
                      x_range=None, y_range=None,
                      xmin=None, xmax=None, ymin=None, ymax=None,
                      clip_fit_line=True, share_axes=True, margin=0.1,
-                     auto_style=True, style_cycle=None,
+                     auto_style=None, style_cycle=None,
+                     point_size=None, point_alpha=None, point_edge=None,
+                     point_linewidth=None, line_width=None,
                      conditions=None, condition_col="Condition",
                      factor_cols=None, animal_col="AnimalName",
                      group_list=None, groups=None,
                      group_col=None, group_cols=None, subject_col=None,
                      dataframe_kwargs=None):
     """
-    Regression plot: one figure per condition/factor, or a combined overlay.
+    Regression plot: one figure per group/factor, or a combined overlay.
     Supports queued x/y inputs:
         - x scalar, y list -> one plot per y
         - x list, y scalar -> one plot per x
         - x list, y list -> all x×y combinations
     `normalize_x` / `normalize_y` accept False, True (= 0-1 min-max), a
     `(min, max)` output range, or 'Z-score'.
+
+    Set ``marginal_hist=True`` to add a 20-bin x histogram above the scatter
+    and a 20-bin y histogram to its right. In combined plots, each group's
+    distributions are overlaid using the same colours as its scatter points.
 
     Shared axis scales
     ------------------
@@ -12908,10 +13058,14 @@ def plot_regressions(experiment, x, y,
                 by=by, factor=factor, test=test,
                 normalize_x=normalize_x, normalize_y=normalize_y,
                 specificity=specificity, roi=_rb, save=save, combine=combine,
+                marginal_hist=marginal_hist,
                 x_range=x_range, y_range=y_range,
                 clip_fit_line=clip_fit_line, share_axes=share_axes,
                 margin=margin,
                 auto_style=auto_style, style_cycle=style_cycle,
+                point_size=point_size, point_alpha=point_alpha,
+                point_edge=point_edge, point_linewidth=point_linewidth,
+                line_width=line_width,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -12987,12 +13141,18 @@ def plot_regressions(experiment, x, y,
                     roi=roi,
                     save=save,
                     combine=combine,
+                    marginal_hist=marginal_hist,
                     x_range=sub_x_range,
                     y_range=sub_y_range,
                     clip_fit_line=clip_fit_line,
                     share_axes=share_axes,
                     margin=margin,
                     auto_style=auto_style, style_cycle=style_cycle,
+                    point_size=point_size,
+                    point_alpha=point_alpha,
+                    point_edge=point_edge,
+                    point_linewidth=point_linewidth,
+                    line_width=line_width,
                 )
         return queued_outputs
 
@@ -13004,10 +13164,14 @@ def plot_regressions(experiment, x, y,
                 by=by, factor=factor, test=test,
                 normalize_x=normalize_x, normalize_y=normalize_y,
                 specificity=spec, roi=roi, save=save, combine=combine,
+                marginal_hist=marginal_hist,
                 x_range=x_range, y_range=y_range,
                 clip_fit_line=clip_fit_line, share_axes=share_axes,
                 margin=margin,
                 auto_style=auto_style, style_cycle=style_cycle,
+                point_size=point_size, point_alpha=point_alpha,
+                point_edge=point_edge, point_linewidth=point_linewidth,
+                line_width=line_width,
             )
         return queued_outputs
 
@@ -13022,12 +13186,36 @@ def plot_regressions(experiment, x, y,
         _progress_start_item(state)
         if combine:
             if state.get('fig') is None or state.get('ax') is None:
-                fig, ax = plt.subplots(figsize=(8, 8))
+                if marginal_hist:
+                    fig = plt.figure(figsize=(10, 10))
+                    grid = fig.add_gridspec(
+                        2, 2,
+                        width_ratios=(4, 1), height_ratios=(1, 4),
+                        hspace=0.05, wspace=0.05,
+                    )
+                    ax = fig.add_subplot(grid[1, 0])
+                    state['marginal_x_ax'] = fig.add_subplot(grid[0, 0], sharex=ax)
+                    state['marginal_y_ax'] = fig.add_subplot(grid[1, 1], sharey=ax)
+                    state['regression_marginal_entries'] = []
+                else:
+                    fig, ax = plt.subplots(figsize=(8, 8))
                 state['fig'] = fig
                 state['ax'] = ax
                 state['regression_stats_entries'] = []
         else:
-            fig, ax = plt.subplots(figsize=(8, 8))
+            if marginal_hist:
+                fig = plt.figure(figsize=(10, 10))
+                grid = fig.add_gridspec(
+                    2, 2,
+                    width_ratios=(4, 1), height_ratios=(1, 4),
+                    hspace=0.05, wspace=0.05,
+                )
+                ax = fig.add_subplot(grid[1, 0])
+                state['marginal_x_ax'] = fig.add_subplot(grid[0, 0], sharex=ax)
+                state['marginal_y_ax'] = fig.add_subplot(grid[1, 1], sharey=ax)
+                state['regression_marginal_entries'] = []
+            else:
+                fig, ax = plt.subplots(figsize=(8, 8))
             state['fig'] = fig
             state['ax'] = ax
             state['regression_stats_entries'] = []
@@ -13056,6 +13244,8 @@ def plot_regressions(experiment, x, y,
             ax = state.get('ax')
             if fig is None or ax is None:
                 return
+            if marginal_hist:
+                _draw_regression_marginals(state, bins=20)
             _pad_axis_bounds(
                 ax, margin,
                 pad_x_low=pad_x_low, pad_x_high=pad_x_high,
@@ -13065,6 +13255,7 @@ def plot_regressions(experiment, x, y,
                 ax,
                 state.get('regression_stats_entries', []),
                 test=test,
+                inside=marginal_hist,
             )
             subfolder, suffix = build_subfolder(
                 plot_type='Regressions',
@@ -13079,6 +13270,8 @@ def plot_regressions(experiment, x, y,
             return
 
         fig = state['fig']
+        if marginal_hist:
+            _draw_regression_marginals(state, bins=20)
         _pad_axis_bounds(
             state['ax'], margin,
             pad_x_low=pad_x_low, pad_x_high=pad_x_high,
@@ -13088,6 +13281,7 @@ def plot_regressions(experiment, x, y,
             state['ax'],
             state.get('regression_stats_entries', []),
             test=test,
+            inside=marginal_hist,
         )
         subfolder, suffix = build_subfolder(
             plot_type='Regressions',
@@ -13105,32 +13299,38 @@ def plot_regressions(experiment, x, y,
         factor=factor, specificity=specificity,
         setup=setup, teardown=teardown,
         x=x, y=y, normalize_x=normalize_x, normalize_y=normalize_y, test=test,
-        combine=combine, x_range=x_range, y_range=y_range,
+        combine=combine, marginal_hist=marginal_hist,
+        x_range=x_range, y_range=y_range,
         clip_fit_line=clip_fit_line,
         auto_style=auto_style, style_cycle=style_cycle,
+        point_size=point_size, point_alpha=point_alpha,
+        point_edge=point_edge, point_linewidth=point_linewidth,
+        line_width=line_width,
         roi_base=_roi_base,
     )
 
 
 def plot_scatter_3d(experiment, x, y, z,
                     by='conditions', factor=None,
-                    specificity=None, roi=None, save=True, combine=False,
+                    specificity=None, filter_by=None, roi=None, save=True, combine=False,
                     x_range=None, y_range=None, z_range=None,
                     xmin=None, xmax=None, ymin=None, ymax=None,
                     zmin=None, zmax=None,
                     normalize_x=False, normalize_y=False, normalize_z=False,
-                    point_size=40, size_by=None, size_factor=1.0, alpha=0.7,
+                    point_size=None, size_by=None, size_factor=1.0, alpha=None,
                     elevation=None, azimuth=None,
-                    figsize=(10, 8), share_axes=True):
+                    figsize=(10, 8), share_axes=True,
+                    point_edge=None, point_linewidth=None):
     """
-    3D scatter plot: one figure per condition/factor, or a combined overlay.
+    3D scatter plot: one figure per group/factor, or a combined overlay.
     Supports queued x/y/z inputs:
         - Any of x, y, z as a list -> one plot per combination
         - x list, y list, z list -> all x*y*z combinations
     `normalize_x` / `normalize_y` / `normalize_z` accept False, True
     (= 0-1 min-max), a `(min, max)` output range, or 'Z-score'.
     Size controls:
-        - point_size sets the baseline marker area
+        - point_size sets marker diameter in points; Matplotlib scatter area is
+          computed internally so sizes line up with other PyFLASH plots
         - size_by maps marker size from a numeric summary column
         - size_factor multiplies the final marker sizes
     Shared axis scales:
@@ -13142,6 +13342,12 @@ def plot_scatter_3d(experiment, x, y, z,
     x_range = _merge_axis_range(x_range, xmin, xmax)
     y_range = _merge_axis_range(y_range, ymin, ymax)
     z_range = _merge_axis_range(z_range, zmin, zmax)
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
 
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
@@ -13155,6 +13361,7 @@ def plot_scatter_3d(experiment, x, y, z,
                 x_range=x_range, y_range=y_range, z_range=z_range,
                 normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
                 point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
+                point_edge=point_edge, point_linewidth=point_linewidth,
                 elevation=elevation, azimuth=azimuth,
                 figsize=figsize, share_axes=share_axes,
             )
@@ -13215,6 +13422,7 @@ def plot_scatter_3d(experiment, x, y, z,
                         x_range=sub_x_range, y_range=sub_y_range, z_range=sub_z_range,
                         normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
                         point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
+                        point_edge=point_edge, point_linewidth=point_linewidth,
                         elevation=elevation, azimuth=azimuth,
                         figsize=figsize, share_axes=share_axes,
                     )
@@ -13230,6 +13438,7 @@ def plot_scatter_3d(experiment, x, y, z,
                 x_range=x_range, y_range=y_range, z_range=z_range,
                 normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
                 point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
+                point_edge=point_edge, point_linewidth=point_linewidth,
                 elevation=elevation, azimuth=azimuth,
                 figsize=figsize, share_axes=share_axes,
             )
@@ -13316,6 +13525,7 @@ def plot_scatter_3d(experiment, x, y, z,
         x_range=x_range, y_range=y_range, z_range=z_range,
         normalize_x=normalize_x, normalize_y=normalize_y, normalize_z=normalize_z,
         point_size=point_size, size_by=size_by, size_factor=size_factor, alpha=alpha,
+        point_edge=point_edge, point_linewidth=point_linewidth,
         roi_base=_roi_base,
     )
 
@@ -13325,11 +13535,11 @@ def plot_histograms(experiment, marker, x_attr,
                     bins=30, binwidth=None, kde=False,
                     alpha=0.5, stat='count',
                     merge=False, combine=False, invert_x=False, ymax=None, save=True,
-                    specificity=None, roi=None,
+                    specificity=None, filter_by=None, roi=None,
                     bin_range=None, bin_edges=None, share_bins=False,
                     xmin=None, xmax=None, share_axes=True):
     """
-    Histogram: one figure per condition/factor, or a combined overlay.
+    Histogram: one figure per group/factor, or a combined overlay.
     Supports queued marker/x_attr inputs:
         - marker scalar, x_attr list -> one plot per x_attr
         - marker list, x_attr scalar -> one plot per marker
@@ -13350,6 +13560,12 @@ def plot_histograms(experiment, marker, x_attr,
       are not passed explicitly.
     """
     bin_range = _merge_axis_range(bin_range, xmin, xmax)
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -13558,11 +13774,11 @@ def plot_ridgeline(experiment, marker, x_attr,
                    by='conditions', factor=None,
                    ridge_height=0.85, alpha=0.55,
                    line_width=1.5, bw_adjust=1.0,
-                   save=True, specificity=None, roi=None,
+                   save=True, specificity=None, filter_by=None, roi=None,
                    bottom_ticks=True, bottom_tick_labels=True,
                    x_range=None, xmin=None, xmax=None, share_axes=True):
     """
-    Ridgeline density plot by condition/factor for one marker attribute.
+    Ridgeline density plot by group/factor for one marker attribute.
 
     Similar input style to `plot_histograms`:
     - accepts marker and x_attr scalar or list-like (all combinations)
@@ -13574,6 +13790,12 @@ def plot_ridgeline(experiment, marker, x_attr,
       (see ``set_axis_limits``) supply the x-axis range when none is passed.
     """
     x_range = _merge_axis_range(x_range, xmin, xmax)
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -13789,7 +14011,7 @@ def ecdf_action(ctx: Context, state: dict,
                 marker=None, x=None,
                 line_width=2.0, alpha=1.0,
                 stat='proportion', complementary=False, **kwargs):
-    """Plot an ECDF line for one condition/factor group."""
+    """Plot an ECDF line for one group or factor level."""
     ax = _resolve_action_axis(state, 0)
     if ax is None:
         raise IndexError("No valid axis available for ecdf_action.")
@@ -13842,11 +14064,11 @@ def plot_ecdf(experiment, marker, x_attr,
               by='conditions', factor=None,
               line_width=2.0, alpha=1.0,
               stat='proportion', complementary=False,
-              save=True, specificity=None, roi=None,
+              save=True, specificity=None, filter_by=None, roi=None,
               bottom_ticks=True, bottom_tick_labels=True,
               x_range=None, xmin=None, xmax=None, share_axes=True):
     """
-    ECDF plot by condition/factor for one marker attribute.
+    ECDF plot by group/factor for one marker attribute.
 
     Similar input style to `plot_histograms`:
     - accepts marker and x_attr scalar or list-like (all combinations)
@@ -13858,6 +14080,12 @@ def plot_ecdf(experiment, marker, x_attr,
       (see ``set_axis_limits``) supply the x-axis range when none is passed.
     """
     x_range = _merge_axis_range(x_range, xmin, xmax)
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -14123,10 +14351,11 @@ def volcano_action(ctx: Context, state: dict,
     y_span = max(1e-9, y_high - y_low)
 
     label_margin = max(0.16, 0.24 * x_span)
+    left_label_margin = max(0.12, 0.10 * x_span)
     edge_pad = max(0.08, 0.10 * x_span)
-    left_label_x = x_min - label_margin
+    left_label_x = x_min - left_label_margin
     right_label_x = x_max + label_margin
-    ax.set_xlim(left_label_x - edge_pad, right_label_x + edge_pad)
+    ax.set_xlim(left_label_x - max(edge_pad, 0.42 * x_span), right_label_x + edge_pad)
     ax.set_ylim(y_low, y_high)
 
     ax.axhline(y_thr, linestyle="--", linewidth=1.2, color="black", alpha=0.8)
@@ -14135,12 +14364,14 @@ def volcano_action(ctx: Context, state: dict,
     if len(nonsig) > 0:
         ax.scatter(
             nonsig["x_log_pct"], nonsig["y_sig"],
-            s=48, c="#BFBFBF", edgecolors="white", linewidths=0.5, zorder=2,
+            s=pyflash_point_size(backend="area"), c="#BFBFBF",
+            edgecolors="white", linewidths=0.5, zorder=2,
         )
     if len(sig) > 0:
         ax.scatter(
             sig["x_log_pct"], sig["y_sig"],
-            s=56, c=group_color, edgecolors="white", linewidths=0.6, zorder=3,
+            s=pyflash_point_size(backend="area"), c=group_color,
+            edgecolors="white", linewidths=0.6, zorder=3,
         )
 
     # Place labels on side margins and spread them vertically to reduce overlap.
@@ -14454,7 +14685,7 @@ def plot_radar(experiment, filtered_columns=None,
                statistic='mean',
                normalize=True, share_scale=True,
                share_columns_across_panels=True,
-               fill=True, alpha=0.20, line_width=2.0, point_size=28,
+               fill=True, alpha=0.20, line_width=2.0, point_size=None,
                tick_label_size=10, label_wrap=18,
                include_N=False,
                show_animal_xs=True, animal_x_marker="x", animal_x_size=38,
@@ -14465,7 +14696,7 @@ def plot_radar(experiment, filtered_columns=None,
                radial_value_radii=(0.30, 1.00), radial_value_color="grey",
                radial_value_size=None,
                figsize=(8, 8),
-               auto_style=True, style_cycle=None,
+               auto_style=None, style_cycle=None,
                conditions=None, condition_col="Condition",
                factor_cols=None, animal_col="AnimalName",
                group_list=None, groups=None,
@@ -14475,7 +14706,7 @@ def plot_radar(experiment, filtered_columns=None,
     """
     Radar/spider plot across selected summary columns.
 
-    One polygon is drawn per condition or factor level.  With combine=False,
+    One polygon is drawn per group or factor level.  With combine=False,
     each group is saved as a separate radar plot.  With combine=True, all
     groups are overlaid on one radar plot.
 
@@ -14811,14 +15042,14 @@ def plot_pie_charts(experiment, marker, x_attr,
                     by='conditions', factor=None,
                     threshold=None,
                     start_angle=90, line_width=1.0,
-                    save=True, specificity=None, roi=None,
+                    save=True, specificity=None, filter_by=None, roi=None,
                     plot_format='pie', show_counts=None, show_pct=None,
                     labels=None, order=None,
                     include_N=False, as_counts=None, include_n=None,
                     bottom_ticks=False, bottom_tick_labels=False,
-                    auto_style=True, style_cycle=None):
+                    auto_style=None, style_cycle=None):
     """
-    Pie chart distribution by condition/factor for one marker attribute.
+    Pie chart distribution by group/factor for one marker attribute.
 
     Similar input style to `plot_histograms`:
     - accepts marker and x_attr scalar or list-like (all combinations)
@@ -14838,7 +15069,7 @@ def plot_pie_charts(experiment, marker, x_attr,
     - labels: optional dict mapping plotted labels/bins to display text.
     - order: optional category order. The first ordered category starts at the
       top and proceeds clockwise, so it occupies the top-right side of the pie.
-    - include_N: append the number of contributing animals (unique AnimalName).
+    - include_N: append the number of contributing subjects (unique AnimalName).
     - as_counts/include_n: backward-compatible aliases.
     - bottom_ticks / bottom_tick_labels: x-axis tick visibility for bar mode.
     """
@@ -14849,6 +15080,12 @@ def plot_pie_charts(experiment, marker, x_attr,
     )
     include_N_flag = _resolve_include_N_flag(include_N=include_N, include_n=include_n)
     order_norm = _normalize_pie_order(order)
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
     # ROI queue mode — iterate over ROI bases
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
@@ -15164,14 +15401,14 @@ def plot_combo_pies(experiment, marker,
                     family='comboany',
                     by='conditions', factor=None,
                     start_angle=90, line_width=1.0,
-                    save=True, specificity=None, roi=None,
+                    save=True, specificity=None, filter_by=None, roi=None,
                     plot_format='pie', show_counts=None, show_pct=None,
                     labels=None, order=None,
                     include_none=True,
                     collapse_markers=None,
                     include_N=False, as_counts=None, include_n=None,
                     bottom_ticks=False, bottom_tick_labels=False,
-                    auto_style=True, style_cycle=None):
+                    auto_style=None, style_cycle=None):
     """
     Pie or stacked-bar distributions for mutually exclusive combo families.
 
@@ -15184,7 +15421,7 @@ def plot_combo_pies(experiment, marker,
     Each object contributes to exactly one category, so the family partitions
     the marker population. `include_none=True` retains the explicit `None`
     category when present. `include_N=True` appends the number of
-    contributing animals (unique AnimalName). `labels` remaps the final
+    contributing subjects (unique AnimalName). `labels` remaps the final
     displayed combo signatures after any collapse. `order` controls category
     sequence clockwise from the top so the first ordered category sits on the
     top-right side of the pie. `as_counts/include_n` are backward-compatible
@@ -15200,6 +15437,12 @@ def plot_combo_pies(experiment, marker,
     collapse_markers_norm = _normalize_combo_collapse_markers(collapse_markers)
     collapse_display_suffix = _combo_collapse_display_suffix(collapse_markers_norm)
     collapse_save_suffix = _combo_collapse_save_suffix(collapse_markers_norm)
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
     _roi_bases = _resolve_roi_bases(roi, experiment)
     if len(_roi_bases) > 1:
         _queued = {}
@@ -15542,7 +15785,7 @@ def plot_matrices(experiment, filtered_columns=None,
                   group_col=None, group_cols=None, subject_col=None,
                   dataframe_kwargs=None):
     """
-    Correlation matrix: one figure per condition or factor value.
+    Correlation matrix: one figure per group or factor value.
     """
     filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
         filtered_columns=filtered_columns,
@@ -16367,14 +16610,16 @@ def _corr_difference_matrix_fig(matrix, title, tick_label_size, *,
     if kind == "p":
         return _corr_pipeline_heatmap(
             matrix, None, title, tick_label_size,
-            cmap=_CORR_PVALUE_CMAP, vmin=0.0, vmax=1.0,
+            cmap=pyflash_style_value("pvalue_cmap", _CORR_PVALUE_CMAP),
+            vmin=0.0, vmax=1.0,
             colorbar_label="difference p value", annotation_df=matrix,
             annotation_alpha=alpha,
         )
     if kind == "q":
         return _corr_pipeline_heatmap(
             matrix, None, title, tick_label_size,
-            cmap=_CORR_QVALUE_CMAP, vmin=0.0, vmax=1.0,
+            cmap=pyflash_style_value("qvalue_cmap", _CORR_QVALUE_CMAP),
+            vmin=0.0, vmax=1.0,
             colorbar_label="difference FDR q value", annotation_df=matrix,
             annotation_alpha=alpha,
         )
@@ -16612,7 +16857,7 @@ def _corr_render_matrix_differences(
 
 
 def _corr_pipeline_heatmap(value_df, sig_df, title, tick_label_size, *,
-                           cmap="coolwarm", vmin=-1.0, vmax=1.0,
+                           cmap=None, vmin=-1.0, vmax=1.0,
                            colorbar_label=None, annotation_df=None,
                            annotation_alpha=0.05):
     """Render a pipeline matrix in the shared house "perfect matrix" style.
@@ -16735,7 +16980,7 @@ def plot_matrix_differences(
     subject_col=None,
     dataframe_kwargs=None,
 ):
-    """Compare correlation matrices between conditions/factor groups.
+    """Compare correlation matrices between groups or factor groups.
 
     For each requested comparison, this computes each group's correlation
     matrix, then plots ``r_left - r_right`` and ``abs(r_left - r_right)`` cell
@@ -17236,7 +17481,7 @@ def plot_multivariable_regression_matrix(
         panels = [('all', 'Combined', summary, 'Combined')]
 
     if len(panels) == 0:
-        raise ValueError("No panels to plot after condition/factor/specificity filtering.")
+        raise ValueError("No panels to plot after group/factor/filter_by filtering.")
 
     panel_y_columns = list(y_columns)
     panel_predictor_sets = list(predictor_sets)
@@ -17361,7 +17606,7 @@ def plot_multivariable_regression_matrix(
             value_mat,
             annot=False,
             fmt=".2f",
-            cmap='coolwarm',
+            cmap=pyflash_style_value("matrix_cmap", "coolwarm"),
             linewidths=0.5,
             ax=ax,
             vmin=vmin,
@@ -17405,9 +17650,19 @@ def plot_multivariable_regression_matrix(
         y_tick_pos = np.arange(len(valid_y), dtype=float) + 0.5
         ax.set_xticks(x_tick_pos)
         ax.set_yticks(y_tick_pos)
-        ax.set_xticklabels(x_labels, rotation=60, ha='right', fontsize=rect_tick_fs)
+        ax.set_xticklabels(
+            x_labels,
+            rotation=pyflash_style_value("matrix_x_tick_rotation", 60),
+            ha='right',
+            fontsize=rect_tick_fs,
+        )
         if i == 0:
-            ax.set_yticklabels(y_labels, rotation=0, ha='right', fontsize=rect_tick_fs)
+            ax.set_yticklabels(
+                y_labels,
+                rotation=pyflash_style_value("matrix_y_tick_rotation", 0),
+                ha='right',
+                fontsize=rect_tick_fs,
+            )
         else:
             ax.set_yticks([])
             ax.set_ylabel("")
@@ -17718,7 +17973,7 @@ def plot_rect_matrices(
         panels = [('all', 'Combined', summary, 'Combined')]
 
     if len(panels) == 0:
-        raise ValueError("No panels to plot after condition/factor/specificity filtering.")
+        raise ValueError("No panels to plot after group/factor/filter_by filtering.")
 
     shared_y_columns = list(y_columns)
     shared_x_columns = list(x_columns)
@@ -17904,7 +18159,7 @@ def plot_rect_matrices(
             corr_mat,
             ax=ax,
             fig=fig,
-            cmap='coolwarm',
+            cmap=pyflash_style_value("matrix_cmap", "coolwarm"),
             vmin=-1,
             vmax=1,
             colorbar_label=coeff_label,
@@ -18008,6 +18263,7 @@ def plot_coloc_upset(
     marker: "str|list[str]|tuple[str, ...]",
     *,
     specificity=None,
+    filter_by=None,
     roi=None,
     by: str | None = None,          # None = auto (condition panels if available); "conditions"/"Condition"; or a factor column name
     remove_closest: bool = False,
@@ -18050,6 +18306,12 @@ def plot_coloc_upset(
         raise ImportError(
             "Missing optional dependency 'upsetplot'. Install with: pip install upsetplot"
         ) from e
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
 
     # ROI queue mode — iterate over ROI bases
     _exp_for_roi = source if not isinstance(source, pd.DataFrame) else experiment
@@ -18430,6 +18692,7 @@ def plot_coloc_sankey(
     *,
     df: "pd.DataFrame|None" = None,
     specificity=None,
+    filter_by=None,
     roi=None,
     by: str | None = None,
     remove_closest: bool = False,
@@ -18479,6 +18742,12 @@ def plot_coloc_sankey(
         from matplotlib.colors import to_rgb
     except Exception:
         to_rgb = None
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
 
     # ROI queue mode — iterate over ROI bases
     _exp_for_roi = source if not isinstance(source, pd.DataFrame) else experiment
@@ -19097,12 +19366,24 @@ def plot_coloc_sankey(
         if normalize:
             title_text = f"{title_text} [% of n={total_n}]"
 
+        style_size = pyflash_figure_size()
+        fixed_plotly_canvas = (
+            style_size is not None
+            and str(pyflash_style_value("save_bbox", "fixed")).strip().lower() != "tight"
+        )
+        if fixed_plotly_canvas:
+            layout_width = int(round(float(style_size[0]) * 72.0))
+            layout_height = int(round(float(style_size[1]) * 72.0))
+        else:
+            layout_width = int(1200 * (dpi / 110.0))
+            layout_height = max(500, 80 * n_layers)
+
         fig.update_layout(
             title=dict(text=title_text, x=0.5),
             font=dict(size=12),
             margin=dict(l=40, r=40, t=80, b=30),
-            width=int(1200 * (dpi / 110.0)),
-            height=max(500, 80 * n_layers),
+            width=layout_width,
+            height=layout_height,
         )
 
         if save and exp_obj is not None:
@@ -19173,8 +19454,8 @@ _PARAM_DESCRIPTIONS = {
     'ns':                   'Label for non-significant results (default "ns").',
     'multiple_comparison':  'Stats test type: "One-Way" (ANOVA/Kruskal) or "Two-Way".',
     'force_nonparametric':  'Force non-parametric tests regardless of normality.',
-    'posthoc':              'Non-parametric post-hoc test for Kruskal-Wallis: "Conover" or "Dunn".',
-    'posthoc_correction':   'Post-hoc p-value correction: "auto", "Bonferroni", or "Uncorrected".',
+    'posthoc':              'Post-hoc test. ANOVA accepts "Tukey", "Dunnett", "Fisher LSD", "Bonferroni", "Sidak", "Holm-Sidak", "Scheffe", or "Tamhane T2"; Kruskal-Wallis accepts "Conover", "Dunn", "Nemenyi", or "DSCF".',
+    'posthoc_correction':   'P-value correction for Dunn/Conover or Fisher LSD: "auto", "Bonferroni", "Sidak", "Holm", "Holm-Sidak", "Simes-Hochberg", "Hommel", "FDR-BH", "FDR-BY", "FDR-TSBH", "FDR-TSBKY", or "Uncorrected".',
     'bottom_ticks':         'Show tick marks on the bottom axis.',
     'bottom_tick_labels':   'Show tick labels on the bottom axis.',
     'save_normality':       'Save normality test Q-Q plots as PNG.',
@@ -19235,6 +19516,9 @@ _PARAM_DESCRIPTIONS = {
                             '(see `set_axis_limits`) for any missing x/y/z bounds, and reuse the '
                             'same range across queued sibling combinations when a column repeats.',
     'clip_fit_line':        'Trim the regression line to the active x/y limits (default True).',
+    'marginal_hist':        'Add 20-bin marginal histograms above (x) and to the right (y) '
+                            'of a regression scatter. Groups use the scatter colours and '
+                            'share bin edges in combined plots (default False).',
     'margin':               'Target fractional distance between every spine and the nearest '
                             'data point (default 0.1 = 10% of axis span). Each side is padded '
                             'independently and only when the view has less breathing room than '
@@ -19252,7 +19536,7 @@ _PARAM_DESCRIPTIONS = {
     'statistic':            'Group summary for each radar axis: "mean", "median", "sum", "min", "max", or callable.',
     'share_scale':          'For normalized radar plots, use one per-column min/max scale across panels/queues.',
     'fill':                 'Fill radar polygons as well as drawing outlines.',
-    'point_size':           'Marker size for radar vertices or baseline size for 3D scatter points.',
+    'point_size':           'Universal marker diameter in points; PyFLASH converts it for each plotting backend.',
     'label_wrap':           'Maximum radar-axis label width before wrapping. Use 0 to disable wrapping.',
     'show_subject_points':  'For radar plots, overlay one marker per contributing subject on each axis.',
     'show_animal_xs':       'Legacy alias for show_subject_points.',
@@ -19275,7 +19559,7 @@ _PARAM_DESCRIPTIONS = {
     'show_counts':          'Display counts. If used alone in bar mode, the y-axis uses raw counts.',
     'show_pct':             'Display percentages. If used in bar mode, the y-axis uses percent.',
     'labels':               'Optional dict mapping plotted category labels to display labels.',
-    'include_N':            'Append contributing animal count (unique AnimalName) to pie titles or group labels.',
+    'include_N':            'Append contributing subject count (unique AnimalName internal subject column) to pie titles or group labels.',
     'collapse_markers':     'For combo pies, ignore these partner markers and re-aggregate signatures at plot time.',
     'as_counts':            'Legacy alias: show counts only when true, percent only when false.',
     'include_n':            'Legacy alias for include_N.',
@@ -19382,21 +19666,21 @@ _PARAM_DESCRIPTIONS = {
     'run_label':                'Name for this run folder; auto-derived from columns+settings if omitted.',
     'if_exists':                'On run-folder collision: "overwrite" (default), "version", "error", or "skip".',
     'write_manifest':           'Write manifest.json and append to the runs index (default True).',
-    'include_condition_distributions': 'For data_overview_pipeline, compute condition/factor distribution stats.',
+    'include_condition_distributions': 'For data_overview_pipeline, compute group/factor distribution stats.',
     'include_effect_sizes':     'For data_overview_pipeline, compute control-vs-group effect-size table.',
     'outlier_methods':          'Outlier methods for data_overview_pipeline: "rout" (default), "iqr", "mad", or a tuple combining them.',
     'rout_q':                   'ROUT false-discovery-rate Q value in percent (default 1.0, matching GraphPad Prism).',
     'iqr_k':                    'Tukey IQR fence multiplier when using outlier_methods including "iqr" (default 1.5).',
     'mad_threshold':            'Modified-z absolute threshold when using outlier_methods including "mad" (default 3.5).',
-    'plot_condition_distributions': 'Save raw condition/factor distribution panels for selected numeric columns.',
-    'plot_condition_distribution_zscores': 'Save z-scored condition/factor distribution panels.',
+    'plot_condition_distributions': 'Save raw group/factor distribution panels for selected numeric columns.',
+    'plot_condition_distribution_zscores': 'Save z-scored group/factor distribution panels.',
     'plot_condition_fingerprint': 'Save group x metric z-score heatmap from condition distribution summaries.',
     'plot_condition_variability': 'Save group x metric variability heatmap from condition distribution summaries.',
     'plot_effect_sizes':        'Save effect-size forest plot for group-vs-control comparisons.',
     'condition_distribution_plot': 'Distribution style: "raincloud", "boxstrip", "violin", or "strip".',
     'fingerprint_stat':         'Statistic used in the condition fingerprint heatmap, usually "median" or "mean".',
     'variability_stat':         'Statistic used in the condition variability heatmap, e.g. "cv_pct" or "iqr".',
-    'effect_control':           'Control group for data_overview effect sizes; defaults to the first condition/factor group.',
+    'effect_control':           'Control group for data_overview effect sizes; defaults to the first group or factor level.',
     'max_plot_items':           'Cap long overview plots to this many columns/items (default 30).',
     'conditions':               'Legacy group name. In raw DataFrame calls use group_list; in overview calls this can subset groups.',
     'encode_x_categorical':     'Treat x-axis as categorical.',
@@ -19698,11 +19982,12 @@ def plot_marker_pca(batch, columns=None, data_cols=None, column_strings=None,
                     factor_cols=None, animal_col="AnimalName",
                     group_list=None, groups=None, group_col=None,
                     group_cols=None, subject_col=None, dataframe_kwargs=None):
-    """PCA biplot of animal-level marker profiles, coloured by ``hue_column``.
+    """PCA biplot of subject-level marker profiles, coloured by ``hue_column``.
 
-    Builds the feature matrix from ``batch.summary`` (one row per animal),
-    selecting columns by explicit list or ``column_strings``/``regex_string``/
-    ``exclude`` (same semantics as ``get_columns``).  Standardises per column by
+    Builds the feature matrix from ``batch.summary`` (one row per subject/sample),
+    selecting columns by explicit list or ``data_col_contains``/``data_col_regex``/
+    ``data_col_exclude``. Legacy aliases still follow ``get_columns`` semantics.
+    Standardises per column by
     default so large-magnitude IntDen columns do not dominate.  Returns the
     figure (or ``(fig, {scores, loadings, explained_variance})``).
     """
@@ -19774,8 +20059,9 @@ def plot_marker_pca(batch, columns=None, data_cols=None, column_strings=None,
     color_map = _categorical_colors(list(hue.unique()), palette)
     for level in hue.unique():
         m = (hue == level).to_numpy()
-        ax.scatter(scores[m, 0], scores[m, 1], s=70, alpha=0.85,
-                   color=color_map[level], edgecolor="black", linewidth=0.5, label=str(level))
+        ax.scatter(scores[m, 0], scores[m, 1], s=pyflash_point_size(backend="area"),
+                   alpha=0.85, color=color_map[level], edgecolor="black",
+                   linewidth=0.5, label=str(level))
 
     if annotate_loadings:
         load = pca.components_[:2].T  # (features, 2)
@@ -19791,7 +20077,7 @@ def plot_marker_pca(batch, columns=None, data_cols=None, column_strings=None,
     ax.axvline(0, color="lightgrey", lw=0.8, zorder=0)
     ax.set_xlabel(f"PC1 ({evr[0] * 100:.1f}%)")
     ax.set_ylabel(f"PC2 ({evr[1] * 100:.1f}%)")
-    ax.set_title(title or f"Marker profile PCA (n={len(X)} animals)")
+    ax.set_title(title or f"Marker profile PCA (n={len(X)} subjects)")
     ax.legend(frameon=False, title=hue_column)
 
     if save:
@@ -19816,7 +20102,7 @@ def plot_timecourse(batch, column, time_col="Time", group_col="Genotype",
                     group_cols=None, dataframe_kwargs=None):
     """Fit and plot a growth curve per group across an ordered time factor.
 
-    Fits :func:`PyFLASH.stats_extra.fit_growth_curve` to the animal-level points
+    Fits :func:`PyFLASH.stats_extra.fit_growth_curve` to the subject-level points
     of each ``group_col`` level (x = numeric time, y = ``column``), overlays the
     fitted curve and the per-timepoint mean +/- SEM.  ``time_map`` maps a
     categorical time factor to numbers (e.g. ``{'WeekTwo': 2, 'WeekEight': 8}``).
@@ -19870,10 +20156,12 @@ def plot_timecourse(batch, column, time_col="Time", group_col="Genotype",
         y = sub["_v"].to_numpy(float)
         color = color_map[grp]
         if show_points:
-            ax.scatter(x, y, s=30, alpha=0.4, color=color, edgecolor="none")
+            ax.scatter(x, y, s=pyflash_point_size(backend="area"),
+                       alpha=0.4, color=color, edgecolor="none")
         agg = sub.groupby("_t")["_v"].agg(["mean", "sem", "count"]).reset_index()
         ax.errorbar(agg["_t"], agg["mean"], yerr=agg["sem"].fillna(0.0),
-                    fmt="o", color=color, capsize=4, lw=2, markersize=7, zorder=3)
+                    fmt="o", color=color, capsize=4, lw=2,
+                    markersize=pyflash_point_size(backend="points"), zorder=3)
         try:
             fit = fit_growth_curve(x, y, model=model)
             xs = np.linspace(float(np.min(x)), float(np.max(x)), 100)
@@ -19911,7 +20199,7 @@ def _linear_model_adjusted_means_figure(
     tick_label_size=20,
     bottom_ticks=False,
     bottom_tick_labels=True,
-    auto_style=True,
+    auto_style=None,
     style_cycle=None,
     comparison_p_col=None,
 ):
@@ -19957,7 +20245,7 @@ def _linear_model_adjusted_means_figure(
     explicit_styles = {g: source_styles.get(g, "fill") for g in group_names}
     if group_style_map is not None:
         styles = {str(k): v for k, v in group_style_map.items()}
-    elif auto_style and (source_colors or cmap):
+    elif _resolve_auto_style(auto_style) and (source_colors or cmap):
         styles = _resolve_group_styles(group_names, colors, explicit_styles, style_cycle=style_cycle)
     else:
         styles = {g: "fill" for g in group_names}
@@ -19981,7 +20269,8 @@ def _linear_model_adjusted_means_figure(
             ax.plot([idx - ci_width, idx + ci_width], [ci_lo, ci_lo],
                     color=color, zorder=2.6, lw=2.5, linestyle=line_style)
         scatter = sns.swarmplot(
-            x=[idx], y=[mean], size=9, color="white", edgecolor=color,
+            x=[idx], y=[mean], size=pyflash_point_size(backend="points"),
+            color="white", edgecolor=color,
             linewidth=3, label=labels.get(group_name, group_name),
             clip_on=False, zorder=3, ax=ax,
         )
@@ -20036,7 +20325,7 @@ def _linear_model_adjusted_means_figure(
         if p_col not in comp_df.columns:
             p_col = "p_value"
         p_values = pd.to_numeric(comp_df[p_col], errors="coerce").tolist()
-        annotations = [get_annotation(p, "ns") if np.isfinite(p) else "ns" for p in p_values]
+        annotations = [get_annotation(p, "ns") for p in p_values]
         plot_comparison_lines_from_figdata(
             scatter, None, ax,
             annotations=annotations,
@@ -20121,7 +20410,8 @@ def _linear_model_coefficient_forest_figure(
         est, y, xerr=np.vstack([lower, upper]), fmt="none",
         ecolor="#303030", elinewidth=1.5, capsize=3, zorder=2,
     )
-    ax.scatter(est, y, s=58, c=colors, edgecolors="black", linewidths=0.6, zorder=3)
+    ax.scatter(est, y, s=pyflash_point_size(backend="area"), c=colors,
+               edgecolors="black", linewidths=0.6, zorder=3)
     ax.set_yticks(y)
     ax.set_yticklabels(labels)
     ax.tick_params(axis="both", labelsize=max(8, min(int(tick_label_size), 14)))
@@ -20142,11 +20432,11 @@ def _linear_model_coefficient_forest_figure(
 # module so every pipeline figure type is also a first-class, registry-listed plot
 # callable on its own (docs/new_pipeline_plans/PREFERENCES.md §8). The pipeline
 # feeds precomputed inferential p/q into the cores via ``value_col``; the standalone
-# wrappers compute descriptive animal-level effect sizes / raw points themselves.
+# wrappers compute descriptive subject-level effect sizes / raw points themselves.
 
 
 def _superplot_figure(roi_long, order, marker, tick_label_size=20):
-    """SuperPlot: ROI points coloured by animal over per-animal means + the group
+    """SuperPlot: ROI points coloured by subject over per-subject means + the group
     mean line. ``roi_long`` has columns ``[value, AnimalName, group]``."""
     present = set(roi_long["group"].astype(str))
     groups = [g for g in order if str(g) in present]
@@ -20164,12 +20454,14 @@ def _superplot_figure(roi_long, order, marker, tick_label_size=20):
             if not len(v):
                 continue
             jitter = (rng.random(len(v)) - 0.5) * 0.28
-            ax.scatter(np.full(len(v), gi) + jitter, v, s=14,
+            ax.scatter(np.full(len(v), gi) + jitter, v,
+                       s=pyflash_point_size(backend="area"),
                        color=cmap(ai % 20), alpha=0.5, edgecolor="none", zorder=2)
             m = float(np.mean(v))
             animal_means.append(m)
-            ax.scatter([gi], [m], s=90, color=cmap(ai % 20),
-                       edgecolor="black", linewidth=0.8, zorder=3)
+            ax.scatter([gi], [m], s=pyflash_point_size(backend="area"),
+                       color=cmap(ai % 20), edgecolor="black",
+                       linewidth=0.8, zorder=3)
         if animal_means:
             gm = float(np.mean(animal_means))
             ax.plot([gi - 0.32, gi + 0.32], [gm, gm], color="black", lw=2.2, zorder=4)
@@ -20230,7 +20522,8 @@ def _effect_forest_figure(df, value_col=None, alpha=0.05, tick_label_size=20, ma
         color = r["_color"] if colors is not None else ("#c0392b" if is_sig else "#4878a8")
         if np.isfinite(lo) and np.isfinite(hi):
             ax.plot([float(lo), float(hi)], [yi, yi], color=color, lw=1.4, alpha=0.85)
-        ax.scatter([g], [yi], s=46, color=color, zorder=3,
+        ax.scatter([g], [yi], s=pyflash_point_size(backend="area"),
+                   color=color, zorder=3,
                    edgecolor="black" if is_sig else "none", linewidth=0.4)
     ax.axvline(0.0, color="#252525", lw=1.0)
     ax.axvline(-0.8, color="#cccccc", ls="--", lw=0.8)
@@ -20303,6 +20596,18 @@ _AUDIT_STATUS_LABELS = {
     STATUS_GAIN: "gained vs baseline",
     STATUS_LOSS: "lost vs baseline",
 }
+
+
+def _audit_status_colors():
+    colors = dict(_AUDIT_STATUS_COLORS)
+    colors.update(pyflash_style_value("audit_status_colors", {}))
+    return colors
+
+
+def _scorecard_grade_colors():
+    colors = dict(_SCORECARD_GRADE_COLORS)
+    colors.update(pyflash_style_value("scorecard_grade_colors", {}))
+    return colors
 # Auto-selected test name (as returned by multipleComparisons) -> compact tag.
 _AUDIT_TEST_TAGS = {
     "Independent T-Test": "t",
@@ -20465,7 +20770,8 @@ def _ovw_sig_audit_matrix_figure(df, *, alpha=0.05, value_col="p",
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
         ax_fdr = None
 
-    cmap = ListedColormap([_AUDIT_STATUS_COLORS[c] for c in (0, 1, 2, 3)])
+    status_colors = _audit_status_colors()
+    cmap = ListedColormap([status_colors[c] for c in (0, 1, 2, 3)])
     norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], cmap.N)
     ax.imshow(status, cmap=cmap, norm=norm, aspect="auto")
 
@@ -20508,7 +20814,7 @@ def _ovw_sig_audit_matrix_figure(df, *, alpha=0.05, value_col="p",
     ax.set_title(title or "Significance audit", fontsize=int(tick_label_size),
                  fontweight="bold", pad=14)
 
-    handles = [Patch(facecolor=_AUDIT_STATUS_COLORS[c], edgecolor="#999999",
+    handles = [Patch(facecolor=status_colors[c], edgecolor="#999999",
                      label=_AUDIT_STATUS_LABELS[c]) for c in frame["present_codes"]]
     handles.append(Patch(facecolor="none", edgecolor="none",
                          label="✱ p<α   ✓/⚠ concordant"))
@@ -20546,6 +20852,7 @@ def _ovw_scorecard_figure(scorecard, *, narrative=None, tick_label_size=20,
         return None
     from matplotlib.patches import Rectangle
     rows = scorecard.to_dict("records")
+    grade_colors = _scorecard_grade_colors()
     n = len(rows)
     ncols = 3 if n > 4 else max(1, n)
     nrows = int(np.ceil(n / ncols))
@@ -20559,7 +20866,7 @@ def _ovw_scorecard_figure(scorecard, *, narrative=None, tick_label_size=20,
         col = i % ncols
         row = nrows - 1 - (i // ncols)
         y0 = row + (narr_h / 1.8)
-        color = _SCORECARD_GRADE_COLORS.get(str(r.get("grade")), "#9e9e9e")
+        color = grade_colors.get(str(r.get("grade")), "#9e9e9e")
         ax.add_patch(Rectangle((col + 0.05, y0 + 0.08), 0.90, 0.86,
                                facecolor=color, alpha=0.16,
                                edgecolor=color, linewidth=2.0))
@@ -20678,10 +20985,11 @@ def _volcano_table_figure(sub, value_col, alpha, title, tick_label_size=20):
     y = -np.log10(d["_p"].clip(lower=1e-300))
     sig = d["_p"] < alpha
     fig, ax = plt.subplots(figsize=(8.5, 7))
-    ax.scatter(d["_e"][~sig], y[~sig], s=42, c="#bdbdbd", edgecolor="none",
-               label="ns", zorder=2)
-    ax.scatter(d["_e"][sig], y[sig], s=56, c="#c0392b", edgecolor="black",
-               linewidth=0.4, label=f"{value_col} < {alpha:g}", zorder=3)
+    ax.scatter(d["_e"][~sig], y[~sig], s=pyflash_point_size(backend="area"),
+               c="#bdbdbd", edgecolor="none", label="ns", zorder=2)
+    ax.scatter(d["_e"][sig], y[sig], s=pyflash_point_size(backend="area"),
+               c="#c0392b", edgecolor="black", linewidth=0.4,
+               label=f"{value_col} < {alpha:g}", zorder=3)
     ax.axhline(-np.log10(alpha), color="#777", ls="--", lw=0.9)
     ax.axvline(0.0, color="#252525", lw=1.0)
     for _, r in d[sig].iterrows():
@@ -20715,7 +21023,7 @@ def _animal_group_map_from_groups(scope_df, groups):
 def _resolve_marker_roi_long(experiment, summary_col, animal_group_map, roi_base=None):
     """Best-effort ROI-level long frame ``[value, AnimalName, group]`` for a summary
     column, or ``None`` when no matching ROI column is found. Restricts to the run's
-    ROI base + in-scope animals and tags each row with its comparison group."""
+    ROI base + in-scope subjects and tags each row with its comparison group."""
     data = getattr(experiment, "data", None)
     if not data or not animal_group_map:
         return None
@@ -20841,7 +21149,7 @@ def plot_superplot(experiment, filtered_columns=None, data_cols=None,
                    animal_col="AnimalName", group_list=None, groups=None,
                    group_col=None, group_cols=None, subject_col=None,
                    dataframe_kwargs=None):
-    """SuperPlot per marker: ROI-level points coloured by animal over each animal's
+    """SuperPlot per marker: ROI-level points coloured by subject over each subject's
     mean and the group mean (Lord et al. 2020). Shows biological (animal) vs technical
     (ROI) spread for the chosen grouping. Needs ROI-level data
     (``experiment.data[...]``); markers without resolvable ROI rows are skipped.
@@ -20932,7 +21240,7 @@ def plot_effect_forest(experiment, filtered_columns=None, data_cols=None,
                        animal_col="AnimalName", group_list=None, groups=None,
                        group_col=None, group_cols=None, subject_col=None,
                        dataframe_kwargs=None):
-    """Forest plot of animal-level effect sizes (Hedges g + bootstrap CI), one row per
+    """Forest plot of subject-level effect sizes (Hedges g + bootstrap CI), one row per
     marker x group-vs-``control``, ranked by |effect|. The inferential, significance-
     marked variant is produced by ``pipeline.group_comparison``; this standalone view
     is descriptive. Returns the figure (or a queue dict)."""
@@ -21163,11 +21471,12 @@ def _cosinor_axes(ax, df, value, time_col, group_col, period, period_free,
         if show_points:
             agg = sub.groupby("_t")["_v"].agg(["mean", "sem"]).reset_index()
             ax.errorbar(agg["_t"], agg["mean"], yerr=agg["sem"].fillna(0.0),
-                        fmt="o", color=c, capsize=4, ms=7, lw=2, zorder=3)
+                        fmt="o", color=c, capsize=4,
+                        ms=pyflash_point_size(backend="points"), lw=2, zorder=3)
         try:
             f = fit_cosinor(sub["_t"].to_numpy(), sub["_v"].to_numpy(), period, period_free)
             p = f["p"]
-            star = ("***" if p < .001 else "**" if p < .01 else "*" if p < .05 else "ns")
+            star = _get_annotation(p)
             ax.plot(tt, f["predict"](tt), color=c, lw=2.6, zorder=2,
                     label=f"{g}: amp={f['amplitude']:.1f}, peak {f['acrophase']:.1f}, "
                           f"R²={f['r_squared']:.2f} {star}")
@@ -21284,13 +21593,15 @@ def _acrophase_clock_axes(ax, df, phase_col, group_col, period, radius_col, pale
         if has_radius:
             rr = pd.to_numeric(sub[radius_col], errors="coerce").to_numpy(float)
             ok = np.isfinite(rr)
-            ax.scatter(theta[ok], rr[ok], s=44, color=c, alpha=0.75,
-                       edgecolor="white", linewidth=0.6, zorder=3, label=g)
+            ax.scatter(theta[ok], rr[ok], s=pyflash_point_size(backend="area"),
+                       color=c, alpha=0.75, edgecolor="white", linewidth=0.6,
+                       zorder=3, label=g)
         else:
             # One shared band for every group; a little radial jitter only so
             # coincident phases don't overprint. Radius has no meaning here.
-            ax.scatter(theta, rng.uniform(0.84, 1.0, len(theta)), s=44, color=c,
-                       alpha=0.8, edgecolor="white", linewidth=0.6, zorder=3,
+            ax.scatter(theta, rng.uniform(0.84, 1.0, len(theta)),
+                       s=pyflash_point_size(backend="area"), color=c, alpha=0.8,
+                       edgecolor="white", linewidth=0.6, zorder=3,
                        label=f"{g} (n={len(theta)})")
             cs = circular_stats(sub["_ph"].to_numpy(float), period)
             ax.annotate("", xy=(cs["mean"] * w, cs["r"]), xytext=(0, 0),
@@ -21349,8 +21660,7 @@ def plot_acrophase_clock(experiment, phase_col="Acrophase (h)", group_col=None,
     if phase_col not in df.columns:
         raise ValueError(f"plot_acrophase_clock: phase_col {phase_col!r} not found.")
 
-    fig, ax = plt.subplots(figsize=(6.8, 6.8), subplot_kw={"projection": "polar"},
-                           layout="constrained")
+    fig, ax = plt.subplots(figsize=(6.8, 6.8), subplot_kw={"projection": "polar"})
     stats = _acrophase_clock_axes(ax, df, phase_col, group_col, float(period),
                                   radius_col, palette, group_order=group_order)
     default_title = (f"Phase × {radius_col}" if radius_col
