@@ -732,7 +732,7 @@ def test_plot_matrix_differences_outputs_and_values(tmp_path):
 
     res = plot_matrix_differences(
         batch,
-        filtered_columns=cols,
+        data_cols=cols,
         factor="Diagnosis",
         comparisons=["1-2"],
         correlation=("pearsonr", "spearmanr"),

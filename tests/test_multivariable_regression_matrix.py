@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from PyFLASH import plotting, report
+from PyFLASH.aesthetics import pyflash_style_context
 from PyFLASH.spec import PLOT_REGISTRY, _resolve_func, describe_status
 
 
@@ -117,6 +118,29 @@ def test_multivariable_regression_matrix_default_columns_use_selected_roi_summar
 
     assert "CTXOnly ~ PairA" in out["Combined"]["models"]
     assert out["Combined"]["models"]["CTXOnly ~ PairA"]["r2"] > 0.99
+
+
+def test_multivariable_regression_matrix_uses_matrix_tick_style(tmp_path, monkeypatch):
+    exp = _dataset(tmp_path)
+    real_close = plotting.plt.close
+    monkeypatch.setattr(plotting.plt, "close", lambda fig=None: None)
+
+    with pyflash_style_context(matrix_x_tick_rotation=25, matrix_y_tick_rotation=10):
+        plotting.plot_multivariable_regression_matrix(
+            exp,
+            filtered_columns=["Signal", "Noise"],
+            predictors={"PairA": ["x1", "x2"], "PairB": ["z1", "z2"]},
+            by="all",
+            save=False,
+        )
+
+    fig = plotting.plt.gcf()
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xticklabels()[0].get_rotation() == pytest.approx(25)
+        assert ax.get_yticklabels()[0].get_rotation() == pytest.approx(10)
+    finally:
+        real_close(fig)
 
 
 def test_multivariable_regression_matrix_requires_valid_predictors(tmp_path):

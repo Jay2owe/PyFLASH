@@ -30,8 +30,12 @@ def test_modelling_attribute_exposes_linear_model_pipeline():
 
 
 def test_pipeline_attribute_exposes_adjusted_correlation():
+    assert callable(PyFLASH.correlation)
     assert callable(PyFLASH.adjusted_correlation)
+    assert callable(PyFLASH.data_overview)
+    assert callable(PyFLASH.group_comparison)
     assert callable(PyFLASH.linear_model)
+    assert callable(PyFLASH.rhythm)
 
 
 def test_unknown_attribute_still_raises_attributeerror():

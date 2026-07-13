@@ -63,6 +63,43 @@ def _png(label):
     return buf.getvalue()
 
 
+_DATA_OVERVIEW_MONTAGE_SMOKE = {
+    "include_inventory": False,
+    "include_group_counts": True,
+    "include_descriptives": False,
+    "include_normality": False,
+    "include_outliers": False,
+    "include_covariation": False,
+    "include_condition_distributions": False,
+    "include_effect_sizes": False,
+    "include_significance_audit": False,
+    "include_scorecard": False,
+    "include_readiness": False,
+    "plot_missingness": False,
+    "plot_covariation": False,
+    "plot_group_counts": True,
+    "plot_availability": False,
+    "plot_descriptives": False,
+    "plot_normality": False,
+    "plot_outliers": False,
+    "plot_covariation_pairs": False,
+    "plot_condition_distributions": False,
+    "plot_condition_distribution_zscores": False,
+    "plot_condition_fingerprint": False,
+    "plot_condition_variability": False,
+    "plot_effect_sizes": False,
+    "plot_significance_audit": False,
+    "plot_scorecard": False,
+    "plot_readiness": False,
+}
+
+
+def _data_overview_montage_smoke(exp, **kwargs):
+    params = dict(_DATA_OVERVIEW_MONTAGE_SMOKE)
+    params.update(kwargs)
+    return pipeline.data_overview(exp, **params)
+
+
 # ── 1. forcing function ──────────────────────────────────────────────────────
 def test_every_pipeline_is_montage_enforced():
     for name in pipeline.__all__:
@@ -209,7 +246,7 @@ def _montage_path(res):
 
 def test_data_overview_writes_montage_into_run_folder(tmp_path):
     exp = _dataset(tmp_path)
-    res = pipeline.data_overview(exp, run_label="ovw", save=True)
+    res = _data_overview_montage_smoke(exp, run_label="ovw", save=True)
     montage = _montage_path(res)
     assert montage and os.path.isfile(montage)
     assert os.path.basename(montage) == f"{pm.DEFAULT_MONTAGE_FILENAME}.png"
@@ -236,7 +273,8 @@ def test_adjusted_correlation_writes_montage(tmp_path):
 
 def test_montage_toggle_off_skips(tmp_path):
     exp = _dataset(tmp_path)
-    res = pipeline.data_overview(exp, run_label="ovw_off", save=True, montage=False)
+    res = _data_overview_montage_smoke(
+        exp, run_label="ovw_off", save=True, montage=False)
     assert "montage" not in res
     assert not os.path.isfile(
         os.path.join(res["fig_dir"], f"{pm.DEFAULT_MONTAGE_FILENAME}.png"))
@@ -244,7 +282,7 @@ def test_montage_toggle_off_skips(tmp_path):
 
 def test_save_false_skips_montage(tmp_path):
     exp = _dataset(tmp_path)
-    res = pipeline.data_overview(exp, run_label="ovw_nosave", save=False)
+    res = _data_overview_montage_smoke(exp, run_label="ovw_nosave", save=False)
     assert "montage" not in res
 
 
@@ -253,7 +291,8 @@ def test_global_save_mode_false_skips_montage(tmp_path):
     prev = Config.SAVE_MODE
     Config.SAVE_MODE = False
     try:
-        res = pipeline.data_overview(exp, run_label="ovw_global_nosave", save=True)
+        res = _data_overview_montage_smoke(
+            exp, run_label="ovw_global_nosave", save=True)
     finally:
         Config.SAVE_MODE = prev
 
@@ -264,11 +303,11 @@ def test_global_save_mode_false_skips_montage(tmp_path):
 
 def test_reused_run_points_at_existing_montage(tmp_path):
     exp = _dataset(tmp_path)
-    first = pipeline.data_overview(exp, run_label="ovw_reuse", save=True)
+    first = _data_overview_montage_smoke(exp, run_label="ovw_reuse", save=True)
     assert first.get("montage") and os.path.isfile(first["montage"])
     # if_exists='skip' returns the cached manifest without recomputing, but the
     # returned montage path should still resolve to the original run's montage.
-    second = pipeline.data_overview(
+    second = _data_overview_montage_smoke(
         exp, run_label="ovw_reuse", save=True, if_exists="skip")
     assert second.get("reused") is True
     assert second.get("montage") == first["montage"]
@@ -282,7 +321,8 @@ def test_data_overview_montage_config_override(tmp_path):
     prev = Config.MONTAGE_FILENAME
     Config.MONTAGE_FILENAME = "00 - Overview Montage"
     try:
-        res = pipeline.data_overview(exp, run_label="ovw_legacy", save=True)
+        res = _data_overview_montage_smoke(
+            exp, run_label="ovw_legacy", save=True)
     finally:
         Config.MONTAGE_FILENAME = prev
     montage = _montage_path(res)
@@ -292,7 +332,7 @@ def test_data_overview_montage_config_override(tmp_path):
 
 def test_specificity_queue_builds_one_combined_montage(tmp_path):
     exp = _dataset(tmp_path)
-    res = pipeline.data_overview(
+    res = _data_overview_montage_smoke(
         exp, specificity=[("Diagnosis", "Control"), ("Diagnosis", "AD")],
         run_label="ovw_queue", save=True)
     # A specificity queue is now one merged run in a single folder, so it gets a

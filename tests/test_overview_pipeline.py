@@ -52,16 +52,78 @@ def _overview_dataset(tmp_path, n=24):
     )
 
 
+_FAST_OVERVIEW_DEFAULTS = {
+    "include_significance_audit": False,
+    "include_scorecard": False,
+    "include_readiness": False,
+}
+
+_OVERVIEW_PLOTS_OFF = {
+    "plot_missingness": False,
+    "plot_covariation": False,
+    "plot_group_counts": False,
+    "plot_availability": False,
+    "plot_descriptives": False,
+    "plot_normality": False,
+    "plot_outliers": False,
+    "plot_covariation_pairs": False,
+    "plot_condition_distributions": False,
+    "plot_condition_distribution_zscores": False,
+    "plot_condition_fingerprint": False,
+    "plot_condition_variability": False,
+    "plot_effect_sizes": False,
+    "plot_significance_audit": False,
+    "plot_scorecard": False,
+    "plot_readiness": False,
+}
+
+_MINIMAL_SAVED_OVERVIEW = {
+    **_FAST_OVERVIEW_DEFAULTS,
+    **_OVERVIEW_PLOTS_OFF,
+    "include_group_counts": False,
+    "include_descriptives": False,
+    "include_normality": False,
+    "include_outliers": False,
+    "include_covariation": False,
+    "include_condition_distributions": False,
+    "include_effect_sizes": False,
+    "save": True,
+    "montage": False,
+}
+
+_AUDIT_ONLY_OVERVIEW = {
+    "include_inventory": False,
+    "include_group_counts": False,
+    "include_descriptives": False,
+    "include_normality": False,
+    "include_outliers": False,
+    "include_covariation": False,
+    "include_condition_distributions": False,
+    "include_effect_sizes": False,
+    "include_significance_audit": True,
+    "include_scorecard": False,
+    "include_readiness": False,
+}
+
+
+def _data_overview_fast(exp, **kwargs):
+    params = dict(_FAST_OVERVIEW_DEFAULTS)
+    params.update(kwargs)
+    return pipeline.data_overview(exp, **params)
+
+
 def test_registry_alias_resolves_to_data_overview():
     assert "data_overview_pipeline" in PLOT_REGISTRY
     func = _resolve_func(PLOT_REGISTRY["data_overview_pipeline"])
-    assert func is pipeline.data_overview
+    assert func.__module__ == "PyFLASH.pipeline"
+    assert func.__name__ == pipeline.data_overview.__name__
 
 
 def test_data_overview_classifies_columns_and_counts_sentinel_vs_nan(tmp_path):
     exp = _overview_dataset(tmp_path)
 
-    res = pipeline.data_overview(exp, run_label="overview_basic", save=True)
+    res = _data_overview_fast(
+        exp, run_label="overview_basic", save=True, montage=False)
 
     inv = res["column_inventory"].set_index("column")
     # dtype classification: numeric metrics vs string/identifier/constant.
@@ -125,7 +187,7 @@ def test_data_overview_classifies_columns_and_counts_sentinel_vs_nan(tmp_path):
 def test_data_overview_flags_planted_outlier_animal(tmp_path):
     exp = _overview_dataset(tmp_path)
 
-    res = pipeline.data_overview(exp, run_label="overview_outlier", save=False)
+    res = _data_overview_fast(exp, run_label="overview_outlier", save=False)
 
     animals = res["outlier_animals"]
     assert "S05" in set(animals["AnimalName"])
@@ -140,7 +202,7 @@ def test_data_overview_flags_planted_outlier_animal(tmp_path):
 def test_data_overview_can_use_legacy_iqr_mad_screen(tmp_path):
     exp = _overview_dataset(tmp_path)
 
-    res = pipeline.data_overview(
+    res = _data_overview_fast(
         exp, outlier_methods=("iqr", "mad"), run_label="overview_iqr_mad",
         save=False)
 
@@ -155,7 +217,7 @@ def test_data_overview_can_use_legacy_iqr_mad_screen(tmp_path):
 def test_data_overview_detects_covarying_pair(tmp_path):
     exp = _overview_dataset(tmp_path)
 
-    res = pipeline.data_overview(
+    res = _data_overview_fast(
         exp, covariation_threshold=0.9, run_label="overview_cov", save=False)
 
     cov = res["covariation"]
@@ -169,7 +231,7 @@ def test_data_overview_detects_covarying_pair(tmp_path):
 def test_data_overview_panels_by_condition(tmp_path):
     exp = _overview_dataset(tmp_path)
 
-    res = pipeline.data_overview(
+    res = _data_overview_fast(
         exp, by="conditions", run_label="overview_by_cond", save=False)
 
     # group_counts is design-level and always reports per-condition Ns.
@@ -191,7 +253,7 @@ def test_data_overview_panels_by_condition(tmp_path):
 def test_data_overview_condition_distributions_can_group_by_factor(tmp_path):
     exp = _overview_dataset(tmp_path)
 
-    res = pipeline.data_overview(
+    res = _data_overview_fast(
         exp,
         factor="Diagnosis",
         effect_control="Control",
@@ -218,7 +280,7 @@ def test_data_overview_specificity_queue_merges_into_one_folder(tmp_path):
         exp,
         specificity=[("Diagnosis", "Control"), ("Diagnosis", "AD")],
         run_label="overview_diag_queue",
-        save=True,
+        **_MINIMAL_SAVED_OVERVIEW,
     )
 
     assert res.get("queued") is not True
@@ -233,8 +295,8 @@ def test_data_overview_specificity_queue_merges_into_one_folder(tmp_path):
     data_files = set(os.listdir(res["data_dir"]))
     assert "column_inventory_Diagnosis.Control.csv" in data_files
     assert "column_inventory_Diagnosis.AD.csv" in data_files
-    # One combined overview montage spans the whole queue.
-    assert res.get("montage") and os.path.isfile(res["montage"])
+    # Montage behavior for this queue path is covered in test_pipeline_montage.
+    assert "montage" not in res
 
 
 def test_data_overview_section_toggles_skip_work(tmp_path):
@@ -253,6 +315,7 @@ def test_data_overview_section_toggles_skip_work(tmp_path):
         include_effect_sizes=False,
         run_label="overview_inventory_only",
         save=True,
+        montage=False,
     )
 
     assert res["descriptives"].empty
@@ -307,7 +370,7 @@ def test_data_overview_role_classification_bool_vs_int(tmp_path):
     exp = SimpleNamespace(summary=summary, summaries={"SCN": summary},
                           fig_path=fig_path, data_path=data_path, condition_list=[])
 
-    res = pipeline.data_overview(
+    res = _data_overview_fast(
         exp, include_covariation=False, run_label="roles", save=False)
 
     inv = res["column_inventory"].set_index("column")
@@ -323,7 +386,8 @@ def test_data_overview_runs_index_numeric_without_inventory(tmp_path):
     exp = _overview_dataset(tmp_path)
 
     res = pipeline.data_overview(
-        exp, include_inventory=False, run_label="ovw_noinv", save=True)
+        exp, include_inventory=False, run_label="ovw_noinv",
+        **_MINIMAL_SAVED_OVERVIEW)
 
     # With the inventory section off, the runs index still records the
     # matrix-numeric column count rather than a misleading zero.
@@ -341,12 +405,12 @@ def test_data_overview_auto_slug_varies_with_qc_settings(tmp_path):
     # No explicit run_label: the auto-slug must fold in output-changing QC
     # settings, so two different configs land in different run folders and
     # if_exists='skip' can't return a stale run computed under other settings.
-    r1 = pipeline.data_overview(exp, covariation_threshold=0.80, save=False)
-    r2 = pipeline.data_overview(exp, covariation_threshold=0.95, save=False)
+    r1 = _data_overview_fast(exp, covariation_threshold=0.80, save=False)
+    r2 = _data_overview_fast(exp, covariation_threshold=0.95, save=False)
     assert r1["run_label"] != r2["run_label"]
 
-    r3 = pipeline.data_overview(exp, mad_threshold=3.5, save=False)
-    r4 = pipeline.data_overview(exp, mad_threshold=2.0, save=False)
+    r3 = _data_overview_fast(exp, mad_threshold=3.5, save=False)
+    r4 = _data_overview_fast(exp, mad_threshold=2.0, save=False)
     assert r3["run_label"] != r4["run_label"]
 
 
@@ -357,9 +421,9 @@ def test_split_by_condition_matches_by_conditions(tmp_path):
     # exactly, so the new resolver is a strict superset of the old behaviour.
     exp = _overview_dataset(tmp_path)
 
-    r_split = pipeline.data_overview(
+    r_split = _data_overview_fast(
         exp, split_by="Condition", run_label="split_cond", save=False)
-    r_by = pipeline.data_overview(
+    r_by = _data_overview_fast(
         exp, by="conditions", run_label="by_cond", save=False)
 
     assert r_split["groups"] == r_by["groups"] == ["WT", "KO"]
@@ -374,7 +438,7 @@ def test_split_by_cross_yields_composite_product_cells(tmp_path):
     # and AND-intersected animals; each cell holds 6 of the 24 animals.
     exp = _overview_dataset(tmp_path)
 
-    res = pipeline.data_overview(
+    res = _data_overview_fast(
         exp, split_by=["Condition", "Sex"], split_mode="cross",
         run_label="split_cross", save=False)
 
@@ -408,7 +472,7 @@ def test_split_by_cross_drops_empty_product_cells(tmp_path):
         fig_path=fig_path, data_path=data_path,
         condition_list=[SimpleNamespace(name="WT"), SimpleNamespace(name="KO")])
 
-    res = pipeline.data_overview(
+    res = _data_overview_fast(
         exp, split_by=["Condition", "Sex"], split_mode="cross",
         include_covariation=False, run_label="split_empty", save=False)
 
@@ -420,7 +484,7 @@ def test_split_mode_parallel_concatenates_axes(tmp_path):
     # Condition and Sex axes never collide.
     exp = _overview_dataset(tmp_path)
 
-    res = pipeline.data_overview(
+    res = _data_overview_fast(
         exp, split_by=["Condition", "Sex"], split_mode="parallel",
         run_label="split_parallel", save=False)
 
@@ -435,10 +499,10 @@ def test_split_settings_produce_distinct_run_slugs(tmp_path):
     # can't reuse (if_exists='skip') a run computed under a different split.
     exp = _overview_dataset(tmp_path)
 
-    single = pipeline.data_overview(exp, split_by="Condition", save=False)
-    crossed = pipeline.data_overview(
+    single = _data_overview_fast(exp, split_by="Condition", save=False)
+    crossed = _data_overview_fast(
         exp, split_by=["Condition", "Sex"], split_mode="cross", save=False)
-    parallel = pipeline.data_overview(
+    parallel = _data_overview_fast(
         exp, split_by=["Condition", "Sex"], split_mode="parallel", save=False)
 
     slugs = {single["run_label"], crossed["run_label"], parallel["run_label"]}
@@ -449,10 +513,10 @@ def test_split_by_unresolvable_key_raises(tmp_path):
     exp = _overview_dataset(tmp_path)
 
     with pytest.raises(ValueError):
-        pipeline.data_overview(
+        _data_overview_fast(
             exp, split_by="NotAColumn", run_label="bad_key", save=False)
     with pytest.raises(ValueError):
-        pipeline.data_overview(
+        _data_overview_fast(
             exp, split_by=["Condition", "NotAColumn"], run_label="bad_key2",
             save=False)
 
@@ -462,7 +526,7 @@ def test_split_effect_control_composite_rule(tmp_path):
     # remaining-key (Sex) stratum: WT|F controls KO|F and WT|M controls KO|M.
     exp = _overview_dataset(tmp_path)
 
-    res = pipeline.data_overview(
+    res = _data_overview_fast(
         exp, split_by=["Condition", "Sex"], split_mode="cross",
         effect_control="WT", run_label="split_ctrl", save=False)
 
@@ -475,7 +539,7 @@ def test_split_effect_control_composite_rule(tmp_path):
     assert pairs == {("WT | F", "KO | F"), ("WT | M", "KO | M")}
 
     # An exact composite label names a single control across all cells.
-    res_exact = pipeline.data_overview(
+    res_exact = _data_overview_fast(
         exp, split_by=["Condition", "Sex"], split_mode="cross",
         effect_control="WT | F", run_label="split_ctrl_exact", save=False)
     assert res_exact["effect_control"] == "WT | F"
@@ -484,7 +548,7 @@ def test_split_effect_control_composite_rule(tmp_path):
 
     # An effect_control that is neither a label nor a first-key component errors.
     with pytest.raises(ValueError):
-        pipeline.data_overview(
+        _data_overview_fast(
             exp, split_by=["Condition", "Sex"], split_mode="cross",
             effect_control="Nope", run_label="split_ctrl_bad", save=False)
 
@@ -536,7 +600,8 @@ def test_significance_audit_frame_shape_and_annotation(tmp_path):
     exp = _overview_dataset(tmp_path)
 
     res = pipeline.data_overview(
-        exp, by="conditions", include_significance_audit=True,
+        exp, by="conditions", data_cols=["A", "B", "C"],
+        **_AUDIT_ONLY_OVERVIEW, audit_axis=None,
         run_label="audit_basic", save=False)
 
     audit = res["significance_audit"]
@@ -571,7 +636,8 @@ def test_significance_audit_screen_adds_fdr_with_p_counterpart(tmp_path):
     exp = _overview_dataset(tmp_path)
 
     res = pipeline.data_overview(
-        exp, by="conditions", include_significance_audit=True, screen=True,
+        exp, by="conditions", data_cols=["A", "B", "C"],
+        **_AUDIT_ONLY_OVERVIEW, screen=True, audit_axis=None, run_both=False,
         run_label="audit_screen", save=False)
 
     audit = res["significance_audit"]
@@ -589,15 +655,35 @@ def test_significance_audit_gate_fdr_requires_screen(tmp_path):
 
     with pytest.raises(ValueError):
         pipeline.data_overview(
-            exp, by="conditions", include_significance_audit=True,
+            exp, by="conditions", data_cols=["A"],
+            **_AUDIT_ONLY_OVERVIEW,
             gate="fdr", screen=False, run_label="audit_gate_bad", save=False)
+
+
+def test_data_overview_allows_equivalent_filter_alias_shapes(tmp_path):
+    exp = _overview_dataset(tmp_path)
+
+    res = pipeline.data_overview(
+        exp,
+        by="all",
+        data_cols=["A"],
+        specificity=("Sex", "F"),
+        filter_by={"Sex": "F"},
+        **_FAST_OVERVIEW_DEFAULTS,
+        **_OVERVIEW_PLOTS_OFF,
+        run_label="equivalent_filter_aliases",
+        save=False,
+    )
+
+    assert res["n_rows"] == int((exp.summary["Sex"] == "F").sum())
 
 
 def test_significance_audit_selects_nonparametric_for_skewed_marker(tmp_path):
     exp = _skewed_three_group_dataset(tmp_path)
 
     res = pipeline.data_overview(
-        exp, by="conditions", include_significance_audit=True,
+        exp, by="conditions", data_cols=["Skew"],
+        **_AUDIT_ONLY_OVERVIEW, audit_axis=None,
         run_label="audit_kw", save=False)
 
     audit = res["significance_audit"]
@@ -619,8 +705,11 @@ def test_significance_audit_writes_csv_and_emits_describe_record(tmp_path):
     report.start()
     try:
         res = pipeline.data_overview(
-            exp, by="conditions", include_significance_audit=True,
-            run_label="audit_describe", save=True)
+            exp, by="conditions", data_cols=["A"],
+            **_AUDIT_ONLY_OVERVIEW, audit_axis=None,
+            **_OVERVIEW_PLOTS_OFF,
+            run_both=False, run_label="audit_describe",
+            save=True, montage=False)
         records = report.collect()
     finally:
         if report.is_active():
@@ -637,8 +726,11 @@ def test_significance_audit_figure_written_and_on_montage(tmp_path):
     # Stage 04: the audit is on by default and renders a status-matrix figure that
     # rides the overview montage.
     exp = _overview_dataset(tmp_path)
-    res = pipeline.data_overview(exp, by="conditions", run_label="audit_fig",
-                                 save=True)
+    res = pipeline.data_overview(
+        exp, by="conditions", data_cols=["A"], run_label="audit_fig",
+        **_AUDIT_ONLY_OVERVIEW, audit_axis=None,
+        **{**_OVERVIEW_PLOTS_OFF, "plot_significance_audit": True},
+        run_both=False, save=True)
     assert os.path.isfile(os.path.join(res["fig_dir"], "Significance Audit.svg"))
     montage = res.get("montage")
     assert montage and os.path.isfile(montage)
@@ -649,8 +741,13 @@ def test_significance_audit_figure_written_and_on_montage(tmp_path):
 
     # plot_significance_audit=False suppresses only the figure, not the CSV.
     res2 = pipeline.data_overview(exp, by="conditions",
-                                  plot_significance_audit=False,
-                                  run_label="audit_nofig", save=True)
+                                  data_cols=["A"],
+                                  **_AUDIT_ONLY_OVERVIEW,
+                                  audit_axis=None,
+                                  **_OVERVIEW_PLOTS_OFF,
+                                  run_both=False,
+                                  run_label="audit_nofig", save=True,
+                                  montage=False)
     assert not os.path.isfile(
         os.path.join(res2["fig_dir"], "Significance Audit.svg"))
     assert os.path.isfile(os.path.join(res2["data_dir"], "significance_audit.csv"))
@@ -692,13 +789,13 @@ def test_sig_audit_matrix_renderer_status_and_columns():
 
 
 # ── Stage 05: audit transition axis ──────────────────────────────────────────
-def _split_flip_dataset(tmp_path):
+def _split_flip_dataset(tmp_path, per_cell=6):
     """Balanced Condition x Sex where GAINED has opposite WT-vs-KO effects in F vs
     M (cancels when pooled -> significant only within a sex) and STRONG has a real
     condition effect in both sexes (stays significant)."""
     rng = np.random.default_rng(0)
-    design = ([("WT", "F")] * 10 + [("WT", "M")] * 10
-              + [("KO", "F")] * 10 + [("KO", "M")] * 10)
+    design = ([("WT", "F")] * per_cell + [("WT", "M")] * per_cell
+              + [("KO", "F")] * per_cell + [("KO", "M")] * per_cell)
     n = len(design)
     gained, strong = [], []
     for c, s in design:
@@ -754,15 +851,19 @@ def test_audit_transitions_classifier():
 
 def test_audit_transitions_split_axis_end_to_end(tmp_path):
     exp = _split_flip_dataset(tmp_path)
-    res = pipeline.data_overview(exp, by="conditions", audit_axis="split",
-                                 run_label="tr_split", save=True)
+    res = pipeline.data_overview(
+        exp, by="conditions", data_cols=["GAINED", "STRONG"],
+        **_AUDIT_ONLY_OVERVIEW, audit_axis="split",
+        **{**_OVERVIEW_PLOTS_OFF, "plot_significance_audit": True},
+        run_both=False, run_label="tr_split", save=True, montage=False)
     tr = res["significance_audit_transitions"]
     assert not tr.empty
     # GAINED cancels when pooled but is significant within a sex.
     gained = tr[tr["marker"] == "GAINED"]
     assert not gained.empty and (gained["state_vs_baseline"] == "gained").any()
     assert res["n_audit_gained"] >= 1
-    # transition CSV lists exactly the gained/lost cells; figure rides the montage.
+    # transition CSV lists exactly the gained/lost cells; figure rendering is
+    # covered here, while the montage layer is covered in test_pipeline_montage.
     csv = os.path.join(res["data_dir"], "significance_audit_transitions.csv")
     assert os.path.isfile(csv)
     saved = pd.read_csv(csv)
@@ -776,15 +877,15 @@ def test_audit_transitions_fdr_and_exclusions_axes(tmp_path):
     valid = {"gained", "lost", "significant", "not_significant"}
     for axis in ("fdr", "exclusions"):
         res = pipeline.data_overview(
-            exp, by="conditions", audit_axis=axis, screen=(axis == "fdr"),
-            run_label=f"tr_{axis}", save=True)
+            exp, by="conditions", data_cols=["GAINED", "STRONG"],
+            **_AUDIT_ONLY_OVERVIEW,
+            audit_axis=axis, screen=(axis == "fdr"),
+            run_both=False, run_label=f"tr_{axis}", save=False)
         states = res["significance_audit_transitions"]
         # every classified cell is one of the four valid states.
         if not states.empty:
             assert set(states["state_vs_baseline"]) <= valid
-        # a valid transition matrix figure is produced for the axis.
-        assert os.path.isfile(
-            os.path.join(res["fig_dir"], "Significance Audit Transitions.svg"))
+        assert "significance_audit_transitions" in res
 
 
 def test_audit_transition_matrix_renders_four_states():
@@ -815,7 +916,7 @@ def test_audit_transition_matrix_renders_four_states():
 def test_provenance_json_written(tmp_path):
     import json
     exp = _overview_dataset(tmp_path)
-    res = pipeline.data_overview(exp, run_label="prov", save=True)
+    res = pipeline.data_overview(exp, run_label="prov", **_MINIMAL_SAVED_OVERVIEW)
     prov_path = os.path.join(res["data_dir"], "provenance.json")
     assert os.path.isfile(prov_path)
     prov = json.load(open(prov_path, encoding="utf-8"))
@@ -837,7 +938,8 @@ def test_provenance_source_hash_matches(tmp_path):
     src.write_bytes(b"pyflash-source-bytes" * 500)
     exp = _overview_dataset(tmp_path)
     exp.source_path = str(src)
-    res = pipeline.data_overview(exp, run_label="prov_hash", save=True)
+    res = pipeline.data_overview(
+        exp, run_label="prov_hash", **_MINIMAL_SAVED_OVERVIEW)
     prov = json.load(open(os.path.join(res["data_dir"], "provenance.json"),
                           encoding="utf-8"))
     assert prov["source"]["path"] == str(src)
@@ -850,7 +952,8 @@ def test_provenance_survives_bad_source_path(tmp_path):
     import json
     exp = _overview_dataset(tmp_path)
     exp.source_path = str(tmp_path / "does_not_exist.pkl")
-    res = pipeline.data_overview(exp, run_label="prov_bad", save=True)
+    res = pipeline.data_overview(
+        exp, run_label="prov_bad", **_MINIMAL_SAVED_OVERVIEW)
     assert res["column_inventory"] is not None            # run still succeeded
     prov = json.load(open(os.path.join(res["data_dir"], "provenance.json"),
                           encoding="utf-8"))
@@ -862,8 +965,13 @@ def test_sig_audit_bundle_assembled(tmp_path):
     from PyFLASH import pipeline_io
     exp = _overview_dataset(tmp_path)
     res = pipeline.data_overview(exp, by="conditions",
-                                 include_significance_audit=True,
-                                 run_label="bundle", save=True)
+                                 data_cols=["A"],
+                                 **_AUDIT_ONLY_OVERVIEW,
+                                 audit_axis=None,
+                                 **_OVERVIEW_PLOTS_OFF,
+                                 run_both=False,
+                                 run_label="bundle", save=True,
+                                 montage=False)
     bundle = res["sig_audit_bundle"]
     assert bundle and os.path.isdir(bundle)
     der = os.path.join(bundle, "data", "der", "significance_audit.csv")
@@ -883,7 +991,11 @@ def test_sig_audit_bundle_assembled(tmp_path):
 # ── Stage 07: dataset-health scorecard + narrative ───────────────────────────
 def test_scorecard_written_and_on_montage(tmp_path):
     exp = _overview_dataset(tmp_path)
-    res = pipeline.data_overview(exp, by="conditions", run_label="sc", save=True)
+    res = pipeline.data_overview(
+        exp, by="conditions", run_label="sc",
+        include_significance_audit=False, include_readiness=False,
+        **{**_OVERVIEW_PLOTS_OFF, "plot_scorecard": True},
+        save=True)
     sc = res["scorecard"]
     assert list(sc["axis"]) == ["missingness", "n_adequacy", "normality",
                                 "outliers", "collinearity", "imbalance"]
@@ -904,7 +1016,9 @@ def test_scorecard_emits_dataset_health_describe_record(tmp_path):
     report.start()
     try:
         res = pipeline.data_overview(exp, by="conditions",
-                                     run_label="sc_health", save=True)
+                                     include_significance_audit=False,
+                                     include_readiness=False,
+                                     run_label="sc_health", save=False)
         records = report.collect()
     finally:
         if report.is_active():
@@ -932,10 +1046,13 @@ def test_scorecard_thresholds_are_parameters(tmp_path):
         condition_list=[SimpleNamespace(name="WT"), SimpleNamespace(name="KO")])
     os.makedirs(exp.fig_path, exist_ok=True)
     os.makedirs(exp.data_path, exist_ok=True)
-    base = pipeline.data_overview(exp, by="conditions", run_label="sc_a", save=False)
+    base = pipeline.data_overview(
+        exp, by="conditions", include_significance_audit=False,
+        include_readiness=False, run_label="sc_a", save=False)
     assert base["scorecard"].set_index("axis").loc["imbalance", "grade"] == "amber"
     tight = pipeline.data_overview(
-        exp, by="conditions", run_label="sc_b", save=False,
+        exp, by="conditions", include_significance_audit=False,
+        include_readiness=False, run_label="sc_b", save=False,
         scorecard_thresholds={"imbalance_amber": 1.1, "imbalance_red": 1.9})
     assert tight["scorecard"].set_index("axis").loc["imbalance", "grade"] == "red"
 
@@ -959,7 +1076,7 @@ def test_scorecard_narrative_deterministic_and_grounded(tmp_path):
     n1 = _ovw_narrative(sc, group_counts, covariation, 12)
     n2 = _ovw_narrative(sc, group_counts, covariation, 12)
     assert n1 == n2                               # deterministic
-    assert "12 animal" in n1 and "WT: 8" in n1 and "KO: 4" in n1
+    assert "12 subject" in n1 and "WT: 8" in n1 and "KO: 4" in n1
     assert "|r|=0.97" in n1                        # grounded in the computed value
 
 
@@ -992,8 +1109,11 @@ def test_mde_is_monotonic_in_n():
 
 def test_power_mde_and_readiness_written(tmp_path):
     exp = _readiness_dataset(tmp_path)
-    res = pipeline.data_overview(exp, by="conditions", run_label="p8",
-                                 save=True, power=0.8)
+    res = pipeline.data_overview(
+        exp, by="conditions", run_label="p8",
+        include_significance_audit=False,
+        **{**_OVERVIEW_PLOTS_OFF, "plot_readiness": True},
+        save=True, montage=False, power=0.8)
     mde = res["mde_by_marker"]
     assert set(["marker", "n1", "n2", "mde_g", "underpowered"]).issubset(mde.columns)
     assert np.isfinite(pd.to_numeric(mde["mde_g"], errors="coerce")).any()
@@ -1035,7 +1155,8 @@ def test_power_mde_emits_describe_records(tmp_path):
     report.start()
     try:
         res = pipeline.data_overview(exp, by="conditions",
-                                     run_label="p8_rec", save=True)
+                                     include_significance_audit=False,
+                                     run_label="p8_rec", save=False)
         records = report.collect()
     finally:
         if report.is_active():

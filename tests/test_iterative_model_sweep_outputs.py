@@ -3,6 +3,13 @@ from types import SimpleNamespace
 import pandas as pd
 
 from PyFLASH.modelling import iterative_model_sweep
+from PyFLASH.spec import PLOT_REGISTRY, _resolve_func, describe_status
+
+
+def test_iterative_model_sweep_registered_and_covered():
+    assert "iterative_model_sweep" in PLOT_REGISTRY
+    assert _resolve_func(PLOT_REGISTRY["iterative_model_sweep"]) is iterative_model_sweep
+    assert describe_status("iterative_model_sweep") == "covered"
 
 
 def test_iterative_model_sweep_co_locates_tables_and_plots(tmp_path):

@@ -182,8 +182,13 @@ def test_plot_marker_pca_smoke():
         "Abeta_PercentArea": rng.normal(5, 1, n),
         "CK1d_IntDen": rng.normal(50, 10, n),
     })
-    fig, data = pe.plot_marker_pca(_Batch(summary), column_strings=["Count", "IntDen", "PercentArea"],
-                                   hue_column="Condition", return_data=True)
+    fig, data = pe.plot_marker_pca(
+        summary,
+        data_cols=["Iba1_Count", "GFAP_IntDen", "Abeta_PercentArea", "CK1d_IntDen"],
+        filter_by={"Condition": "hAPP"},
+        hue_column="Condition",
+        return_data=True,
+    )
     assert fig is not None
     assert list(data["scores"].columns[:2]) == ["PC1", "PC2"]
     assert len(data["explained_variance"]) >= 2
@@ -192,7 +197,15 @@ def test_plot_marker_pca_smoke():
 def test_plot_timecourse_smoke():
     from PyFLASH import plotting as pe
     df, tmap = _timecourse_df()
-    fig, fits = pe.plot_timecourse(_Batch(df), "Abeta_Count", time_col="Time",
-                                   group_col="Genotype", time_map=tmap, return_data=True)
+    fig, fits = pe.plot_timecourse(
+        df,
+        "Abeta_Count",
+        time_col="Time",
+        group_col="Genotype",
+        subject_col="AnimalName",
+        filter_by={"Genotype": ["hAPP", "NLGF"]},
+        time_map=tmap,
+        return_data=True,
+    )
     assert fig is not None
     assert set(fits) == {"hAPP", "NLGF"}

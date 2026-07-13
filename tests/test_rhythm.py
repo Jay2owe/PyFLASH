@@ -165,6 +165,30 @@ def test_rhythm_cosinor_mode(tmp_path):
     assert "cosinor_parameters" in res
 
 
+def test_rhythm_accepts_raw_dataframe_group_aliases(tmp_path):
+    df = _two_group_timeseries().rename(columns={"grp": "Diagnosis"})
+    df["Subject"] = [f"S{i:02d}" for i in range(len(df))]
+
+    res = pipeline.rhythm(
+        df,
+        data_cols=["val"],
+        time_col="Time",
+        group_cols=["Diagnosis"],
+        subject_col="Subject",
+        period=24,
+        save=False,
+        run_label="df_aliases",
+        dataframe_kwargs={
+            "fig_path": str(tmp_path / "Python Figures"),
+            "data_path": str(tmp_path / "Data and Stats"),
+        },
+    )
+
+    assert res["mode"] == "cosinor"
+    assert res["group_col"] == "Diagnosis"
+    assert set(res["groups"]) == {"A", "B"}
+
+
 # ── pipeline: parameter mode + multiplicity convention ───────────────────────
 def test_rhythm_parameter_mode_and_phase_test(tmp_path):
     exp = _exp(_param_df(), tmp_path)

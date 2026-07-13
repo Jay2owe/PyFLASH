@@ -14,6 +14,7 @@ from PyFLASH.spec import (
     DESCRIBE_COVERED, DESCRIBE_EXEMPT, DESCRIBE_UNREVIEWED, PLOT_REGISTRY,
     _resolve_func, describe_status,
 )
+from PyFLASH.stats import runOWA
 
 
 def _gc_dataset(tmp_path, n_per=12, with_roi=False):
@@ -113,6 +114,63 @@ def test_default_all_pairs_without_control(tmp_path):
     # One contrast between the two conditions, regardless of reference direction.
     comps = set(rt["comparison"])
     assert comps in ({"AD vs WT"}, {"WT vs AD"})
+
+
+def test_group_comparison_uses_selected_parametric_posthoc(tmp_path):
+    rng = np.random.default_rng(0)
+    labels = ["WT", "MCI", "AD"]
+    rows = []
+    grouped = []
+    for label, mean in zip(labels, [-0.2, 0.0, 0.2]):
+        values = rng.normal(mean, 1.0, 20)
+        grouped.append(pd.Series(values))
+        for idx, value in enumerate(values):
+            rows.append({
+                "AnimalName": f"{label}{idx:02d}",
+                "Condition": label,
+                "A": float(value),
+            })
+    summary = pd.DataFrame(rows)
+    exp = SimpleNamespace(
+        summary=summary,
+        summaries={"SCN": summary},
+        fig_path=str(tmp_path / "Python Figures"),
+        data_path=str(tmp_path / "Data and Stats"),
+        condition_list=[SimpleNamespace(name=label) for label in labels],
+    )
+    os.makedirs(exp.fig_path, exist_ok=True)
+    os.makedirs(exp.data_path, exist_ok=True)
+    comparisons = ["1-2", "1-3", "2-3"]
+
+    res = pipeline.group_comparison(
+        exp,
+        data_cols=["A"],
+        comparisons=comparisons,
+        posthoc="Holm-Sidak",
+        save=False,
+        plot_bars=False,
+        plot_forest=False,
+        plot_volcano=False,
+        plot_stats_matrix=False,
+    )
+    expected, _, _, expected_dict, expected_posthoc = runOWA(
+        grouped,
+        comparisons,
+        {},
+        posthoc="Holm-Sidak",
+    )
+
+    assert expected_posthoc == "Holm-Sidak"
+    assert expected == expected_dict["Holm-Sidak"][1]
+    rt = res["results_table"].sort_values("comparison").reset_index(drop=True)
+    assert res["tests"] == ["One-Way ANOVA"]
+    assert len(rt) == len(comparisons)
+    assert rt["p"].tolist() == pytest.approx(
+        pd.DataFrame({
+            "comparison": ["MCI vs WT", "AD vs WT", "AD vs MCI"],
+            "p": expected,
+        }).sort_values("comparison")["p"].tolist()
+    )
 
 
 def test_screen_mode_adds_q_but_keeps_p(tmp_path):

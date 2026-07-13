@@ -82,7 +82,8 @@ def test_available_plots_matches_registry():
     assert plots == sorted(PLOT_REGISTRY)
     # Spot-check a few expected keys are present.
     for key in ("mean_bars", "matrices", "radar", "regressions", "volcano",
-                "histograms", "adjusted_correlation_pipeline"):
+                "histograms", "scatter_3d", "adjusted_correlation_pipeline",
+                "iterative_model_sweep"):
         assert key in plots
 
 
@@ -109,6 +110,56 @@ def test_build_plot_kwargs_maps_columns_to_filtered_columns():
     assert "columns" not in kwargs
 
 
+def test_build_plot_kwargs_maps_data_cols_to_filtered_columns_when_needed():
+    def filtered_only(_batch, filtered_columns=None):
+        return filtered_columns
+
+    kwargs = services._build_plot_kwargs(filtered_only, {"data_cols": ["A", "B"]})
+    assert kwargs == {"filtered_columns": ["A", "B"]}
+
+
+def test_build_plot_kwargs_rejects_conflicting_column_aliases():
+    def filtered_only(_batch, filtered_columns=None):
+        return filtered_columns
+
+    with pytest.raises(ValueError, match="data_cols|columns"):
+        services._build_plot_kwargs(
+            filtered_only,
+            {"columns": ["A"], "data_cols": ["B"]},
+        )
+
+
+def test_build_plot_kwargs_allows_equivalent_column_aliases():
+    def filtered_only(_batch, filtered_columns=None):
+        return filtered_columns
+
+    kwargs = services._build_plot_kwargs(
+        filtered_only,
+        {"columns": ["A"], "data_cols": ["A"]},
+    )
+    assert kwargs == {"filtered_columns": ["A"]}
+
+
+def test_build_plot_kwargs_maps_filter_by_to_specificity_when_needed():
+    def specificity_only(_batch, specificity=None):
+        return specificity
+
+    kwargs = services._build_plot_kwargs(
+        specificity_only, {"filter_by": {"Sex": "Female", "Region": "SCN"}}
+    )
+    assert kwargs == {"specificity": {"Sex": "Female", "Region": "SCN"}}
+
+
+def test_build_plot_kwargs_converts_direct_filter_by_to_tuple():
+    def filter_by_func(_batch, filter_by=None):
+        return filter_by
+
+    kwargs = services._build_plot_kwargs(
+        filter_by_func, {"filter_by": ["Time", "WeekEight"]}
+    )
+    assert kwargs == {"filter_by": ("Time", "WeekEight")}
+
+
 def test_resolve_func_supports_pipeline_module_targets():
     func = _resolve_func(PLOT_REGISTRY["correlation_pipeline"])
     assert func.__module__ == "PyFLASH.pipeline"
@@ -116,6 +167,12 @@ def test_resolve_func_supports_pipeline_module_targets():
     adjusted = _resolve_func(PLOT_REGISTRY["adjusted_correlation_pipeline"])
     assert adjusted.__module__ == "PyFLASH.pipeline"
     assert adjusted.__name__ == "adjusted_correlation"
+    model_sweep = _resolve_func(PLOT_REGISTRY["iterative_model_sweep"])
+    assert model_sweep.__module__ == "PyFLASH.modelling"
+    assert model_sweep.__name__ == "iterative_model_sweep"
+    scatter = _resolve_func(PLOT_REGISTRY["scatter_3d"])
+    assert scatter.__module__ == "PyFLASH.plotting"
+    assert scatter.__name__ == "plot_scatter_3d"
 
 
 def test_pyflash_runner_resolves_pipeline_registry_aliases():
@@ -348,6 +405,10 @@ def test_pyflash_runner_describe_status_for_func():
     assert runner._describe_status_for_func("PyFLASH.pipeline.correlation") == "covered"
     assert runner._describe_status_for_func("linear_model_pipeline") == "covered"
     assert runner._describe_status_for_func("PyFLASH.pipeline.linear_model") == "covered"
+    assert runner._describe_status_for_func("iterative_model_sweep") == "covered"
+    assert runner._describe_status_for_func("PyFLASH.modelling.iterative_model_sweep") == "covered"
+    assert runner._describe_status_for_func("scatter_3d") == "exempt"
+    assert runner._describe_status_for_func("plot_scatter_3d") == "exempt"
     assert runner._describe_status_for_func("not_a_real_plot") == "unclassified"
 
 
@@ -366,6 +427,8 @@ def test_pyflash_runner_discover_includes_registered_pipeline_signatures():
     corr = discovered["registered_callables"]["correlation_pipeline"]
     adjusted = discovered["registered_callables"]["adjusted_correlation_pipeline"]
     linear = discovered["registered_callables"]["linear_model_pipeline"]
+    sweep = discovered["registered_callables"]["iterative_model_sweep"]
+    scatter = discovered["registered_callables"]["scatter_3d"]
 
     assert corr["target"] == "PyFLASH.pipeline.correlation"
     assert "gate='p'" in corr["signature"]
@@ -375,9 +438,17 @@ def test_pyflash_runner_discover_includes_registered_pipeline_signatures():
     assert linear["target"] == "PyFLASH.pipeline.linear_model"
     assert "dependent_variables=None" in linear["signature"]
     assert "group=None" in linear["signature"]
+    assert sweep["target"] == "PyFLASH.modelling.iterative_model_sweep"
+    assert "target:" in sweep["signature"]
+    assert "model_preset:" in sweep["signature"]
+    assert "'ultra_compact'" in sweep["signature"]
+    assert scatter["target"] == "PyFLASH.plotting.plot_scatter_3d"
+    assert "x, y, z" in scatter["signature"]
     assert "correlation_pipeline" not in discovered["undocumented"]
     assert "adjusted_correlation_pipeline" not in discovered["undocumented"]
     assert "linear_model_pipeline" not in discovered["undocumented"]
+    assert "iterative_model_sweep" not in discovered["undocumented"]
+    assert "scatter_3d" not in discovered["undocumented"]
 
 
 def test_pyflash_reference_updater_is_current():
@@ -422,6 +493,14 @@ def test_build_plot_kwargs_converts_specificity_queue():
         func, {"specificity": [["Time", "WeekEight"], ["Region", "CA1"]]}
     )
     assert kwargs["specificity"] == [("Time", "WeekEight"), ("Region", "CA1")]
+
+
+def test_build_plot_kwargs_preserves_specificity_mapping_as_and_filter():
+    func = _resolve_func(PLOT_REGISTRY["mean_bars"])
+    kwargs = services._build_plot_kwargs(
+        func, {"specificity": {"Sex": "Female", "Region": "SCN"}}
+    )
+    assert kwargs["specificity"] == {"Sex": "Female", "Region": "SCN"}
 
 
 def test_build_plot_kwargs_drops_unknown_keys():

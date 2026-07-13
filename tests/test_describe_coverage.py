@@ -53,6 +53,6 @@ def test_known_covered_plots_stay_covered():
     # These have verified emit paths; guard against silent declassification.
     for name in ('mean_bars', 'regressions',
                  'correlation_pipeline', 'adjusted_correlation_pipeline',
-                 'linear_model_pipeline'):
+                 'linear_model_pipeline', 'iterative_model_sweep'):
         assert name in spec.PLOT_REGISTRY
         assert spec.describe_status(name) == 'covered'

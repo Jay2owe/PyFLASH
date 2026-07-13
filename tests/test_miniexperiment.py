@@ -78,3 +78,31 @@ def test_miniexperiment_maps_flat_human_csv_conditions(tmp_path):
     assert summary["Condition"].tolist() == ["ADFemale", "MCIMale", "ControlMale"]
     assert "Period(h)" in summary.columns
     assert batch.data["Data"].df["Condition"].tolist() == ["ADFemale", "MCIMale", "ControlMale"]
+
+
+def test_miniexperiment_accepts_subject_column_alias(tmp_path):
+    _write_csv(
+        tmp_path / "Data.csv",
+        "\n".join([
+            "Subject ID,Diagnosis,Sex,Period (h)",
+            "1,Dementia-AD,Female,24.2",
+            "2,MCI-AD,Male,23.9",
+        ]),
+    )
+
+    exp = MiniExperiment(
+        "Human",
+        str(tmp_path),
+        subject_column="Subject ID",
+        factor_mappings={
+            "Diagnosis": {"Dementia-AD": "AD", "MCI-AD": "MCI"},
+            "Sex": {"male": "Male", "female": "Female"},
+        },
+    )
+    batch = Batch("human", [exp], _human_conditions(), str(tmp_path))
+
+    batch.processData(import_images=False, progress=False)
+
+    summary = batch.summary.sort_values("AnimalName").reset_index(drop=True)
+    assert summary["AnimalName"].tolist() == ["1", "2"]
+    assert exp.subject_column == "Subject ID"
