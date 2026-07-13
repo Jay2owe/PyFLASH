@@ -17,6 +17,7 @@ import inspect
 import importlib
 
 from PyFLASH._logging import logger as _log
+from PyFLASH.aliases import _same_value
 
 
 # Lazy string references to avoid circular imports
@@ -131,6 +132,76 @@ def describe_status(short_name):
 # Keys consumed by the spec runner, not passed to plot functions
 _SPEC_KEYS = {'type', 'batch'}
 
+_SPEC_PARAM_ALIASES = {
+    "columns": "filtered_columns",
+    "data_cols": "filtered_columns",
+    "data_col_contains": "column_strings",
+    "data_col_regex": "regex_string",
+    "data_col_exclude": "exclude",
+    "against_data_cols": "against_columns",
+    "against_data_col_contains": "against_column_strings",
+    "against_data_col_regex": "against_regex_string",
+    "against_data_col_exclude": "against_exclude",
+    "leading_data_cols": "first_columns",
+    "filter_by": "specificity",
+    "group_list": "conditions",
+    "groups": "conditions",
+    "group_col": "condition_col",
+    "group_cols": "factor_cols",
+    "subject_col": "animal_col",
+    "subject_filter": "animal_filter",
+    "subjects": "animals",
+    "subject_min_flags": "animal_min_flags",
+    "show_subject_points": "show_animal_xs",
+    "subject_point_marker": "animal_x_marker",
+    "subject_point_size": "animal_x_size",
+    "subject_point_alpha": "animal_x_alpha",
+    "subject_point_color": "animal_x_color",
+}
+
+
+def _resolve_param_alias(key, valid_params, value=None):
+    if key == "split_by" and key not in valid_params:
+        split_text = str(value)
+        if split_text in {"group", "groups", "condition"} and "by" in valid_params:
+            return "by"
+        if split_text in {"all", "conditions"} and "by" in valid_params:
+            return "by"
+        if "factor" in valid_params:
+            return "factor"
+        if "by" in valid_params:
+            return "by"
+    if key in valid_params:
+        return key
+    alias = _SPEC_PARAM_ALIASES.get(key)
+    if alias in valid_params:
+        return alias
+    return key
+
+
+def _normalize_spec_param_value(key, param_key, value):
+    if key == 'split_by' and param_key == 'by':
+        split_text = str(value)
+        if split_text in {'group', 'groups', 'condition'}:
+            return 'conditions'
+    if param_key in {'specificity', 'filter_by'}:
+        return _convert_specificity(value)
+    return value
+
+
+def _set_resolved_kwarg(kwargs, sources, param_key, value, source_key):
+    """Assign a resolved spec/UI kwarg, rejecting conflicting aliases."""
+
+    if param_key in kwargs:
+        if _same_value(kwargs[param_key], value):
+            return
+        previous = sources.get(param_key, param_key)
+        raise ValueError(
+            f"Use either {source_key}= or {previous}=, not both with different values."
+        )
+    kwargs[param_key] = value
+    sources[param_key] = source_key
+
 
 def _resolve_func(name):
     """Resolve a plot function by name from the plotting module."""
@@ -151,7 +222,17 @@ def _convert_specificity(value):
     """
     if value is None:
         return None
+    if isinstance(value, dict):
+        items = list(value.items())
+        if len(items) != 1:
+            return dict(items)
+        key, val = items[0]
+        if isinstance(val, list):
+            return tuple([key, *val])
+        return (key, val)
     if isinstance(value, list) and len(value) > 0:
+        if isinstance(value[0], dict):
+            return [_convert_specificity(v) for v in value]
         if isinstance(value[0], list):
             return [tuple(v) for v in value]
         return tuple(value)
@@ -250,17 +331,24 @@ def validate_spec(spec, experiments=None):
             func = _resolve_func(func_name)
             sig = inspect.signature(func)
             valid_params = set(sig.parameters.keys())
+            resolved_params = {}
+            resolved_sources = {}
 
             for key in entry:
                 if key in _SPEC_KEYS:
                     continue
-                if key == 'columns' and 'filtered_columns' in valid_params:
-                    continue
-                if key not in valid_params:
+                param_key = _resolve_param_alias(key, valid_params, entry.get(key))
+                if param_key not in valid_params:
                     warnings.append(
                         f"{prefix}: unknown parameter '{key}' for {plot_type}. "
                         f"Valid: {', '.join(sorted(valid_params - {'experiment', 'source'}))}"
                     )
+                    continue
+                value = _normalize_spec_param_value(key, param_key, entry.get(key))
+                try:
+                    _set_resolved_kwarg(resolved_params, resolved_sources, param_key, value, key)
+                except ValueError as e:
+                    errors.append(f"{prefix}: {e}")
         except Exception as e:
             warnings.append(f"{prefix}: could not validate params: {e}")
 
@@ -269,9 +357,12 @@ def validate_spec(spec, experiments=None):
         if exp_dict:
             exp = exp_dict.get(batch_name) if batch_name else next(iter(exp_dict.values()), None)
         if exp is not None:
-            cols = entry.get('columns') or entry.get('filtered_columns')
+            cols = entry.get('data_cols') or entry.get('columns') or entry.get('filtered_columns')
             if isinstance(cols, list):
-                available = set(exp.summary.columns)
+                summary = exp if hasattr(exp, "columns") else getattr(exp, "summary", None)
+                if summary is None:
+                    continue
+                available = set(summary.columns)
                 for col in cols:
                     if col not in available:
                         warnings.append(
@@ -317,7 +408,7 @@ def run_spec(experiments, path):
             _log.warn(f"Spec error: {e}")
         raise ValueError(
             f"Spec validation failed with {len(errors)} error(s). "
-            "Fix the errors above and retry."
+            "Fix the errors above and retry.\n" + "\n".join(errors)
         )
 
     results = []
@@ -338,6 +429,7 @@ def run_spec(experiments, path):
 
         # Build kwargs
         kwargs = {}
+        kwargs_sources = {}
         sig = inspect.signature(func)
         valid_params = set(sig.parameters.keys())
 
@@ -345,16 +437,9 @@ def run_spec(experiments, path):
             if key in _SPEC_KEYS:
                 continue
 
-            param_key = key
-            if (key == 'columns'
-                    and key not in valid_params
-                    and 'filtered_columns' in valid_params):
-                param_key = 'filtered_columns'
-
-            if key == 'specificity':
-                value = _convert_specificity(value)
-
-            kwargs[param_key] = value
+            param_key = _resolve_param_alias(key, valid_params, value)
+            value = _normalize_spec_param_value(key, param_key, value)
+            _set_resolved_kwarg(kwargs, kwargs_sources, param_key, value, key)
 
         try:
             batch_label = f" [{batch_name}]" if batch_name else ""

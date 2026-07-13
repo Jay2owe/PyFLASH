@@ -16,6 +16,7 @@ from PyFLASH.aliases import (
     resolve_data_column_aliases,
     resolve_split_filter_aliases,
 )
+from PyFLASH.aesthetics import pyflash_point_size, pyflash_style_value
 from PyFLASH.modelling import (
     _fit_linear_models,
     _linear_model_reference_value,
@@ -279,7 +280,7 @@ def _pipeline_specificity_queue(func, experiment, specificity, kwargs, pipeline_
                 if key in combined[blk]:
                     combined[blk][key] = _sum_across(
                         lambda r, b=blk, k=key: (r.get(b) or {}).get(k))
-    # Matrix-difference counts also sum across conditions.
+    # Matrix-difference counts also sum across groups.
     if isinstance(combined.get("difference_matrices"), dict):
         for key in ("n_comparisons", "n_difference_tests", "n_difference_significant"):
             if key in combined["difference_matrices"]:
@@ -656,7 +657,8 @@ def correlation(
                     res["coef"][m], None,
                     f"{disp} Correlation Matrix{suffix}  (* {star})",
                     tick_label_size,
-                    cmap="coolwarm", vmin=-1.0, vmax=1.0,
+                    cmap=pyflash_style_value("matrix_cmap", "coolwarm"),
+                    vmin=-1.0, vmax=1.0,
                     colorbar_label=f"{disp} coefficient",
                     annotation_df=res["p"][m],
                     annotation_alpha=alpha,
@@ -669,7 +671,8 @@ def correlation(
                         res["p"][m], None,
                         f"{disp} P-Value Matrix{suffix}  (* p<{alpha:g})",
                         tick_label_size,
-                        cmap=_CORR_PVALUE_CMAP, vmin=0.0, vmax=1.0,
+                        cmap=pyflash_style_value("pvalue_cmap", _CORR_PVALUE_CMAP),
+                        vmin=0.0, vmax=1.0,
                         colorbar_label="raw p value",
                         annotation_df=res["p"][m],
                         annotation_alpha=alpha,
@@ -681,7 +684,8 @@ def correlation(
                         res["q"][m], None,
                         f"{disp} FDR Q-Value Matrix{suffix}  (* q<{alpha:g})",
                         tick_label_size,
-                        cmap=_CORR_QVALUE_CMAP, vmin=0.0, vmax=1.0,
+                        cmap=pyflash_style_value("qvalue_cmap", _CORR_QVALUE_CMAP),
+                        vmin=0.0, vmax=1.0,
                         colorbar_label="FDR q value",
                         annotation_df=res["q"][m],
                         annotation_alpha=alpha,
@@ -1562,7 +1566,8 @@ def _adj_write_corr_block(
                     res["coef"][method], None,
                     f"{block_name} {disp} Correlation Matrix{suffix}  (* {star})",
                     tick_label_size,
-                    cmap="coolwarm", vmin=-1.0, vmax=1.0,
+                    cmap=pyflash_style_value("matrix_cmap", "coolwarm"),
+                    vmin=-1.0, vmax=1.0,
                     colorbar_label=f"{disp} coefficient",
                     annotation_df=res["p"][method],
                     annotation_alpha=alpha,
@@ -1575,7 +1580,8 @@ def _adj_write_corr_block(
                         res["p"][method], None,
                         f"{block_name} {disp} P-Value Matrix{suffix}  (* p<{alpha:g})",
                         tick_label_size,
-                        cmap=_CORR_PVALUE_CMAP, vmin=0.0, vmax=1.0,
+                        cmap=pyflash_style_value("pvalue_cmap", _CORR_PVALUE_CMAP),
+                        vmin=0.0, vmax=1.0,
                         colorbar_label="raw p value",
                         annotation_df=res["p"][method],
                         annotation_alpha=alpha,
@@ -1587,7 +1593,8 @@ def _adj_write_corr_block(
                         res["q"][method], None,
                         f"{block_name} {disp} FDR Q-Value Matrix{suffix}  (* q<{alpha:g})",
                         tick_label_size,
-                        cmap=_CORR_QVALUE_CMAP, vmin=0.0, vmax=1.0,
+                        cmap=pyflash_style_value("qvalue_cmap", _CORR_QVALUE_CMAP),
+                        vmin=0.0, vmax=1.0,
                         colorbar_label="FDR q value",
                         annotation_df=res["q"][method],
                         annotation_alpha=alpha,
@@ -2144,7 +2151,7 @@ def adjusted_correlation(
 # ── Data overview pipeline ───────────────────────────────────────────────────
 # Identifier/metadata columns that are never treated as analysable metrics
 # (mirrors the ``to_drop`` set used when ``experiment.createSummary`` builds the
-# per-animal summary).
+# per-subject summary).
 _OVW_ID_COLS = {
     "Region", "AnimalName", "Condition", "Label", "ImageROI",
     "ROINameRaw", "Hemisphere", "ROI",
@@ -2267,7 +2274,7 @@ def _ovw_column_inventory(scope_df, columns):
 
 
 def _ovw_group_counts(experiment, scope_df):
-    """N animals per condition/factor level (the design table), plus the
+    """N subjects per group/factor level (the design table), plus the
     per-level distribution of ``numSections`` (ROI replication) when present."""
     rows = []
     has_animal = "AnimalName" in scope_df.columns
@@ -2299,7 +2306,7 @@ def _ovw_group_counts(experiment, scope_df):
 
 
 def _ovw_availability(scope_df, numeric_df, numeric_cols, group_col="Condition"):
-    """Per-numeric-column count of non-missing animals within each condition.
+    """Per-numeric-column count of non-missing subjects within each group.
 
     Surfaces markers that were only measured in some conditions (sentinels mean
     a metric can be entirely absent for a group).
@@ -2384,8 +2391,8 @@ def _ovw_outliers(scope_df, numeric_df, numeric_cols, groups,
                   methods, iqr_k, mad_threshold, rout_q):
     """Flag outliers per (group, column) via :func:`stats_extra.flag_outliers`.
 
-    Tags ``AnimalName`` so a flagged value points straight at the animal, and
-    rolls up to a per-animal "flagged on N metrics" candidate-for-review table.
+    Tags ``AnimalName`` so a flagged value points straight at the subject, and
+    rolls up to a per-subject "flagged on N metrics" candidate-for-review table.
     """
     from PyFLASH.stats_extra import flag_outliers
 
@@ -2560,7 +2567,7 @@ def _ovw_limit_columns(columns, max_items):
 
 
 def _ovw_group_counts_figure(group_counts, tick_label_size, max_items):
-    """Bar chart of animal counts per condition/factor level."""
+    """Bar chart of subject counts per group/factor level."""
     if group_counts is None or group_counts.empty:
         return None
     df = group_counts.copy()
@@ -2589,7 +2596,7 @@ def _ovw_group_counts_figure(group_counts, tick_label_size, max_items):
         [_ovw_short_label(v, 42) for v in detail["label"]],
         fontsize=max(7, int(tick_label_size) - 8),
     )
-    ax.set_xlabel("Animals", fontsize=max(9, int(tick_label_size) - 5))
+    ax.set_xlabel("Subjects", fontsize=max(9, int(tick_label_size) - 5))
     ax.set_title("Group counts", fontsize=int(tick_label_size))
     xmax = float(detail["n_animals"].max()) if len(detail) else 0.0
     ax.set_xlim(0, xmax * 1.15 + 1)
@@ -2604,7 +2611,7 @@ def _ovw_group_counts_figure(group_counts, tick_label_size, max_items):
 
 
 def _ovw_availability_figure(availability, tick_label_size, max_items):
-    """Heatmap of available animal counts for each metric x condition."""
+    """Heatmap of available subject counts for each metric x group."""
     if availability is None or availability.empty:
         return None
     df = availability.copy()
@@ -2637,14 +2644,14 @@ def _ovw_availability_figure(availability, tick_label_size, max_items):
                     ax.text(j, i, str(int(val)), ha="center", va="center",
                             fontsize=7, color="black")
     cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
-    cbar.set_label("Non-missing animals")
+    cbar.set_label("Non-missing subjects")
     fig.tight_layout()
     return fig
 
 
 def _ovw_metric_distributions_figure(numeric_df, numeric_cols, tick_label_size,
                                      max_items):
-    """Z-scored animal-level distributions for each numeric summary metric."""
+    """Z-scored subject-level distributions for each numeric summary metric."""
     cols = []
     data = []
     for col in _ovw_limit_columns(numeric_cols, max_items):
@@ -2675,8 +2682,8 @@ def _ovw_metric_distributions_figure(numeric_df, numeric_cols, tick_label_size,
             artist.set_linewidth(1.2)
     for yi, vals in enumerate(data, start=1):
         jitter = np.linspace(-0.17, 0.17, len(vals)) if len(vals) > 1 else [0]
-        ax.scatter(vals, yi + jitter, s=14, color="#252525", alpha=0.55,
-                   linewidths=0)
+        ax.scatter(vals, yi + jitter, s=pyflash_point_size(backend="area"),
+                   color="#252525", alpha=0.55, linewidths=0)
     ax.axvline(0, color="#636363", linewidth=1.0, alpha=0.7)
     ax.set_yticks(range(1, n + 1))
     ax.set_yticklabels([_ovw_short_label(c, 44) for c in cols],
@@ -2812,7 +2819,7 @@ def _ovw_outlier_summary_figure(outliers, outlier_animals, tick_label_size,
         ax.set_xlabel("Flags")
         ax.set_title("Animals")
     else:
-        ax.text(0.5, 0.5, "No flagged animals", ha="center", va="center")
+        ax.text(0.5, 0.5, "No flagged subjects", ha="center", va="center")
         ax.set_axis_off()
 
     ax = axes[1]
@@ -2899,7 +2906,7 @@ def _ovw_groups_from_column(scope_df, num_df, column, specificity):
 
 def _ovw_distribution_groups(experiment, scope_df, num_df, by, factor, specificity,
                              split_by=None, split_mode="cross"):
-    """Groups used for condition/factor distribution views.
+    """Groups used for group/factor distribution views.
 
     The broader overview defaults to pooled ``by='all'`` for some analyses, but
     distribution views are most useful split by Condition. When no factor is
@@ -3150,7 +3157,7 @@ def _ovw_scaled_group_values(numeric_df, col, idx, scale):
 def _ovw_condition_distribution_figure(numeric_df, numeric_cols, groups,
                                        tick_label_size, max_items,
                                        plot_kind="raincloud", scale="raw"):
-    """Small-multiple condition/factor distributions for selected metrics."""
+    """Small-multiple group/factor distributions for selected metrics."""
     cols = _ovw_limit_columns(numeric_cols, max_items)
     if not cols or not groups:
         return None
@@ -3515,9 +3522,11 @@ def _ovw_audit_statistics(test, post_hoc, results_dict, tokens):
         owa = results_dict.get("OWA")
         if owa is not None:
             omnibus = _f(owa[0])
-        tukey = results_dict.get("Tukey")
-        if tukey is not None and isinstance(tukey[0], (list, tuple)):
-            stat_list = [_f(s) for s in tukey[0]]
+        ph = results_dict.get(str(post_hoc).replace(" ", "-"))
+        if ph is None:
+            ph = results_dict.get("Tukey")
+        if ph is not None and isinstance(ph[0], (list, tuple)):
+            stat_list = [_f(s) for s in ph[0]]
     elif test == "Kruskal-Wallis":
         kw = results_dict.get("KW")
         if kw is not None:
@@ -3537,7 +3546,7 @@ def _ovw_partner_p(a, b, *, parametric_primary):
 
     Concordance asks whether the significance verdict flips between the parametric
     and non-parametric family on the SAME two groups, so the partner is a direct
-    pairwise test (cost-negligible at animal-level N): Mann-Whitney U when the
+    pairwise test (cost-negligible at subject-level N): Mann-Whitney U when the
     primary was parametric, Welch's t-test when it was non-parametric. Returns
     ``(p, test_name)``; ``(nan, name)`` on any failure so a partner error can never
     break the primary result.
@@ -3568,11 +3577,11 @@ def _ovw_significance_audit(experiment, scope_df, num_df, numeric_cols, groups, 
     """Per-marker mean-comparison audit over the resolved overview ``groups``.
 
     For every numeric marker the shared engine auto-selects the test, and for every
-    resolved contrast we record its p, the matched animal-level effect size
+    resolved contrast we record its p, the matched subject-level effect size
     (Hedges g for parametric / rank-biserial for non-parametric) with a bootstrap
     CI, and — when ``run_both`` — the partner family's p plus a ``concordant`` flag
     (``(p < alpha) == (p_partner < alpha)``). A contrast whose either group has
-    fewer than ``min_n`` animals yields a neutral NaN-p row, never a spurious "not
+    fewer than ``min_n`` subjects yields a neutral NaN-p row, never a spurious "not
     significant". When ``screen``, a per-contrast FDR q across markers is added.
     Returns a tidy frame with one row per (marker, contrast); see
     :data:`_OVW_AUDIT_COLUMNS`. ``scope_df`` is accepted for signature parity with
@@ -3759,7 +3768,7 @@ def _ovw_audit_axis_transitions(experiment, scope_df, num_df, numeric_cols,
     Axes: ``"split"`` (default) = pooled condition-only vs the same contrast tested
     within each ``added_factor`` (e.g. Sex) level — "lost" flags a pooling artefact,
     "gained" a split-specific effect; ``"fdr"`` = raw p vs FDR q (does it survive
-    multiplicity?); ``"exclusions"`` = all animals vs outlier-excluded (fragility).
+    multiplicity?); ``"exclusions"`` = all subjects vs outlier-excluded (fragility).
     Returns ``(joined_states, transitions, figure_df)`` where ``figure_df`` carries a
     ``status_code`` column the Stage-04 renderer draws as the four-state matrix, or
     three empty frames when the axis can't be built (e.g. no added factor).
@@ -3892,7 +3901,7 @@ def _ovw_provenance(experiment, resolved_params, data_dir, *,
 
     Captures PyFLASH + interpreter + numpy/pandas/scipy versions, a best-effort git
     commit, the source pickle path + sha256 (with size/mtime, hash capped by
-    ``hash_max_mb`` so a 288 MB pickle can't stall a run), N animals, and the
+    ``hash_max_mb`` so a 288 MB pickle can't stall a run), N subjects, and the
     resolved analysis parameters. Never raises — a hashing / version / path error
     records a ``null`` (with a reason) instead of breaking an otherwise-good run.
     """
@@ -4102,7 +4111,7 @@ def _ovw_scorecard(inventory, group_counts, normality, covariation,
     out_frac = (float(n_outlier_animals) / float(n_animals)) if n_animals else np.nan
     rows.append(("outliers",
                  _ovw_grade(out_frac, th["outlier_amber_frac"], th["outlier_red_frac"]),
-                 (f"{int(n_outlier_animals)}/{int(n_animals)} animals"
+                 (f"{int(n_outlier_animals)}/{int(n_animals)} subjects"
                   if n_animals else "n/a"),
                  f"amber>={th['outlier_amber_frac']:.0%} red>={th['outlier_red_frac']:.0%}"))
 
@@ -4136,7 +4145,7 @@ def _ovw_narrative(scorecard, group_counts, covariation, n_animals):
             and "grouping" in group_counts.columns):
         cg = group_counts[group_counts["grouping"].astype(str) == "Condition"]
         conds = [f"{r['level']}: {int(r['n_animals'])}" for _, r in cg.iterrows()]
-    head = f"This dataset has {int(n_animals)} animal(s)"
+    head = f"This dataset has {int(n_animals)} subject(s)"
     if conds:
         head += f" across {len(conds)} condition(s) ({', '.join(conds)})"
     parts.append(head + ".")
@@ -4430,10 +4439,10 @@ def data_overview(
 
     A companion to :func:`correlation` / :func:`adjusted_correlation` that answers
     "what does this dataset look like?" before any hypothesis test: the Ns, which
-    columns are numeric vs string, what is missing vs not-measured, which animals
+    columns are numeric vs string, what is missing vs not-measured, which subjects
     look like outliers, and which metrics covary (collinearity/redundancy).
 
-    Everything is computed on the **animal-level summary** (N = animals), treating
+    Everything is computed on the **subject-level summary** (N = subjects), treating
     the ``NOT_INCLUDED_IN_EXPERIMENT`` sentinel as distinct from a true NaN.
 
     Sections (each toggleable, written as its own CSV)
@@ -4441,16 +4450,16 @@ def data_overview(
     - ``column_inventory`` — per-column role (numeric / categorical / boolean /
       identifier / constant / all-missing), dtype, present / missing / sentinel
       counts, unique count, and the numeric-vs-string column tally.
-    - ``group_counts`` — N animals per condition / factor level (the design
+    - ``group_counts`` — N subjects per group / factor level (the design
       table) plus per-level ``numSections`` (ROI replication) min/median/max,
-      and ``availability_by_condition`` (non-missing animals per metric per
-      condition).
+      and ``availability_by_condition`` (non-missing subjects per metric per
+      group).
     - ``descriptives`` — per (group, column) n / mean / sd / sem / median / IQR /
       CV / skew / kurtosis.
     - ``normality`` — per (group, column) Shapiro-Wilk and D'Agostino with a
       parametric-vs-nonparametric hint.
     - ``outliers`` — ROUT, Tukey IQR-fence, and/or modified-z (MAD) flags
-      tagged by ``AnimalName``, plus a per-animal ``outlier_animals`` roll-up.
+      tagged by ``AnimalName``, plus a per-subject ``outlier_animals`` roll-up.
     - ``covariation`` — pooled pairwise |r| screen for redundant/collinear
       metrics, with the full ``covariation_matrix``.
 
@@ -4480,7 +4489,7 @@ def data_overview(
     - ``split_by="Condition"`` reproduces ``by="conditions"`` exactly.
     - ``split_by=["Condition", "Sex"]`` with ``split_mode="cross"`` (default)
       panels the cartesian product first-key-major, with composite labels
-      (``"WT | Male"``) over AND-intersected animals; empty product cells drop out.
+      (``"WT | Male"``) over AND-intersected subjects; empty product cells drop out.
     - ``split_mode="parallel"`` instead concatenates each axis independently, its
       labels prefixed by the key (``"Sex=Male"``) so the axes never collide.
 
@@ -4527,7 +4536,7 @@ def data_overview(
     )
     specificity = prefer_alias(
         specificity,
-        filter_by,
+        normalize_filter_by(filter_by),
         current_name="specificity",
         alias_name="filter_by",
     )
@@ -5118,7 +5127,9 @@ def data_overview(
             cfig = _corr_pipeline_heatmap(
                 covariation_matrix, sig,
                 f"Covariation matrix  (* |r|>={covariation_threshold:g})",
-                tick_label_size, cmap="coolwarm", vmin=-1.0, vmax=1.0,
+                tick_label_size,
+                cmap=pyflash_style_value("matrix_cmap", "coolwarm"),
+                vmin=-1.0, vmax=1.0,
                 colorbar_label=f"{_correlation_display_name(_normalize_correlation_method(covariation_method))} r",
             )
             save_fig(cfig, fig_dir, f"Covariation Matrix{spec_tag}", montage=True)
@@ -5255,7 +5266,7 @@ def data_overview(
         _log.confirm(
             f"[data_overview] {resolved_label}: {manifest['n_columns']} columns "
             f"({manifest['n_numeric_columns']} numeric), "
-            f"{manifest['n_rows']} rows, {n_outlier_animals} animals flagged, "
+            f"{manifest['n_rows']} rows, {n_outlier_animals} subjects flagged, "
             f"{n_covarying_pairs} covarying pairs, {n_effect_sizes} effect sizes."
         )
 
@@ -5397,7 +5408,7 @@ def _gc_resolve_comparisons(comparisons, group_labels, control):
 
 
 def _gc_group_arrays(num_df, col, groups):
-    """Return ``{label: np.ndarray}`` of animal-level values for one column."""
+    """Return ``{label: np.ndarray}`` of subject-level values for one column."""
     out = {}
     for glabel, gidx, _spec in groups:
         vals = pd.to_numeric(
@@ -5408,7 +5419,7 @@ def _gc_group_arrays(num_df, col, groups):
 
 
 def _gc_marker_tokens(pairs, arrays, min_n):
-    """For one marker, drop pairs whose either group has < ``min_n`` animals.
+    """For one marker, drop pairs whose either group has < ``min_n`` subjects.
 
     Returns ``(involved_labels, tokens, surviving_pairs)`` where ``tokens`` are
     1-based ``"i-j"`` indices into ``involved_labels`` (the groups actually tested
@@ -5450,9 +5461,11 @@ def _gc_extract_auto(test, post_hoc, results_dict, tokens):
         omn = results_dict.get("OWA")
         if omn is not None:
             omnibus = _f(omn[1])
-        tukey = results_dict.get("Tukey")
-        if tukey is not None and isinstance(tukey[1], (list, tuple)):
-            pair_list = [_f(p) for p in tukey[1]]
+        ph = results_dict.get(str(post_hoc).replace(" ", "-"))
+        if ph is None:
+            ph = results_dict.get("Tukey")
+        if ph is not None and isinstance(ph[1], (list, tuple)):
+            pair_list = [_f(p) for p in ph[1]]
     elif test == "Kruskal-Wallis":
         kw = results_dict.get("KW")
         if kw is not None:
@@ -5510,8 +5523,8 @@ def _gc_mixed_pair(roi_long, ref, group):
     import warnings
 
     sub = roi_long[roi_long["group"].isin([ref, group])].copy()
-    # Need >= 2 ROI-backed animals in EACH group for the random-effect model to be
-    # estimable; otherwise return NaN so the marker falls back to the animal-mean
+    # Need >= 2 ROI-backed subjects in EACH group for the random-effect model to be
+    # estimable; otherwise return NaN so the marker falls back to the subject-mean
     # engine (a 1-vs-many animal split could otherwise fit a misleading p).
     per_group = sub.groupby("group")["AnimalName"].nunique()
     if int(per_group.get(ref, 0)) < 2 or int(per_group.get(group, 0)) < 2:
@@ -5537,7 +5550,7 @@ def _gc_mixed_pair(roi_long, ref, group):
 
 
 def _gc_resample_hier(animal_arrays, rng):
-    """One hierarchical-bootstrap replicate: resample animals, then ROIs within."""
+    """One hierarchical-bootstrap replicate: resample subjects, then ROIs within."""
     n = len(animal_arrays)
     means = []
     for k in rng.integers(0, n, n):
@@ -5654,10 +5667,10 @@ def group_comparison(
     _tag_specificity=False,
     _slug_specificity=None,
 ):
-    """Per-marker group comparison across conditions, in one manifested run.
+    """Per-marker group comparison across groups, in one manifested run.
 
     For every numeric marker, the correct test is run across the chosen groups
-    (the experimental unit is the **animal**), the matched animal-level effect
+    (the experimental unit is the **subject**), the matched subject-level effect
     size (Hedges g + bootstrap CI; rank-biserial for non-parametric tests) and
     achieved power are attached, and the run writes a results table, headline
     figures (volcano, effect-size forest, marker x contrast stats matrix), a
@@ -5666,7 +5679,7 @@ def group_comparison(
 
     Engines (``engine=``)
     ---------------------
-    ``'auto'`` (default) tests animal-level summary values via the shared
+    ``'auto'`` (default) tests subject-level summary values via the shared
     :func:`PyFLASH.stats.multipleComparisons` engine (auto parametric/
     non-parametric by normality) — identical to the per-marker bar charts.
     ``'mixed'`` fits a linear mixed model on ROI-level rows (animal as a random
@@ -5841,8 +5854,8 @@ def group_comparison(
         aliases=getattr(experiment, "aliases", None))
 
     # Map each in-scope animal to its comparison-group label so the nested (ROI)
-    # engines + SuperPlots group by the SAME factor/condition as the animal-mean
-    # engine, restricted to the specificity-filtered animals.
+    # engines + SuperPlots group by the SAME factor/condition as the subject-mean
+    # engine, restricted to the specificity-filtered subjects.
     animal_group_map = _animal_group_map_from_groups(scope_df, groups)
 
     def _run_auto(col, arrays, involved, tokens):
@@ -5881,7 +5894,7 @@ def group_comparison(
         involved, tokens, surv = _gc_marker_tokens(pairs, arrays, min_n)
         if not surv:
             skipped.append({"marker": str(col),
-                            "reason": f"fewer than 2 groups with >= {int(min_n)} animals"})
+                            "reason": f"fewer than 2 groups with >= {int(min_n)} subjects"})
             continue
 
         engine_used = engine
@@ -5895,7 +5908,7 @@ def group_comparison(
 
         # Nested engines first; fall the whole marker back to the animal-mean
         # engine when ROI data is absent OR the nested fit yields no usable p
-        # (singular/non-converged/too few ROI animals).
+        # (singular/non-converged/too few ROI subjects).
         if engine in ("mixed", "bootstrap"):
             roi_long = _resolve_marker_roi_long(experiment, col, animal_group_map, _roi_base)
             if roi_long is None:
@@ -7321,8 +7334,15 @@ def rhythm(
     period=24.0,
     period_free=False,
     method="pooled",
+    conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
     animal_col=None,
     subject_col=None,
+    group_list=None,
+    groups=None,
+    group_cols=None,
+    dataframe_kwargs=None,
     phase_col=None,
     param_cols=None,
     radius_col=None,
@@ -7390,16 +7410,35 @@ def rhythm(
         current_name="animal_col",
         alias_name="subject_col",
     )
+    if group_col is None and group_cols is not None:
+        _group_cols = [group_cols] if isinstance(group_cols, str) else list(group_cols)
+        group_col = _group_cols[0] if len(_group_cols) == 1 else "Condition"
+    elif group_col is None and any(v is not None for v in (conditions, group_list, groups)):
+        group_col = "Condition"
     specificity = prefer_alias(
         specificity,
         normalize_filter_by(filter_by),
         current_name="specificity",
         alias_name="filter_by",
     )
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
 
     if is_specificity_queue(specificity):
         kwargs = dict(locals())
         kwargs.pop("experiment")
+        kwargs.pop("_group_cols", None)
         return _pipeline_specificity_queue(
             rhythm, experiment, specificity, kwargs, "rhythm",
             append_index=_rhythm_append_runs_index)

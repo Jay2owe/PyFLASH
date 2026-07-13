@@ -75,7 +75,7 @@ class Config:
     STATS_CACHE = False  # True to cache stats results within a session
 
     # ── Figure aesthetic / layout ──────────────────────────────────────
-    # HOUSE_STYLE applies the notebook's rc_params() house style on first
+    # HOUSE_STYLE applies the current set_pyflash_style() house style on first
     # plotting import so every figure shares one uniform aesthetic.
     # USE_PYFLASH_LAYOUT attaches the overlap-safe PyFlashLayout engine at save
     # time (shrinks over-long titles, lifts overlapping suptitles; never shrinks

@@ -519,4 +519,16 @@ class _CrossedConditionBuilder:
                         if i + 1 != ctrl_idx:
                             resolved.append(f'{ctrl_idx}-{i + 1}')
 
+
         return resolved if resolved else None
+
+
+# Public group-oriented aliases. The original condition names remain supported
+# for existing scripts and serialized objects; the aliases are the preferred
+# names for new user-facing examples.
+group = condition
+multiGroup = multiCondition
+groupList = conditionList
+zipGroups = zipConditions
+zipGroupLists = zipConditionLists
+GroupBuilder = ConditionBuilder

@@ -28,6 +28,13 @@ from matplotlib import pyplot as plt
 from PyFLASH._logging import logger as _log
 from PyFLASH.config import apply_matplotlib_fast_path
 apply_matplotlib_fast_path()
+from PyFLASH.aesthetics import pyflash_point_size
+from PyFLASH.dataframe import coerce_dataframe_input
+from PyFLASH.aliases import (
+    normalize_filter_by,
+    prefer_alias,
+    resolve_data_column_aliases,
+)
 try:
     from patsy import dmatrices
 except Exception:  # pragma: no cover - optional import fallback
@@ -1890,9 +1897,13 @@ def iterative_best_fit(
     column_strings=None,
     regex_string=None,
     predictor_exclude="",
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
     normalize_method: str = "minmax",
     excluded_predictors: Iterable[str] | None = None,
     hue_column: str = "Condition",
+    color_by: str | None = None,
     palette: dict | None = None,
     save: bool = True,
     dpi: int = 600,
@@ -1900,6 +1911,7 @@ def iterative_best_fit(
     verbose: bool = True,
     return_details: bool = False,
     specificity=None,
+    filter_by=None,
     exclude=None,
     cv_group_column: str | None = "AnimalName",
     cv_backend: str = "fast",
@@ -1908,6 +1920,16 @@ def iterative_best_fit(
     search_strategy: str = "exhaustive",
     beam_width: int = 100,
     batch_chunk_size: int = 5000,
+    conditions=None,
+    condition_col: str = "Condition",
+    factor_cols=None,
+    animal_col: str = "AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
+    dataframe_kwargs=None,
 ):
     """
     Iterative leave-one-out CV search for the best linear formula fit.
@@ -1938,6 +1960,42 @@ def iterative_best_fit(
     - batch_chunk_size: number of models per vectorised batch in the ultra
       backend.  Controls peak memory; default 5000 is fine for n < 1000.
     """
+    _, column_strings, regex_string, predictor_exclude = resolve_data_column_aliases(
+        filtered_columns=None,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=predictor_exclude,
+        data_cols=None,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    hue_column = prefer_alias(
+        hue_column,
+        color_by,
+        current_name="hue_column",
+        alias_name="color_by",
+        default="Condition",
+    )
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
+    batch = coerce_dataframe_input(
+        batch,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
     if not hasattr(batch, "summary"):
         raise ValueError("First argument must be a batch-like object exposing .summary.")
     df = getattr(batch, "summary", None)
@@ -2633,7 +2691,7 @@ def iterative_best_fit(
                 y="Actual",
                 hue=hue_column,
                 ax=ax,
-                s=70,
+                s=pyflash_point_size(backend="area"),
                 palette=palette,
             )
         else:
@@ -2642,7 +2700,7 @@ def iterative_best_fit(
                 x="Predicted",
                 y="Actual",
                 ax=ax,
-                s=70,
+                s=pyflash_point_size(backend="area"),
             )
         lo = float(np.nanmin(np.r_[scatter_df["Predicted"], scatter_df["Actual"]]))
         hi = float(np.nanmax(np.r_[scatter_df["Predicted"], scatter_df["Actual"]]))
@@ -4090,12 +4148,18 @@ def _write_classifier_sweep_readme(
 
 
 def iterative_model_sweep(
-    batch_or_df,
-    target: str,
+    batch_or_df=None,
+    target: str | None = None,
     possible_predictors: Iterable[str] | None = None,
+    data_cols: Iterable[str] | None = None,
+    predictors: Iterable[str] | None = None,
+    candidate_predictors: Iterable[str] | None = None,
     column_strings=None,
     regex_string=None,
     predictor_exclude="",
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
     excluded_predictors: Iterable[str] | None = None,
     max_features: int = 2,
     repeat_features: bool = False,
@@ -4105,6 +4169,7 @@ def iterative_model_sweep(
     cv: str = "stratified5",
     scoring: str = "balanced_accuracy",
     specificity=None,
+    filter_by=None,
     exclude=None,
     normalize_method: str = "zscore",
     search_strategy: str = "exhaustive",
@@ -4125,6 +4190,7 @@ def iterative_model_sweep(
     parallel_batch_size: int = 256,
     verbose: bool = True,
     return_details: bool = True,
+    data=None,
 ):
     """
     Iteratively sweep feature subsets and classifier families for a class target.
@@ -4166,6 +4232,51 @@ def iterative_model_sweep(
     dict by default, including the ranked score table, best feature subset,
     fitted final estimator, feature recurrence table, and output paths.
     """
+    batch_or_df = prefer_alias(
+        batch_or_df,
+        data,
+        current_name="batch_or_df",
+        alias_name="data",
+    )
+    if batch_or_df is None:
+        raise ValueError("iterative_model_sweep needs data= or a first positional data argument.")
+    if target is None:
+        raise ValueError("iterative_model_sweep needs target=.")
+    possible_predictors = prefer_alias(
+        possible_predictors,
+        data_cols,
+        current_name="possible_predictors",
+        alias_name="data_cols",
+    )
+    possible_predictors = prefer_alias(
+        possible_predictors,
+        predictors,
+        current_name="possible_predictors/data_cols",
+        alias_name="predictors",
+    )
+    possible_predictors = prefer_alias(
+        possible_predictors,
+        candidate_predictors,
+        current_name="possible_predictors/data_cols",
+        alias_name="candidate_predictors",
+    )
+    _, column_strings, regex_string, predictor_exclude = resolve_data_column_aliases(
+        filtered_columns=None,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=predictor_exclude,
+        data_cols=None,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
+
     if isinstance(batch_or_df, pd.DataFrame):
         source_df = batch_or_df
         batch_fig_path = None

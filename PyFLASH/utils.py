@@ -6,6 +6,7 @@ import os
 import re
 import math
 import time
+from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
@@ -102,8 +103,31 @@ def flatten_specificity_values(values):
     return out
 
 
+class HashableSpecificityMapping(dict):
+    """Mapping specificity that can also be used as a queue result key."""
+
+    def __hash__(self):
+        frozen = []
+        for key, value in self.items():
+            vals = flatten_specificity_values(
+                list(value) if isinstance(value, (list, tuple, set)) else [value]
+            )
+            frozen.append((str(key), tuple(str(v) for v in vals)))
+        return hash(tuple(frozen))
+
+
+def freeze_specificity_mapping(specificity):
+    """Return a hashable copy of mapping-style specificity filters."""
+
+    if isinstance(specificity, HashableSpecificityMapping):
+        return specificity
+    if isinstance(specificity, Mapping):
+        return HashableSpecificityMapping(specificity)
+    return specificity
+
+
 def is_specificity_queue(specificity):
-    """True when specificity is a list of 2+ specificity tuples.
+    """True when specificity is a list of specificity tuples/mappings.
 
     Example queue: [('Time', 'WeekFour'), ('Time', 'WeekEight')]
     Not a queue:   ('Time', 'WeekFour')
@@ -111,7 +135,7 @@ def is_specificity_queue(specificity):
     return (
         isinstance(specificity, (list, tuple))
         and len(specificity) > 0
-        and isinstance(specificity[0], (list, tuple))
+        and isinstance(specificity[0], (list, tuple, Mapping))
     )
 
 
@@ -119,6 +143,9 @@ def iter_specificities(specificity):
     """Yield individual specificity tuples from a queue or single spec."""
     if is_specificity_queue(specificity):
         for item in specificity:
+            if isinstance(item, Mapping):
+                yield freeze_specificity_mapping(item)
+                continue
             if isinstance(item, (list, tuple)) and len(item) >= 2:
                 yield tuple(item)
     else:
@@ -288,13 +315,7 @@ def raw_coloc_column_aliases(key):
     return list(dict.fromkeys([a for a in aliases if a != key_s]))
 
 
-def filter_df_by_specificity(df, specificity):
-    """Filter a DataFrame by a specificity tuple like ('Time', 'WeekEight')."""
-    if specificity is None:
-        return df
-    if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
-        return df
-    spec_key, *raw_vals = specificity
+def _filter_df_by_specificity_tuple(df, spec_key, raw_vals):
     resolved_key = resolve_column_key(df, spec_key)
     if resolved_key is None:
         return df
@@ -313,10 +334,40 @@ def filter_df_by_specificity(df, specificity):
     return df[col.isin(spec_vals)]
 
 
+def filter_df_by_specificity(df, specificity):
+    """Filter a DataFrame by a specificity tuple or mapping.
+
+    Tuple syntax filters one column, e.g. ``('Time', 'WeekEight')``.
+    Mapping syntax filters all keys with AND semantics, e.g.
+    ``{'Sex': 'Female', 'Region': 'SCN'}``.
+    """
+    if specificity is None:
+        return df
+    if isinstance(specificity, Mapping):
+        out = df
+        for key, value in specificity.items():
+            raw_vals = list(value) if isinstance(value, (list, tuple, set)) else [value]
+            out = _filter_df_by_specificity_tuple(out, key, raw_vals)
+        return out
+    if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
+        return df
+    spec_key, *raw_vals = specificity
+    return _filter_df_by_specificity_tuple(df, spec_key, raw_vals)
+
+
 def specificity_path_parts(specificity):
     """Convert specificity tuple to subfolder path components."""
     if specificity is None:
         return []
+    if isinstance(specificity, Mapping):
+        parts = []
+        for key, value in specificity.items():
+            vals = flatten_specificity_values(
+                list(value) if isinstance(value, (list, tuple, set)) else [value]
+            )
+            val_text = " and ".join([str(v) for v in vals])
+            parts.append(strip_name(f"{key}.{val_text}" if val_text else str(key)))
+        return parts
     if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
         return []
     spec_key, *raw_vals = specificity
@@ -405,6 +456,18 @@ def build_specificity_alias(specificity, aliases=None):
     """
     if specificity is None:
         return ''
+    if isinstance(specificity, Mapping):
+        parts = []
+        for key, value in specificity.items():
+            vals = flatten_specificity_values(
+                list(value) if isinstance(value, (list, tuple, set)) else [value]
+            )
+            key_alias = apply_alias(str(key), aliases)
+            val_aliases = [apply_alias(str(v), aliases) for v in vals]
+            parts.append(
+                f"{key_alias}.{'+'.join(val_aliases)}" if val_aliases else key_alias
+            )
+        return "+".join([p for p in parts if p])
     if not isinstance(specificity, (list, tuple)) or len(specificity) < 2:
         return ''
     spec_key, *raw_vals = specificity
@@ -912,8 +975,13 @@ def rc_params(line_width=2, tick_major_width=2, tick_major_size=11,
               labelsize=22, labelweight='bold',
               title_size=20, title_weight='bold',
               despine=True, legend_frame=False, legend_fontsize=15,
-              tick_direction='out'):
+              tick_direction='out', figure_size=(7.0, 5.0),
+              save_bbox='fixed', save_pad_inches=0.1, save_dpi=600):
     """Set matplotlib rcParams for PyFLASH's uniform house aesthetic.
+
+    Compatibility helper: prefer ``PyFLASH.set_pyflash_style()`` for new code.
+    That front door applies these Matplotlib defaults plus PyFLASH semantic
+    styling such as marker sizes, significance annotations, and matrix colours.
 
     The defaults encode the look of the reference plots (bar charts and
     correlation matrices): Arial, bold axis labels, bold titles, despined
@@ -936,7 +1004,12 @@ def rc_params(line_width=2, tick_major_width=2, tick_major_size=11,
     from matplotlib import pyplot as plt
     from PyFLASH.config import apply_matplotlib_fast_path
     apply_matplotlib_fast_path()
-    plt.rcParams.update({
+    bbox_rc = (
+        "standard"
+        if str(save_bbox).strip().lower() in {"standard", "canvas", "none", "false"}
+        else "tight"
+    )
+    updates = {
         'axes.linewidth': line_width,
         'xtick.major.width': tick_major_width,
         'ytick.major.width': tick_major_width,
@@ -957,11 +1030,17 @@ def rc_params(line_width=2, tick_major_width=2, tick_major_size=11,
         'legend.title_fontsize': legend_fontsize,
         'font.weight': font_weight,
         'font.family': font_family,
+        'savefig.dpi': save_dpi,
+        'savefig.bbox': bbox_rc,
+        'savefig.pad_inches': save_pad_inches,
         # Keep SVG text editable (real <text>, not glyph paths) and render any
         # mathtext ($…$) in the house body font rather than DejaVu-oblique.
         'svg.fonttype': 'none',
         'mathtext.default': 'regular',
-    })
+    }
+    if figure_size is not None:
+        updates['figure.figsize'] = figure_size
+    plt.rcParams.update(updates)
 
 
 
@@ -987,7 +1066,7 @@ def rasterize_data_artists(figure, threshold=50):
 
 
 def save_fig(figure, save_path, image_name, extra_artist=None,
-             pad_inches=1, subfolder=None, verbose=True,
+             pad_inches=None, subfolder=None, verbose=True,
              skip_existing=None, rasterize=True, montage=False):
     """Save a figure as SVG with optional subfolder creation.
 
@@ -1005,6 +1084,11 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
     """
     from matplotlib import pyplot as plt
     from PyFLASH.config import Config, apply_matplotlib_fast_path
+    from PyFLASH.aesthetics import (
+        apply_pyflash_figure_geometry,
+        normalize_pyflash_svg_canvas,
+        pyflash_savefig_kwargs,
+    )
     apply_matplotlib_fast_path()
 
     def _windows_extended_path(path):
@@ -1062,14 +1146,21 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         if getattr(Config, "USE_PYFLASH_LAYOUT", True):
             from PyFLASH.layout import apply_pyflash_layout
             apply_pyflash_layout(figure)
+        apply_pyflash_figure_geometry(figure)
 
         # Guarantee editable text at the single figure choke point regardless of
         # what rcParams the caller left active: every string stays a real <text>
         # element and mathtext renders in the body font (not vectorised glyphs).
         with plt.rc_context({'svg.fonttype': 'none', 'mathtext.default': 'regular'}):
-            figure.savefig(save_full_path, bbox_inches='tight',
-                           bbox_extra_artists=extra_artist,
-                           dpi=600, transparent=True, pad_inches=pad_inches)
+            figure.savefig(
+                save_full_path,
+                **pyflash_savefig_kwargs(
+                    pad_inches=pad_inches,
+                    bbox_extra_artists=extra_artist,
+                    transparent=True,
+                ),
+            )
+            normalize_pyflash_svg_canvas(save_full_path)
 
     if verbose:
         _log.confirm(f"Figure saved to {full_path}")

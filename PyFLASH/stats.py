@@ -7,6 +7,7 @@ from __future__ import annotations
 import csv
 import math
 import os
+import unicodedata
 from typing import Iterable
 
 from PyFLASH._logging import logger as _log
@@ -24,6 +25,12 @@ import itertools
 
 from PyFLASH.config import apply_matplotlib_fast_path
 apply_matplotlib_fast_path()
+from PyFLASH.aesthetics import (
+    apply_pyflash_figure_geometry,
+    get_pyflash_style,
+    pyflash_savefig_kwargs,
+    pyflash_significance_annotation,
+)
 
 try:
     from scipy.stats import tukey_hsd
@@ -55,17 +62,15 @@ def clear_stats_cache():
 
 def get_annotation(p, ns="ns"):
     """Return significance annotation text for a p-value."""
-    if ns == "p":
-        ns = round(float(p), 3)
-    if p < 0.0001:
-        return "****"
-    if p < 0.001:
-        return "***"
-    if p < 0.01:
-        return "**"
-    if p < 0.05:
-        return "*"
-    return ns
+    return pyflash_significance_annotation(p, ns=ns)
+
+
+def _is_nonsignificant_annotation(annot):
+    try:
+        ns = get_pyflash_style("significance_ns")
+    except Exception:
+        ns = "ns"
+    return annot == ns or annot == "ns" or isinstance(annot, (float, int))
 
 
 def extract_p_and_stats_from_results(result_object, comparisons):
@@ -200,45 +205,295 @@ def mwu_multiple_comparisons(df_list, comparisons, results_dict, ns="ns"):
     return pvalues, annotations, (statistics, pvalues), results_dict, "Mann-Whitney U"
 
 
-def runOWA(df_list, comparisons, results_dict, ns="ns"):
+def _extract_posthoc_matrix_pvalues(matrix, comparisons):
+    pvalues = []
+    for comp in comparisons:
+        first, second = [int(part) - 1 for part in comp.split("-")]
+        pvalues.append(float(matrix.iloc[first, second]))
+    return pvalues
+
+
+def _run_fisher_lsd(groups, comparisons):
+    n_groups = len(groups)
+    n_total = sum(len(g) for g in groups)
+    df_error = n_total - n_groups
+    if df_error <= 0:
+        return [float("nan")] * len(comparisons), [float("nan")] * len(comparisons)
+
+    ss_error = 0.0
+    means = []
+    ns = []
+    for group in groups:
+        arr = np.asarray(group, dtype=float)
+        means.append(float(np.mean(arr)))
+        ns.append(int(len(arr)))
+        ss_error += float(np.sum((arr - np.mean(arr)) ** 2))
+    mse = ss_error / df_error if df_error > 0 else float("nan")
+
+    statistics = []
+    pvalues = []
+    for comp in comparisons:
+        first, second = [int(part) - 1 for part in comp.split("-")]
+        se = math.sqrt(mse * ((1.0 / ns[first]) + (1.0 / ns[second]))) if mse >= 0 else float("nan")
+        if not np.isfinite(se) or se == 0:
+            statistic = float("nan")
+            pvalue = float("nan")
+        else:
+            statistic = (means[first] - means[second]) / se
+            pvalue = 2.0 * stats.t.sf(abs(statistic), df_error)
+        statistics.append(float(statistic))
+        pvalues.append(float(pvalue))
+    return statistics, pvalues
+
+
+def _infer_dunnett_control(comparisons, n_groups):
+    parsed = []
+    for comp in comparisons:
+        first, second = [int(part) - 1 for part in comp.split("-")]
+        if first < 0 or second < 0 or first >= n_groups or second >= n_groups:
+            raise ValueError(f"Comparison {comp!r} is outside the available groups.")
+        parsed.append({first, second})
+    if not parsed:
+        raise ValueError("Dunnett requires comparisons against one control group.")
+
+    common = set.intersection(*parsed)
+    if len(common) == 1:
+        return common.pop()
+    raise ValueError(
+        "Dunnett requires comparisons that all share one control group, "
+        'for example ["1-2", "1-3"].'
+    )
+
+
+def _run_dunnett(groups, comparisons):
+    control_idx = _infer_dunnett_control(comparisons, len(groups))
+    sample_indices = [idx for idx in range(len(groups)) if idx != control_idx]
+    if not sample_indices:
+        return [float("nan")] * len(comparisons), [float("nan")] * len(comparisons)
+
+    result = stats.dunnett(
+        *[groups[idx] for idx in sample_indices],
+        control=groups[control_idx],
+        random_state=0,
+    )
+    stat_by_group = {
+        idx: float(result.statistic[pos])
+        for pos, idx in enumerate(sample_indices)
+    }
+    p_by_group = {
+        idx: float(result.pvalue[pos])
+        for pos, idx in enumerate(sample_indices)
+    }
+
+    statistics = []
+    pvalues = []
+    for comp in comparisons:
+        first, second = [int(part) - 1 for part in comp.split("-")]
+        other = second if first == control_idx else first if second == control_idx else None
+        statistics.append(stat_by_group.get(other, float("nan")))
+        pvalues.append(p_by_group.get(other, float("nan")))
+    return statistics, pvalues
+
+
+def _normalize_owa_posthoc(posthoc):
+    if posthoc is None:
+        return "tukey", "Tukey", None
+
+    key = _normalize_kw_correction_key(posthoc)
+    if key in {"", "auto", "default", "conover", "conover_test", "dunn", "dunns",
+               "dunns_test", "dunn_test", "nemenyi", "nemenyi_test", "dscf",
+               "dwass_steel_critchlow_fligner"}:
+        return "tukey", "Tukey", None
+    if key in {"tukey", "tukey_hsd", "hsd"}:
+        return "tukey", "Tukey", None
+    if key in {"dunnett", "dunnetts", "dunnett_test", "dunnetts_test"}:
+        return "dunnett", "Dunnett", None
+    if key in {"fisher_lsd", "fishers_lsd", "fisher", "lsd",
+               "least_significant_difference"}:
+        return "fisher_lsd", "Fisher LSD", None
+    if key in {"scheffe", "scheffes", "scheffe_test", "scheffes_test"}:
+        return "scheffe", "Scheffe", None
+    if key in {"tamhane", "tamhanes", "tamhane_t2", "tamhanes_t2"}:
+        return "tamhane", "Tamhane T2", None
+    if key in {"bonferroni_dunn", "dunn_bonferroni"}:
+        return "lsd_adjusted", "Bonferroni", "bonferroni"
+    if key in {"sidak_bonferroni", "bonferroni_sidak"}:
+        return "lsd_adjusted", "Sidak", "sidak"
+    if key in _KW_CORRECTION_ALIASES:
+        method, label = _KW_CORRECTION_ALIASES[key]
+        return "lsd_adjusted", label, method
+    if key in _KW_UNCORRECTED_ALIASES:
+        return "fisher_lsd", "Fisher LSD", None
+    valid = (
+        "'Tukey', 'Dunnett', 'Fisher LSD', 'Bonferroni', 'Sidak', "
+        "'Holm-Sidak', 'Scheffe', or 'Tamhane T2'"
+    )
+    raise ValueError(f"posthoc for one-way ANOVA must be one of: {valid}")
+
+
+def _normalize_lsd_correction(posthoc_correction, n_tests):
+    key = "auto" if posthoc_correction is None else _normalize_kw_correction_key(posthoc_correction)
+    if key == "auto":
+        return "none", "Uncorrected"
+    return _normalize_kw_correction(posthoc_correction, n_tests)
+
+
+def runOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tukey", posthoc_correction="auto"):
     groups = _coerce_groups(df_list)
+    posthoc_method, posthoc_label, embedded_correction = _normalize_owa_posthoc(posthoc)
     if len(groups) < 2 or any(len(g) <= 1 for g in groups):
-        return [], [], (float("nan"), float("nan")), results_dict, "Tukey"
+        return [], [], (float("nan"), float("nan")), results_dict, posthoc_label
     f_stat, pvalue = f_oneway(*groups)
     results_dict["OWA"] = [float(f_stat), float(pvalue)]
     try:
-        tukey_result = _run_tukey(*groups)
+        if posthoc_method == "tukey":
+            tukey_result = _run_tukey(*groups)
+            statistics, pvalues = extract_p_and_stats_from_results(tukey_result, comparisons)
+        elif posthoc_method == "dunnett":
+            statistics, pvalues = _run_dunnett(groups, comparisons)
+        elif posthoc_method == "scheffe":
+            pvalues = _extract_posthoc_matrix_pvalues(sp.posthoc_scheffe(groups), comparisons)
+            statistics = [1] * len(pvalues)
+        elif posthoc_method == "tamhane":
+            pvalues = _extract_posthoc_matrix_pvalues(sp.posthoc_tamhane(groups), comparisons)
+            statistics = [1] * len(pvalues)
+        else:
+            statistics, pvalues = _run_fisher_lsd(groups, comparisons)
+            if embedded_correction is None:
+                method, correction = _normalize_lsd_correction(posthoc_correction, len(comparisons))
+                if correction != "Uncorrected":
+                    posthoc_label = f"Fisher LSD {correction}"
+            else:
+                method = embedded_correction
+            pvalues = _apply_kw_correction(pvalues, method)
     except ValueError:
-        return [], [], (float(f_stat), float(pvalue)), results_dict, "Tukey"
-    statistics, pvalues = extract_p_and_stats_from_results(tukey_result, comparisons)
-    results_dict["Tukey"] = [statistics, pvalues]
+        if posthoc_method == "tukey":
+            return [], [], (float(f_stat), float(pvalue)), results_dict, posthoc_label
+        raise
+    results_dict[posthoc_label.replace(" ", "-")] = [statistics, pvalues]
     annotations = [get_annotation(p, ns) for p in pvalues]
-    return pvalues, annotations, (float(f_stat), float(pvalue)), results_dict, "Tukey"
+    return pvalues, annotations, (float(f_stat), float(pvalue)), results_dict, posthoc_label
 
 
 def _normalize_kw_posthoc(posthoc):
-    name = str(posthoc or "Conover").strip().lower().replace("'", "")
-    if name in {"dunn", "dunns", "dunns test", "dunn test"}:
+    name = _normalize_kw_correction_key(posthoc or "Conover")
+    if name in {"dunn", "dunns", "dunns_test", "dunn_test"}:
         return "Dunn"
-    if name in {"conover", "conover test"}:
+    if name in {"conover", "conover_test"}:
         return "Conover"
-    raise ValueError("posthoc must be 'Conover' or 'Dunn'")
+    if name in {"nemenyi", "nemenyi_test"}:
+        return "Nemenyi"
+    if name in {"dscf", "dwass_steel_critchlow_fligner", "dwass_steel",
+                "steel_dwass", "dwass_steel_critchlow_flinger"}:
+        return "DSCF"
+    raise ValueError("posthoc must be 'Conover', 'Dunn', 'Nemenyi', or 'DSCF'")
+
+
+_KW_CORRECTION_ALIASES = {
+    "bonferroni": ("bonferroni", "Bonferroni"),
+    "bonf": ("bonferroni", "Bonferroni"),
+    "corrected": ("bonferroni", "Bonferroni"),
+    "correction": ("bonferroni", "Bonferroni"),
+    "adjusted": ("bonferroni", "Bonferroni"),
+    "adjust": ("bonferroni", "Bonferroni"),
+    "true": ("bonferroni", "Bonferroni"),
+    "yes": ("bonferroni", "Bonferroni"),
+    "y": ("bonferroni", "Bonferroni"),
+    "on": ("bonferroni", "Bonferroni"),
+    "1": ("bonferroni", "Bonferroni"),
+    "sidak": ("sidak", "Sidak"),
+    "sidak_correction": ("sidak", "Sidak"),
+    "holm": ("holm", "Holm"),
+    "holm_bonferroni": ("holm", "Holm"),
+    "holm_sidak": ("holm-sidak", "Holm-Sidak"),
+    "hs": ("holm-sidak", "Holm-Sidak"),
+    "simes_hochberg": ("simes-hochberg", "Simes-Hochberg"),
+    "hochberg": ("simes-hochberg", "Simes-Hochberg"),
+    "sh": ("simes-hochberg", "Simes-Hochberg"),
+    "hommel": ("hommel", "Hommel"),
+    "fdr": ("fdr_bh", "FDR-BH"),
+    "fdr_bh": ("fdr_bh", "FDR-BH"),
+    "bh": ("fdr_bh", "FDR-BH"),
+    "benjamini_hochberg": ("fdr_bh", "FDR-BH"),
+    "benjaminihochberg": ("fdr_bh", "FDR-BH"),
+    "fdr_by": ("fdr_by", "FDR-BY"),
+    "by": ("fdr_by", "FDR-BY"),
+    "benjamini_yekutieli": ("fdr_by", "FDR-BY"),
+    "benjaminiyekutieli": ("fdr_by", "FDR-BY"),
+    "fdr_tsbh": ("fdr_tsbh", "FDR-TSBH"),
+    "tsbh": ("fdr_tsbh", "FDR-TSBH"),
+    "two_stage_bh": ("fdr_tsbh", "FDR-TSBH"),
+    "two_stage_fdr_bh": ("fdr_tsbh", "FDR-TSBH"),
+    "fdr_tsbky": ("fdr_tsbky", "FDR-TSBKY"),
+    "tsbky": ("fdr_tsbky", "FDR-TSBKY"),
+    "two_stage_bky": ("fdr_tsbky", "FDR-TSBKY"),
+    "two_stage_fdr_bky": ("fdr_tsbky", "FDR-TSBKY"),
+}
+
+_KW_UNCORRECTED_ALIASES = {
+    "",
+    "none",
+    "raw",
+    "p",
+    "uncorrected",
+    "unadjusted",
+    "no_correction",
+    "no_adjustment",
+    "false",
+    "no",
+    "n",
+    "off",
+    "0",
+}
+
+
+def _normalize_kw_correction_key(value):
+    text = unicodedata.normalize("NFKD", str(value))
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.strip().lower().replace("'", "")
+    for old, new in (("&", " "), ("/", " "), ("+", " "), ("-", "_"), (" ", "_")):
+        text = text.replace(old, new)
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text.strip("_")
 
 
 def _normalize_kw_correction(posthoc_correction, n_tests):
-    if posthoc_correction is None or str(posthoc_correction).lower() == "auto":
-        corrected = n_tests > 3
-    elif isinstance(posthoc_correction, bool):
-        corrected = posthoc_correction
+    if posthoc_correction is None:
+        key = "auto"
+    elif isinstance(posthoc_correction, (bool, np.bool_)):
+        key = "true" if bool(posthoc_correction) else "false"
     else:
-        value = str(posthoc_correction).strip().lower()
-        if value in {"bonferroni", "bonf", "corrected", "correction", "true", "yes"}:
-            corrected = True
-        elif value in {"uncorrected", "none", "false", "no"}:
-            corrected = False
-        else:
-            raise ValueError("posthoc_correction must be 'auto', 'Bonferroni', or 'Uncorrected'")
-    return corrected, "Bonferroni" if corrected else "Uncorrected"
+        key = _normalize_kw_correction_key(posthoc_correction)
+
+    if key == "auto":
+        return ("bonferroni", "Bonferroni") if n_tests > 3 else ("none", "Uncorrected")
+    if key in _KW_UNCORRECTED_ALIASES:
+        return "none", "Uncorrected"
+    if key in _KW_CORRECTION_ALIASES:
+        return _KW_CORRECTION_ALIASES[key]
+
+    valid = (
+        "'auto', 'Bonferroni', 'Sidak', 'Holm', 'Holm-Sidak', "
+        "'Simes-Hochberg', 'Hommel', 'FDR-BH', 'FDR-BY', "
+        "'FDR-TSBH', 'FDR-TSBKY', 'Uncorrected', booleans, "
+        "or common yes/no synonyms"
+    )
+    raise ValueError(f"posthoc_correction must be one of: {valid}")
+
+
+def _apply_kw_correction(pvalues, method):
+    values = [float(p) for p in pvalues]
+    if method == "none":
+        return values
+    if method == "bonferroni":
+        return [bonferroni_correction(p, len(values)) for p in values]
+    if method == "sidak":
+        return [sidak_correction(p, len(values)) for p in values]
+
+    from PyFLASH.stats_extra import adjust_pvalues
+    _, adjusted = adjust_pvalues(values, method=method)
+    return [float(p) for p in adjusted]
 
 
 def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", posthoc_correction="auto"):
@@ -254,7 +509,20 @@ def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", postho
         return [], [], (float("nan"), float("nan")), results_dict, f"{posthoc} (error: {msg})"
     results_dict["KW"] = [float(kw_statistic), float(kw_pvalue)]
     n_tests = len(comparisons)
-    use_corrected, correction = _normalize_kw_correction(posthoc_correction, n_tests)
+
+    if posthoc in {"Nemenyi", "DSCF"}:
+        try:
+            matrix = sp.posthoc_nemenyi(groups) if posthoc == "Nemenyi" else sp.posthoc_dscf(groups)
+            pvalues = _extract_posthoc_matrix_pvalues(matrix, comparisons)
+        except Exception as e:
+            msg = str(e)
+            results_dict["Posthoc_error"] = [msg, np.nan]
+            return [], [], (float(kw_statistic), float(kw_pvalue)), results_dict, f"{posthoc} (error: {msg})"
+        results_dict[posthoc] = [1, pvalues]
+        annotations = [get_annotation(result, ns) for result in pvalues]
+        return pvalues, annotations, (float(kw_statistic), float(kw_pvalue)), results_dict, posthoc
+
+    correction_method, correction = _normalize_kw_correction(posthoc_correction, n_tests)
 
     try:
         dunn_df = sp.posthoc_dunn(groups)
@@ -265,8 +533,6 @@ def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", postho
         return [], [], (float(kw_statistic), float(kw_pvalue)), results_dict, f"{posthoc} (error: {msg})"
     dunn_uncorrected = []
     conover_uncorrected = []
-    dunn_bonferroni = []
-    conover_bonferroni = []
 
     for comp in comparisons:
         first, second = [int(part) - 1 for part in comp.split("-")]
@@ -274,16 +540,31 @@ def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", postho
         conover_p = float(conover_df.iloc[first, second])
         dunn_uncorrected.append(dunn_p)
         conover_uncorrected.append(conover_p)
-        dunn_bonferroni.append(bonferroni_correction(dunn_p, n_tests))
-        conover_bonferroni.append(bonferroni_correction(conover_p, n_tests))
+
+    dunn_bonferroni = _apply_kw_correction(dunn_uncorrected, "bonferroni")
+    conover_bonferroni = _apply_kw_correction(conover_uncorrected, "bonferroni")
 
     results_dict["Conover-Bonferroni"] = [1, conover_bonferroni]
     results_dict["Conover-Uncorrected"] = [1, conover_uncorrected]
     results_dict["Dunn-Bonferroni"] = [1, dunn_bonferroni]
     results_dict["Dunn-Uncorrected"] = [1, dunn_uncorrected]
 
-    conover = conover_bonferroni if use_corrected else conover_uncorrected
-    dunn = dunn_bonferroni if use_corrected else dunn_uncorrected
+    conover_by_correction = {
+        "Bonferroni": conover_bonferroni,
+        "Uncorrected": conover_uncorrected,
+    }
+    dunn_by_correction = {
+        "Bonferroni": dunn_bonferroni,
+        "Uncorrected": dunn_uncorrected,
+    }
+    if correction not in conover_by_correction:
+        conover_by_correction[correction] = _apply_kw_correction(conover_uncorrected, correction_method)
+        dunn_by_correction[correction] = _apply_kw_correction(dunn_uncorrected, correction_method)
+        results_dict[f"Conover-{correction}"] = [1, conover_by_correction[correction]]
+        results_dict[f"Dunn-{correction}"] = [1, dunn_by_correction[correction]]
+
+    conover = conover_by_correction[correction]
+    dunn = dunn_by_correction[correction]
     posthoc_result = conover if posthoc == "Conover" else dunn
     posthoc_string = f"{posthoc} {correction}"
     annotations = [get_annotation(result, ns) for result in posthoc_result]
@@ -638,7 +919,9 @@ def plot_comparison_lines_from_figdata(
         lo, hi = min(start_index, end_index), max(start_index, end_index)
         xs_cov = centers_with_data[lo:hi + 1]
         present = [x for x in xs_cov if x in updated_x_heights]
-        height = max([updated_x_heights[x] for x in present]) if len(present) >= 2 else base_height
+        # Comparisons sharing even one group need a new tier; otherwise adjacent
+        # bracket labels such as A-B and B-C can merge into one star string.
+        height = max([updated_x_heights[x] for x in present]) if present else base_height
 
         x_left = centers_with_data[lo] + offset
         x_right = centers_with_data[hi] - offset
@@ -649,10 +932,9 @@ def plot_comparison_lines_from_figdata(
         annot = annotations[i]
         # Lift all annotation text slightly for better separation from bracket lines.
         text_lift = base_height * 0.02
-        # Keep 'ns' and numeric p text above the line; keep asterisks near the line.
-        if annot == "ns":
-            annot_y = (height + handles) + base_height * 0.015 + text_lift
-        elif isinstance(annot, float):
+        # Keep non-significant and numeric p text above the line; keep stars near the line.
+        is_nonsig = _is_nonsignificant_annotation(annot)
+        if is_nonsig:
             annot_y = (height + handles) + base_height * 0.015 + text_lift
         else:
             annot_y = (height + handles) - base_height * 0.018 + text_lift
@@ -660,9 +942,9 @@ def plot_comparison_lines_from_figdata(
             x_mid, annot_y, annot,
             ha="center",
             va="center",
-            size=18 if annot == "ns" else 15 if isinstance(annot, float) else 35,
+            size=18 if is_nonsig else 35,
             clip_on=False,
-            weight="bold" if annot != "ns" else "normal",
+            weight="normal" if is_nonsig else "bold",
         )
 
         new_height = height + pad_height + handles
@@ -893,7 +1175,11 @@ def multipleComparisons(
         normality_dir = output_dir or experiment.data_path
         os.makedirs(normality_dir, exist_ok=True)
         out_path = os.path.join(normality_dir, fname)
-        norm_fig.savefig(out_path, bbox_inches="tight", dpi=normality_dpi)
+        apply_pyflash_figure_geometry(norm_fig)
+        norm_fig.savefig(
+            out_path,
+            **pyflash_savefig_kwargs(dpi=normality_dpi, transparent=False),
+        )
         if verbose:
             _log.confirm(f"Normality figure saved to {out_path}")
     if norm_fig is not None:
@@ -928,7 +1214,14 @@ def multipleComparisons(
                 )
                 test = "Kruskal-Wallis"
             elif multiple_comparison == "One-Way":
-                results, annotations, overall, results_dict, post_hoc = runOWA(valid_groups, comparisons, results_dict, ns)
+                results, annotations, overall, results_dict, post_hoc = runOWA(
+                    valid_groups,
+                    comparisons,
+                    results_dict,
+                    ns,
+                    posthoc=posthoc,
+                    posthoc_correction=posthoc_correction,
+                )
                 test = "One-Way ANOVA"
             else:
                 results, annotations, overall, results_dict, post_hoc = runTWA(

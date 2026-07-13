@@ -248,5 +248,5 @@ def create_batch(name, conditions, batch_path, experiments=None,
         final_detail = "Batch ready"
     tracker.finish_item("Save Pickle" if pickle_path is not None else "Finalize", detail=final_detail)
 
-    tracker.close(f"{len(exp_list)} experiments | {batch.summary.shape[0]} animals")
+    tracker.close(f"{len(exp_list)} experiments | {batch.summary.shape[0]} subjects")
     return batch

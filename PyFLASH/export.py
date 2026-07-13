@@ -176,11 +176,11 @@ IF_NAME_MAP = {
     },
     "<ab>_burdenScore": {
         "label": "<ab> Burden Score",
-        "desc": "Composite score from log-normalized and z-scored IntDenTotal, VolumeTotal, SA/SurfaceTotal, and %AreaMean, averaged per animal.",
+        "desc": "Composite score from log-normalized and z-scored IntDenTotal, VolumeTotal, SA/SurfaceTotal, and %AreaMean, averaged per subject.",
     },
     "<ab>_fragmentationScore": {
         "label": "<ab> Fragmentation Score",
-        "desc": "Composite score from log-normalized and z-scored Count/VolumeTotal ratio per animal.",
+        "desc": "Composite score from log-normalized and z-scored Count/VolumeTotal ratio per subject.",
     },
 }
 

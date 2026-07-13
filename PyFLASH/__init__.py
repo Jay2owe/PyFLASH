@@ -20,10 +20,20 @@ from PyFLASH.conditions import (
     condition, multiCondition, conditionList,
     zipConditions, zipConditionLists,
     ConditionBuilder,
+    group, multiGroup, groupList,
+    zipGroups, zipGroupLists,
+    GroupBuilder,
 )
 from PyFLASH.factory import create_batch
+from PyFLASH.dataframe import DataFrameExperiment, from_dataframe
 from PyFLASH.serialization import save_state, load_state, normalize_paths
 from PyFLASH.config import Config
+from PyFLASH.aesthetics import (
+    get_pyflash_style,
+    set_pyflash_style,
+    reset_pyflash_style,
+    pyflash_style_context,
+)
 from PyFLASH.spec import run_spec
 from PyFLASH.export import format_summary_for_display
 from PyFLASH._logging import set_verbosity, silent, verbose, Verbosity
@@ -35,17 +45,22 @@ __all__ = [
     # Conditions
     "condition", "multiCondition", "conditionList",
     "zipConditions", "zipConditionLists", "ConditionBuilder",
+    "group", "multiGroup", "groupList",
+    "zipGroups", "zipGroupLists", "GroupBuilder",
     # Factory & IO
-    "create_batch", "save_state", "load_state", "normalize_paths",
+    "create_batch", "DataFrameExperiment", "from_dataframe",
+    "save_state", "load_state", "normalize_paths",
     # Modelling
     "iterative_best_fit", "iterative_model_sweep",
-    "run_linear_model_pipeline", "linear_model", "adjusted_correlation",
-    "data_overview",
+    "run_linear_model_pipeline", "correlation", "adjusted_correlation",
+    "data_overview", "group_comparison", "linear_model", "rhythm",
     # Outlier exclusion / marking
     "exclude_outliers", "mark_outliers", "apply_exclusions", "mark_exclusions",
-    "exclude_animals", "mark_animals",
+    "exclude_animals", "mark_animals", "exclude_subjects", "mark_subjects",
     # Config & output control
     "Config", "stainColors",
+    "get_pyflash_style", "set_pyflash_style", "reset_pyflash_style",
+    "pyflash_style_context",
     "set_verbosity", "silent", "verbose", "Verbosity",
     # Spec DSL
     "run_spec",
@@ -76,15 +91,20 @@ _LAZY_ATTRS = {
     "iterative_best_fit": ("PyFLASH.modelling", "iterative_best_fit"),
     "iterative_model_sweep": ("PyFLASH.modelling", "iterative_model_sweep"),
     "run_linear_model_pipeline": ("PyFLASH.modelling", "run_linear_model_pipeline"),
+    "correlation": ("PyFLASH.pipeline", "correlation"),
     "linear_model": ("PyFLASH.pipeline", "linear_model"),
     "adjusted_correlation": ("PyFLASH.pipeline", "adjusted_correlation"),
     "data_overview": ("PyFLASH.pipeline", "data_overview"),
+    "group_comparison": ("PyFLASH.pipeline", "group_comparison"),
+    "rhythm": ("PyFLASH.pipeline", "rhythm"),
     "exclude_outliers": ("PyFLASH.exclusions", "exclude_outliers"),
     "mark_outliers": ("PyFLASH.exclusions", "mark_outliers"),
     "apply_exclusions": ("PyFLASH.exclusions", "apply_exclusions"),
     "mark_exclusions": ("PyFLASH.exclusions", "mark_exclusions"),
     "exclude_animals": ("PyFLASH.exclusions", "exclude_animals"),
     "mark_animals": ("PyFLASH.exclusions", "mark_animals"),
+    "exclude_subjects": ("PyFLASH.exclusions", "exclude_subjects"),
+    "mark_subjects": ("PyFLASH.exclusions", "mark_subjects"),
     "cheat_sheet": ("PyFLASH.plotting", "cheat_sheet"),
     "set_axis_limits": ("PyFLASH.plotting", "set_axis_limits"),
     "clear_axis_limits": ("PyFLASH.plotting", "clear_axis_limits"),

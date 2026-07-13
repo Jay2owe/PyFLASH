@@ -10,10 +10,10 @@ need an optional package live in :mod:`PyFLASH.plotting` and use
 
 Design notes
 ------------
-PyFLASH's ``batch.summary`` is already aggregated to one row per animal
+PyFLASH's ``batch.summary`` is already aggregated to one row per subject
 (``Experiment.createSummary`` groups ROI-level rows by ``AnimalName``), so the
-group lists handed to :func:`effect_sizes_for_test` are animal-level: N is the
-number of animals, and the bootstrap CI in :func:`effect_ci` resamples animals,
+group lists handed to :func:`effect_sizes_for_test` are subject-level: N is the
+number of subjects, and the bootstrap CI in :func:`effect_ci` resamples subjects,
 respecting the true experimental unit for free.
 
 This module deliberately reimplements the handful of effect-size / power
@@ -261,11 +261,11 @@ def required_n(effect_size, alpha=0.05, power=0.8) -> float:
 
 # ── Reliability / design diagnostic ──────────────────────────────────
 def icc1(roi_df, value_col, group_col="AnimalName") -> float:
-    """ICC(1): fraction of total variance that is between animals.
+    """ICC(1): fraction of total variance that is between subjects.
 
     Operates on **ROI-level** rows (e.g. ``experiment.data[marker].df``), not the
-    animal-level summary.  High ICC (>0.3) means ROIs within an animal are
-    strongly correlated, which justifies PyFLASH's aggregate-to-animal approach;
+    subject-level summary.  High ICC (>0.3) means ROIs within a subject are
+    strongly correlated, which justifies PyFLASH's aggregate-to-subject approach;
     near-zero ICC means ROI-level variation dominates.
     """
     df = roi_df[[group_col, value_col]].copy()
@@ -388,7 +388,7 @@ def dunnett_vs_control(groups, labels=None, control=0, alternative="two-sided"):
 def proportion_test(table, force=None):
     """Chi-square test of independence, with automatic Fisher's exact fallback.
 
-    For comparing proportions (e.g. % marker-positive cells, fraction of animals
+    For comparing proportions (e.g. % marker-positive cells, fraction of subjects
     with plaques) across conditions.  ``table`` is a contingency table of counts
     (DataFrame or 2D array).  Fisher's exact is used for a 2x2 table when any
     expected cell < 5 (or ``force='fisher'``); ``force='chi2'`` keeps chi-square.
@@ -428,9 +428,9 @@ def _resolve_numeric_time(series, time_map=None):
 
 def timecourse_auc(df, time_col, value_col, animal_col="AnimalName",
                    group_col=None, time_map=None, baseline=None):
-    """Trapezoidal area under the time-course, one value per animal.
+    """Trapezoidal area under the time-course, one value per subject.
 
-    Collapses a longitudinal series to a single scalar per animal (total
+    Collapses a longitudinal series to a single scalar per subject (total
     exposure), sidestepping pseudoreplication for the downstream group test.
     ``time_map`` (e.g. ``{'WeekTwo': 2, 'WeekEight': 8}``) maps a categorical
     time factor to numbers; otherwise numeric values or trailing digits are used.
@@ -713,7 +713,7 @@ def flag_outliers(df, columns, *, group_labels=None, methods=("rout",),
     """Flag per-(group, column) outliers by IQR, modified-z (MAD), and/or ROUT.
 
     Operates on the *experimental-unit* rows of ``df`` — PyFLASH summaries are one
-    row per animal, so flags are animal-level. ``group_labels`` is an optional
+    row per subject, so flags are subject-level. ``group_labels`` is an optional
     mapping (df-index -> group label, e.g. a Series) so outliers are judged within
     each group; ``None`` pools all rows. IQR/MAD use ``min_rows`` finite values;
     ROUT can run with three finite values.

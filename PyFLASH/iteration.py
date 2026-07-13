@@ -102,6 +102,11 @@ class Context:
         return self.summary[self.summary.index == self.animal]
 
     @property
+    def subject_df(self) -> pd.DataFrame:
+        """Alias for ``animal_df`` using subject-neutral naming."""
+        return self.animal_df
+
+    @property
     def color(self):
         return self.condition_obj.color if self.condition_obj else None
 
@@ -131,6 +136,11 @@ class Context:
         if self.condition is None:
             return 0
         return len(self.region_dict.get(self.condition, {}))
+
+    @property
+    def num_subjects(self):
+        """Alias for ``num_animals`` using subject-neutral naming."""
+        return self.num_animals
 
     @property
     def num_regions(self):
@@ -166,13 +176,17 @@ class Context:
         return source[self.column].dropna()
 
     def col_animal_means(self, by='condition') -> pd.Series:
-        """Per-animal means for the current column at the current level."""
+        """Per-subject means for the current column at the current level."""
         source = {
             'condition': self.condition_df,
             'factor': self.factor_df,
             'all': self.summary,
         }[by]
         return source.groupby('AnimalName')[self.column].mean().dropna()
+
+    def col_subject_means(self, by='condition') -> pd.Series:
+        """Alias for ``col_animal_means`` using subject-neutral naming."""
+        return self.col_animal_means(by=by)
 
     # ── Backward compat ───────────────────────────────────────
 
@@ -227,7 +241,7 @@ class Context:
             )
 
     def iter_animals(self):
-        """Yield a child Context for each animal (within current condition, or all)."""
+        """Yield a child Context for each subject (within current condition, or all)."""
         if self.condition is not None:
             animals = self.region_dict.get(self.condition, {})
             for i, animal in enumerate(animals):
@@ -238,6 +252,10 @@ class Context:
                 for a_ctx in c_ctx.iter_animals():
                     yield a_ctx._child(animal_index=idx)
                     idx += 1
+
+    def iter_subjects(self):
+        """Alias for ``iter_animals`` using subject-neutral naming."""
+        yield from self.iter_animals()
 
     def iter_regions(self):
         """Yield a child Context for each region (section) in the current animal."""
@@ -279,12 +297,13 @@ class Context:
 # LEVEL DISPATCH
 # ═══════════════════════════════════════════════════════════════
 
-Level = Literal['columns', 'conditions', 'animals', 'regions', 'scns', 'factors']
+Level = Literal['columns', 'conditions', 'animals', 'subjects', 'regions', 'scns', 'factors']
 
 _ITER_MAP = {
     'columns':    lambda ctx, kw: ctx.iter_columns(kw['columns']),
     'conditions': lambda ctx, kw: ctx.iter_conditions(),
     'animals':    lambda ctx, kw: ctx.iter_animals(),
+    'subjects':   lambda ctx, kw: ctx.iter_subjects(),
     'regions':    lambda ctx, kw: ctx.iter_regions(),
     'scns':       lambda ctx, kw: ctx.iter_regions(),  # backward compat alias
     'factors':    lambda ctx, kw: ctx.iter_factors(kw['factor']),

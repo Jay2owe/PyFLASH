@@ -46,11 +46,14 @@ from __future__ import annotations
 _MANUAL_LAYOUT_ATTR = "_pyflash_manual_layout"
 # Attribute remembering a title's original fontsize (for idempotent shrinking).
 _ORIG_FONTSIZE_ATTR = "_pyflash_orig_fontsize"
+# Attribute remembering a title's original axes-coordinate y position.
+_ORIG_TITLE_Y_ATTR = "_pyflash_orig_title_y"
 
 # House tuning.
 _MIN_TITLE_FONTSIZE = 9.0   # never shrink an over-long title below this (pt)
 _TITLE_FIT_FACTOR = 0.98    # target title width as a fraction of its axes width
 _SUPTITLE_PAD_PX = 8.0      # gap left between a lifted suptitle and the decoration below
+_POLAR_TITLE_PAD_PX = 10.0  # gap between polar titles and top clock/radar labels
 
 
 def _layout_engine_base():
@@ -173,6 +176,50 @@ def _fit_tick_labels(fig, renderer):
         _fit_axis_ticklabels(ax, "x", renderer)
 
 
+def _lift_polar_titles(fig, renderer, *, pad_px=_POLAR_TITLE_PAD_PX):
+    """Lift polar titles above top tick labels while preserving the axes size."""
+    for ax in fig.axes:
+        if getattr(ax, "name", "") != "polar":
+            continue
+        title = ax.title
+        if not title.get_text():
+            continue
+        try:
+            x, y = title.get_position()
+            orig_y = getattr(title, _ORIG_TITLE_Y_ATTR, None)
+            if orig_y is None:
+                orig_y = float(y)
+                setattr(title, _ORIG_TITLE_Y_ATTR, orig_y)
+            title.set_position((x, orig_y))
+            title_bb = title.get_window_extent(renderer)
+            axes_bb = ax.get_window_extent(renderer)
+        except Exception:
+            continue
+        if axes_bb.height <= 0:
+            continue
+        bump_px = 0.0
+        labels = list(ax.get_xticklabels()) + list(ax.get_yticklabels())
+        for label in labels:
+            if not label.get_visible() or not label.get_text():
+                continue
+            try:
+                bb = label.get_window_extent(renderer)
+            except Exception:
+                continue
+            horizontal_overlap = min(title_bb.x1, bb.x1) - max(title_bb.x0, bb.x0)
+            if horizontal_overlap <= 0:
+                continue
+            required = bb.y1 + pad_px - title_bb.y0
+            if required > bump_px:
+                bump_px = required
+        if bump_px > 0:
+            try:
+                ax._autotitlepos = False
+            except Exception:
+                pass
+            title.set_position((x, orig_y + bump_px / axes_bb.height))
+
+
 def _lift_suptitle(fig, renderer, *, pad_px=_SUPTITLE_PAD_PX):
     """Move a suptitle to sit just above the topmost axes decoration (no axes shrink).
 
@@ -228,6 +275,10 @@ def _build_engine_class():
                 pass
             try:
                 _fit_tick_labels(fig, renderer)
+            except Exception:
+                pass
+            try:
+                _lift_polar_titles(fig, renderer)
             except Exception:
                 pass
             try:

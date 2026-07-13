@@ -841,7 +841,7 @@ def _finalize_roi_name_labels(roi_df: pd.DataFrame) -> pd.DataFrame:
         region = out["Region"].fillna("").astype(str).str.strip()
         out["ImageROI"] = hemisphere + region
     else:
-        # Old format fallback: assign LH/RH by alternating order per animal
+        # Old format fallback: assign LH/RH by alternating order per subject
         base = out.get("ROINameRaw", out["Region"]).fillna("").astype(str).str.strip()
         fallback = out["Region"].fillna("").astype(str).str.strip()
         base = base.where(base != "", fallback)
@@ -1452,7 +1452,7 @@ def _build_binary_indicator_count_summaries(
     family_name: str,
     detected,
 ) -> pd.DataFrame:
-    """Build per-animal standalone binary-indicator counts and percentages."""
+    """Build per-subject standalone binary-indicator counts and percentages."""
     if "AnimalName" not in stain_df.columns:
         return pd.DataFrame()
     if len(detected) == 0:
@@ -1498,7 +1498,7 @@ def _build_binary_indicator_count_summaries(
 
 
 def _build_any_count_summaries(stain_df: pd.DataFrame, marker_name: str) -> pd.DataFrame:
-    """Build per-animal standalone Any counts and percentages."""
+    """Build per-subject standalone Any counts and percentages."""
     marker_s = str(marker_name)
     esc = re.escape(marker_s)
     any_rx = re.compile(rf"^{esc}_Any_(?P<m2>.+)$")
@@ -1519,7 +1519,7 @@ def _build_any_count_summaries(stain_df: pd.DataFrame, marker_name: str) -> pd.D
 
 
 def _build_coloc_count_summaries(stain_df: pd.DataFrame, marker_name: str) -> pd.DataFrame:
-    """Build per-animal standalone Coloc counts and percentages."""
+    """Build per-subject standalone Coloc counts and percentages."""
     marker_s = str(marker_name)
     esc = re.escape(marker_s)
     coloc_rx = re.compile(rf"^{esc}_ColocCount(?P<m2>.+)$")
@@ -1540,7 +1540,7 @@ def _build_coloc_count_summaries(stain_df: pd.DataFrame, marker_name: str) -> pd
 
 
 def _build_contains_count_summaries(stain_df: pd.DataFrame, marker_name: str) -> pd.DataFrame:
-    """Build per-animal standalone Contains counts and percentages."""
+    """Build per-subject standalone Contains counts and percentages."""
     marker_s = str(marker_name)
     esc = re.escape(marker_s)
     contains_rx = re.compile(rf"^{esc}_Contains_(?P<m2>.+)$")
@@ -1674,7 +1674,7 @@ def _build_combo_summaries_from_detected(
     family_name: str,
     detected,
 ):
-    """Build per-object combo indicators and per-animal combo summaries."""
+    """Build per-object combo indicators and per-subject combo summaries."""
     if "AnimalName" not in stain_df.columns:
         return pd.DataFrame(index=stain_df.index), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     if len(detected) == 0:
@@ -1783,7 +1783,7 @@ def _build_combo_summaries_from_detected(
 
 def _build_coloc_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
     """
-    Build detailed per-object combo indicators and per-animal combo summaries.
+    Build detailed per-object combo indicators and per-subject combo summaries.
 
     This keeps `ColocCount` and `Contains` as separate positive states.
     """
@@ -1816,7 +1816,7 @@ def _build_coloc_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
 
 def _build_any_combo_summaries(stain_df: pd.DataFrame, marker_name: str):
     """
-    Build pooled per-object combo indicators and per-animal combo summaries.
+    Build pooled per-object combo indicators and per-subject combo summaries.
 
     This uses derived `Any` columns where Any = ColocCount OR Contains.
     """
@@ -2483,7 +2483,7 @@ class Experiment:
 
         animals = int(self.summary.shape[0]) if isinstance(getattr(self, "summary", None), pd.DataFrame) else 0
         tables = len(getattr(self, "data", {}))
-        self._last_process_summary = f"{tables} data tables | {animals} animals"
+        self._last_process_summary = f"{tables} data tables | {animals} subjects"
         tracker.close(self._last_process_summary + f" | Total: {format_elapsed(time.perf_counter() - tracker.run_start)}")
         return self.data
 
@@ -2703,7 +2703,7 @@ class Experiment:
             else:
                 roi_summary["Condition"] = _condition_from_animal_name(roi_summary.index)
 
-            # numSections: count unique Regions per animal within this ROI base.
+            # numSections: count unique Regions per subject within this ROI base.
             # Supports both the legacy single "ROI Properties" table and the
             # current named files such as "SCN ROI Properties.csv".
             roi_prop_frames = []
@@ -2801,7 +2801,7 @@ class Experiment:
                 roi_summary.insert(insert_at, raw_col, raw_count_df[count_col])
             roi_summary = _add_marker_scores(roi_summary)
 
-            # Mark behavior-only animals as not included for IF columns
+            # Mark behavior-only subjects as not included for IF columns
             if_animals = set()
             if_columns = set()
             for stain in self.data.values():
@@ -2839,7 +2839,7 @@ class Experiment:
         total_animals = max((s.shape[0] for s in self.summaries.values()), default=0)
         total_cols = sum(s.shape[1] for s in self.summaries.values())
         self._last_summary_summary = (
-            f"{len(self.summaries)} ROI(s) | {total_animals} animals x {total_cols} total columns"
+            f"{len(self.summaries)} ROI(s) | {total_animals} subjects x {total_cols} total columns"
         )
         tracker.close(self._last_summary_summary)
         return self.summaries
@@ -3034,7 +3034,7 @@ class Experiment:
 
         n_animals = self.master_region['AnimalName'].nunique()
         n_regions = len(self.master_region)
-        summary = f"{n_animals} animals | {n_regions} regions"
+        summary = f"{n_animals} subjects | {n_regions} regions"
         if len(failures) > 0:
             summary += f" | skipped: {_summarize_name_list(failures)}"
         self._last_region_summary = summary
@@ -3115,7 +3115,7 @@ class Experiment:
         self.imagesDict = _build_images_dict(self.images)
         markers = self.images["Marker"].dropna().astype(str).unique().tolist() if not self.images.empty else []
         animals = self.images["AnimalName"].dropna().astype(str).nunique() if not self.images.empty else 0
-        self._last_image_import_summary = f"{len(self.images)} images | {animals} animals | {len(markers)} markers"
+        self._last_image_import_summary = f"{len(self.images)} images | {animals} subjects | {len(markers)} markers"
         tracker.close(self._last_image_import_summary)
         return self.images
 
@@ -3247,8 +3247,15 @@ class Experiment:
 class MiniExperiment(Experiment):
     """Lightweight experiment — flat CSV folder, no marker subfolders."""
 
-    def __init__(self, name, filePath, *, animal_column=None, factor_mappings=None):
+    def __init__(self, name, filePath, *, animal_column=None, subject_column=None, factor_mappings=None):
+        if subject_column is not None:
+            if animal_column is not None and animal_column != subject_column:
+                raise ValueError(
+                    "Use either subject_column= or animal_column=, not both with different values."
+                )
+            animal_column = subject_column
         self.animal_column = animal_column
+        self.subject_column = animal_column
         self.factor_mappings = factor_mappings or {}
         super().__init__(name, filePath)
         self.source_root = self.filePath
@@ -3288,8 +3295,8 @@ class MiniExperiment(Experiment):
         animal_column = self._resolve_animal_column(out.columns)
         if animal_column is None:
             raise ValueError(
-                "MiniExperiment CSV files must contain an AnimalName column, "
-                "or pass animal_column=... when constructing MiniExperiment."
+                "MiniExperiment CSV files must contain a subject identifier column, "
+                "or pass subject_column=... when constructing MiniExperiment."
             )
         if "AnimalName" not in out.columns:
             out = out.rename(columns={animal_column: "AnimalName"})
@@ -3421,7 +3428,7 @@ class MiniExperiment(Experiment):
         self.summary = _add_marker_scores(self.summary)
         self.summary = _fill_intden_totals_with_zero(self.summary)
         self.summaries = {"SCN": self.summary}
-        self._last_summary_summary = f"{self.summary.shape[0]} animals x {self.summary.shape[1]} columns"
+        self._last_summary_summary = f"{self.summary.shape[0]} subjects x {self.summary.shape[1]} columns"
         return self.summary
 
     def set_condition_list(self, condition_list):
@@ -3477,5 +3484,5 @@ class MiniExperiment(Experiment):
             self.imagesDict = {}
             image_detail = "Skipped image import"
         tracker.finish_item("Import Images" if import_images else "Skip Images", detail=image_detail)
-        self._last_process_summary = f"{len(self.data)} data tables | {self.summary.shape[0]} animals"
+        self._last_process_summary = f"{len(self.data)} data tables | {self.summary.shape[0]} subjects"
         tracker.close(self._last_process_summary)

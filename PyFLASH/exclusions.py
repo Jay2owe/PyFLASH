@@ -3,7 +3,7 @@ Outlier exclusion / marking for downstream analysis.
 
 ``data_overview`` *reports* outliers; this module lets you act on them. The
 design is **non-destructive and reversible**: every function returns a cleaned
-*shallow copy* of the experiment whose per-animal summary tables are replaced
+*shallow copy* of the experiment whose per-subject summary tables are replaced
 with copies (the heavy raw ``.data`` is shared by reference, so this is cheap),
 and the original object is never mutated. That matters because the ``/pyflash``
 runner keeps a 288 MB batch resident — mutating it in place would leak across
@@ -39,6 +39,11 @@ import numpy as np
 import pandas as pd
 
 from PyFLASH._logging import logger as _log
+from PyFLASH.aliases import (
+    prefer_alias,
+    resolve_data_column_aliases,
+    resolve_split_filter_aliases,
+)
 from PyFLASH.utils import (
     excluded_manual_token,
     excluded_outlier_token,
@@ -50,14 +55,16 @@ __all__ = [
     "apply_exclusions",
     "exclude_outliers",
     "exclude_animals",
+    "exclude_subjects",
     "mark_exclusions",
     "mark_outliers",
     "mark_animals",
+    "mark_subjects",
     "clear_exclusions",
 ]
 
 # Identifier/metadata columns that are never analysable metrics (mirrors the
-# ``to_drop`` set used when the per-animal summary is built).
+# ``to_drop`` set used when the per-subject summary is built).
 _ID_COLS = {
     "Region", "AnimalName", "Condition", "Label", "ImageROI",
     "ROINameRaw", "Hemisphere", "ROI",
@@ -101,7 +108,7 @@ def _summary_for(experiment, base):
 def _clean_copy(experiment):
     """Shallow-copy the experiment with a fresh ``summaries`` dict of copies.
 
-    The original is left untouched; only the (small) per-animal summary frames
+    The original is left untouched; only the (small) per-subject summary frames
     are duplicated, so the heavy raw data is shared by reference.
     """
     exp = copy.copy(experiment)
@@ -148,7 +155,7 @@ def _cells_from_outliers(outliers, scope, columns, animals_table, animal_min_fla
 
     ``outliers`` is a ``data_overview`` outliers table (one row per flagged
     (group, column, animal)). For ``scope="animal"`` the flagged cells are
-    expanded to every metric column for animals exceeding ``animal_min_flags``.
+    expanded to every metric column for subjects exceeding ``animal_min_flags``.
     """
     records = []
     if outliers is None or len(outliers) == 0:
@@ -179,7 +186,7 @@ def _cells_from_outliers(outliers, scope, columns, animals_table, animal_min_fla
             })
         return records
 
-    # scope == "animal": expand flagged animals across all metric columns.
+    # scope == "animal": expand flagged subjects across all metric columns.
     if animals_table is not None and len(animals_table) > 0:
         flagged_animals = animals_table[
             animals_table["n_columns"] >= int(animal_min_flags)]["AnimalName"]
@@ -252,7 +259,7 @@ def _manual_records(df, cells, animals, columns, reason, kind):
     """Build manual cell/animal exclusion records (kind/reason coded).
 
     ``animals`` may be a list (sharing ``reason``) or a ``{animal: reason}`` dict
-    for per-animal reasons.
+    for per-subject reasons.
     """
     records = []
     for animal, col in (cells or []):
@@ -295,7 +302,7 @@ def _set_summary_and_save(exp, ledger, base, *, action, scope, save, run_label,
         verb = "excluded" if action == "exclude" else "marked"
         _log.confirm(
             f"[{action}_exclusions] {verb} {n_cells} cell(s) across "
-            f"{n_animals} animal(s) (scope={scope}, roi={base}).")
+            f"{n_animals} subject(s) (scope={scope}, roi={base}).")
     return exp
 
 
@@ -319,7 +326,8 @@ def _apply_manual(experiment, *, cells=None, animals=None, columns=None,
     return exp
 
 
-def apply_exclusions(experiment, *, cells=None, animals=None, columns=None,
+def apply_exclusions(experiment, *, cells=None, animals=None, subjects=None,
+                     columns=None,
                      reason=None, kind="manual", fill=None, roi=None):
     """Return a cleaned copy with the given cells/animals blanked for analysis.
 
@@ -333,6 +341,12 @@ def apply_exclusions(experiment, *, cells=None, animals=None, columns=None,
 
     The original ``experiment`` is never modified.
     """
+    animals = prefer_alias(
+        animals,
+        subjects,
+        current_name="animals",
+        alias_name="subjects",
+    )
     if cells is None and animals is None:
         base = _resolve_base(experiment, roi)
         exp = _clean_copy(experiment)
@@ -443,15 +457,20 @@ def _exclude_or_mark(experiment, *, apply, filtered_columns, column_strings,
         verb = "excluded" if apply else "marked"
         _log.confirm(
             f"[{'exclude' if apply else 'mark'}_outliers] {verb} {n_cells} cell(s) "
-            f"across {n_animals} animal(s) (scope={scope}, roi={base}).")
+            f"across {n_animals} subject(s) (scope={scope}, roi={base}).")
     return exp
 
 
-def exclude_outliers(experiment, *, filtered_columns=None, column_strings=None,
-                     regex_string=None, exclude="", by="all", factor=None,
-                     specificity=None, scope="cell", methods=("rout",),
+def exclude_outliers(experiment, *, filtered_columns=None, data_cols=None,
+                     column_strings=None, regex_string=None, exclude="",
+                     data_col_contains=None, data_col_regex=None,
+                     data_col_exclude=None,
+                     by="all", factor=None, split_by=None,
+                     specificity=None, filter_by=None,
+                     scope="cell", methods=("rout",),
                      iqr_k=1.5, mad_threshold=3.5, rout_q=1.0,
-                     animal_min_flags=2, fill=None, roi=None, outliers=None,
+                     animal_min_flags=2, subject_min_flags=None,
+                     fill=None, roi=None, outliers=None,
                      save=False, run_label=None,
                      verbose=True):
     """Detect outliers and return a cleaned copy with them removed from analysis.
@@ -462,11 +481,36 @@ def exclude_outliers(experiment, *, filtered_columns=None, column_strings=None,
     ``data_overview`` returns) to skip re-detection.
 
     ``scope="cell"`` blanks each flagged (animal, metric) value; ``scope="animal"``
-    blanks every metric for animals flagged on ``>= animal_min_flags`` metrics.
+    blanks every metric for subjects flagged on ``>= animal_min_flags`` metrics.
     The returned experiment carries an audit ``.exclusions`` ledger and an
     ``.exclusion_summary``; the original is untouched. Feed the result straight
     into any plot/stat function.
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="all",
+    )
+    animal_min_flags = prefer_alias(
+        animal_min_flags,
+        subject_min_flags,
+        current_name="animal_min_flags",
+        alias_name="subject_min_flags",
+        default=2,
+    )
     return _exclude_or_mark(
         experiment, apply=True, filtered_columns=filtered_columns,
         column_strings=column_strings, regex_string=regex_string, exclude=exclude,
@@ -476,11 +520,16 @@ def exclude_outliers(experiment, *, filtered_columns=None, column_strings=None,
         outliers=outliers, save=save, run_label=run_label, verbose=verbose)
 
 
-def mark_outliers(experiment, *, filtered_columns=None, column_strings=None,
-                  regex_string=None, exclude="", by="all", factor=None,
-                  specificity=None, scope="cell", methods=("rout",),
+def mark_outliers(experiment, *, filtered_columns=None, data_cols=None,
+                  column_strings=None, regex_string=None, exclude="",
+                  data_col_contains=None, data_col_regex=None,
+                  data_col_exclude=None,
+                  by="all", factor=None, split_by=None,
+                  specificity=None, filter_by=None,
+                  scope="cell", methods=("rout",),
                   iqr_k=1.5, mad_threshold=3.5, rout_q=1.0,
-                  animal_min_flags=2, fill=None, roi=None, outliers=None,
+                  animal_min_flags=2, subject_min_flags=None,
+                  fill=None, roi=None, outliers=None,
                   save=False, run_label=None,
                   verbose=True):
     """Non-destructive twin of :func:`exclude_outliers`.
@@ -490,6 +539,31 @@ def mark_outliers(experiment, *, filtered_columns=None, column_strings=None,
     :func:`apply_exclusions` (called with no cells/animals reads the ledger), or
     inspect the ledger to colour the flagged points in a plot.
     """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="all",
+    )
+    animal_min_flags = prefer_alias(
+        animal_min_flags,
+        subject_min_flags,
+        current_name="animal_min_flags",
+        alias_name="subject_min_flags",
+        default=2,
+    )
     return _exclude_or_mark(
         experiment, apply=False, filtered_columns=filtered_columns,
         column_strings=column_strings, regex_string=regex_string, exclude=exclude,
@@ -499,13 +573,20 @@ def mark_outliers(experiment, *, filtered_columns=None, column_strings=None,
         outliers=outliers, save=save, run_label=run_label, verbose=verbose)
 
 
-def mark_exclusions(experiment, *, cells=None, animals=None, columns=None,
+def mark_exclusions(experiment, *, cells=None, animals=None, subjects=None,
+                    columns=None,
                     reason=None, roi=None):
     """Record an explicit manual exclusion ledger without changing any data.
 
     Mirror of :func:`apply_exclusions`' inputs, but non-destructive: attach the
     ledger to a copy and realise later via ``apply_exclusions(marked)``.
     """
+    animals = prefer_alias(
+        animals,
+        subjects,
+        current_name="animals",
+        alias_name="subjects",
+    )
     return _apply_manual(experiment, cells=cells, animals=animals, columns=columns,
                          reason=reason, kind="manual", fill=None, roi=roi,
                          apply=False, save=False, verbose=False)
@@ -513,12 +594,12 @@ def mark_exclusions(experiment, *, cells=None, animals=None, columns=None,
 
 def exclude_animals(experiment, animals, *, reason=None, columns=None, roi=None,
                     fill=None, save=False, run_label=None, verbose=True):
-    """Manually exclude whole animals from analysis, with a reason.
+    """Legacy alias for manually excluding whole subjects from analysis.
 
     ``animals`` is a single name, a list of names (sharing ``reason``), or a
-    ``{animal: reason}`` dict for per-animal reasons. Every metric for each animal
+    ``{subject: reason}`` dict for per-subject reasons. Every metric for each subject
     (or just ``columns``) is set to the ``EXCLUDED_MANUAL:<reason>`` sentinel in a
-    cleaned copy — so the reason is visible in each cell of the animal's row and
+    cleaned copy — so the reason is visible in each cell of the subject's row and
     every downstream plot/stat ignores it — the reason is recorded in the
     ``.exclusions`` ledger, and the original experiment is untouched.
 
@@ -540,6 +621,35 @@ def mark_animals(experiment, animals, *, reason=None, columns=None, roi=None,
     return _apply_manual(experiment, animals=animals, columns=columns, reason=reason,
                          kind="manual", fill=None, roi=roi, apply=False, save=False,
                          verbose=verbose)
+
+
+def exclude_subjects(experiment, subjects, *, reason=None, columns=None, roi=None,
+                     fill=None, save=False, run_label=None, verbose=True):
+    """Subject-neutral alias for :func:`exclude_animals`."""
+    return exclude_animals(
+        experiment,
+        subjects,
+        reason=reason,
+        columns=columns,
+        roi=roi,
+        fill=fill,
+        save=save,
+        run_label=run_label,
+        verbose=verbose,
+    )
+
+
+def mark_subjects(experiment, subjects, *, reason=None, columns=None, roi=None,
+                  verbose=True):
+    """Subject-neutral alias for :func:`mark_animals`."""
+    return mark_animals(
+        experiment,
+        subjects,
+        reason=reason,
+        columns=columns,
+        roi=roi,
+        verbose=verbose,
+    )
 
 
 def clear_exclusions(experiment):

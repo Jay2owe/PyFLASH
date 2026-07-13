@@ -241,7 +241,7 @@ class Batch(Experiment):
         self._create_batch_summary()
         n_rois = len(self.summaries)
         n_animals = max((s.shape[0] for s in self.summaries.values()), default=0)
-        tracker.finish_item("Create Batch Summary", detail=f"{n_rois} ROI(s) | {n_animals} animals")
+        tracker.finish_item("Create Batch Summary", detail=f"{n_rois} ROI(s) | {n_animals} subjects")
         tracker.start_item("Set Batch Conditions")
         self.set_condition_list(self.condition_list)
         tracker.finish_item("Set Batch Conditions")
@@ -260,7 +260,7 @@ class Batch(Experiment):
         tracker.start_item("Assign Regions")
         self.assign_region()
         tracker.finish_item("Assign Regions", detail=getattr(self, "_last_region_summary", None))
-        self._last_process_summary = f"{len(self.experiment_list)} experiments | {self.summary.shape[0]} animals"
+        self._last_process_summary = f"{len(self.experiment_list)} experiments | {self.summary.shape[0]} subjects"
         tracker.close(self._last_process_summary)
 
     def importImages(self, progress=True):
@@ -304,7 +304,7 @@ class Batch(Experiment):
         self.imagesDict = _build_images_dict(self.images)
         markers = self.images["Marker"].dropna().astype(str).unique().tolist()
         animals = self.images["AnimalName"].dropna().astype(str).nunique() if not self.images.empty else 0
-        self._last_image_import_summary = f"{len(self.images)} images | {animals} animals | {len(markers)} markers"
+        self._last_image_import_summary = f"{len(self.images)} images | {animals} subjects | {len(markers)} markers"
         tracker.close(self._last_image_import_summary)
         return self.images
 
