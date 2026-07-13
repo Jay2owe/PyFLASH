@@ -10,6 +10,21 @@ or other time-like factors.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_timecourse(
+    ex.timecourse,
+    column="Response",
+    time_col="Timepoint",
+    group_col="Condition",
+    time_map={"T1": 1, "T2": 2, "T3": 4, "T4": 8},
+    save=False,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_timecourse example figure](../gallery/images/plot_timecourse.svg)
 
 *Longitudinal growth curves per group across timepoints. Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -37,15 +52,26 @@ plot_timecourse(batch, column, time_col='Time', group_col='Genotype', model='aut
 | `column` | string | required | Numeric response column to fit and plot. |
 | `time_col` | string | `'Time'` | Column containing time labels or values. |
 | `group_col` | string | `'Genotype'` | Column whose levels get separate curves. |
-| `model` | string | `'auto'` | Accepted values: `'auto'`, `'linear'`, `'exponential'`, or `'logistic'`. |
-| `filter_by` / `specificity` | mapping, tuple, list, or `None` | `None` | Row filter before fitting. |
+| `model` | string | `'auto'` | Growth-curve model. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Row filter before fitting. Alias: `specificity`. |
 | `time_map` | mapping or `None` | `None` | Maps categorical labels to numeric time values, e.g. `{"WeekTwo": 2}`. |
-| `subject_col` / `animal_col` | string or `None` | `None`, `'AnimalName'` | Subject column for raw DataFrame adaptation. `animal_col` is the legacy alias. |
+| `subject_col` | string or `None` | `None` | Subject column for raw DataFrame adaptation. Alias: `animal_col`, whose legacy default is `'AnimalName'`. |
 | `palette` | dict or `None` | `None` | Optional color map for group levels. |
 | `show_points` | bool | `True` | Show individual points behind mean +/- SEM summaries. |
 | `title` | string or `None` | `None` | Custom title. |
-| `save`, `save_path`, `save_name`, `dpi` | saving options | `False`, `None`, `None`, `600` | Figure saving controls. |
+| `save`, `save_path`, `save_name`, `dpi` | saving options | `False`, `None`, `None`, `600` | Figure saving controls. Current SVG saving uses PyFLASH's shared `save_fig` DPI rather than passing this `dpi` value through. |
 | `return_data` | bool | `False` | Return fit dictionaries with the figure. |
+
+## Parameter Options
+
+### `model` options
+
+| Option | Behavior |
+|---|---|
+| `'auto'` (default) | Try supported growth-curve models and use the best resolved fit. |
+| `'linear'` | Fit a linear trend. |
+| `'exponential'` | Fit an exponential trend. |
+| `'logistic'` | Fit a logistic growth curve. |
 
 ## Returns
 
@@ -65,7 +91,7 @@ Fit dictionaries come from `PyFLASH.stats_extra.fit_growth_curve` and include
 `batch.data_path`, then the current folder.
 
 The default filename stem is `<column>_timecourse`; pass `save_name` to
-override it.
+override it. The current SVG save path uses the shared `save_fig` DPI setting.
 
 ## Examples
 

@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
   "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="472.142544pt" height="488.933625pt" viewBox="0 0 472.142544 488.933625" xmlns="http://www.w3.org/2000/svg" version="1.1">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="504pt" height="360pt" viewBox="0 0 405 322.613625" xmlns="http://www.w3.org/2000/svg" version="1.1">
  <metadata>
   <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
    <cc:Work>
     <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
-    <dc:date>2026-07-10T09:22:01.073153</dc:date>
+    <dc:date>2026-07-12T20:53:37.703573</dc:date>
     <dc:format>image/svg+xml</dc:format>
     <dc:creator>
      <cc:Agent>
-      <dc:title>Matplotlib v3.10.0, https://matplotlib.org/</dc:title>
+      <dc:title>Matplotlib v3.9.2, https://matplotlib.org/</dc:title>
      </cc:Agent>
     </dc:creator>
    </cc:Work>
@@ -21,55 +21,56 @@
  </defs>
  <g id="figure_1">
   <g id="patch_1">
-   <path d="M 0 488.933625 
-L 472.142544 488.933625 
-L 472.142544 0 
+   <path d="M 0 322.613625 
+L 405 322.613625 
+L 405 0 
 L 0 0 
+L 0 322.613625 
 z
-" style="fill: #ffffff"/>
+" style="fill: none"/>
   </g>
   <g id="axes_1">
    <g id="patch_2">
-    <path d="M 376.629649 403.452458 
-C 405.003656 375.078451 424.333243 338.915332 432.161613 299.55946 
-C 439.989994 260.203584 435.970812 219.396103 420.614908 182.323674 
-C 405.259004 145.251248 379.245753 113.554016 345.881448 91.260696 
-C 312.517143 68.967377 273.277863 57.064276 233.150958 57.064276 
-L 233.150967 259.973777 
+    <path d="M 291.595718 265.909239 
+C 309.215039 248.289918 321.218074 225.833816 326.079233 201.39512 
+C 330.940399 176.956422 328.44462 151.616325 318.909111 128.595571 
+C 309.373602 105.57482 293.220233 85.891886 272.502102 72.048472 
+C 251.783971 58.205057 227.417675 50.813625 202.500193 50.813625 
+L 202.500199 176.813719 
 z
 " style="fill: #ffffff; stroke: #56b4e9; stroke-linejoin: miter"/>
    </g>
    <g id="patch_3">
-    <path d="M 233.15097 57.064276 
-C 199.784216 57.064276 166.926946 65.294589 137.500095 81.023568 
-C 108.073245 96.752547 82.975463 119.499839 64.437887 147.243284 
-C 45.90031 174.986728 34.48905 206.87906 31.218533 240.085142 
-C 27.948015 273.291225 32.918115 306.796984 45.687014 337.623849 
-C 58.455913 368.450711 78.633689 395.6573 104.426545 416.824937 
-C 130.2194 437.992575 160.839667 452.474893 193.565287 458.984422 
-C 226.290907 465.493963 260.12249 463.831934 292.052483 454.146066 
-C 323.982477 444.46021 353.035787 427.046319 376.629649 403.452458 
-L 233.150967 259.973777 
+    <path d="M 202.5002 50.813625 
+C 181.780549 50.813625 161.37727 55.924377 143.104169 65.691553 
+C 124.831067 75.458729 109.246174 89.584047 97.734952 106.811808 
+C 86.223729 124.03957 79.137714 143.843655 77.106831 164.463534 
+C 75.075947 185.083415 78.162215 205.889384 86.091279 225.031848 
+C 94.020344 244.174311 106.550076 261.068703 122.566587 274.213106 
+C 138.583098 287.35751 157.597271 296.350551 177.9188 300.392753 
+C 198.240329 304.434963 219.248623 303.402898 239.076094 297.388294 
+C 258.903565 291.373697 276.94471 280.560247 291.595718 265.909239 
+L 202.500199 176.813719 
 z
 " style="fill: #56b4e9; stroke: #56b4e9; stroke-linejoin: miter"/>
    </g>
    <g id="matplotlib.axis_1"/>
    <g id="matplotlib.axis_2"/>
    <g id="text_1">
-    <text style="font-size: 10px; font-family: 'Arial'; text-anchor: start" x="439.361294" y="177.143816" transform="rotate(-0 439.361294 177.143816)">&lt;= 12</text>
+    <text style="font: 10px 'Arial'; text-anchor: start" x="330.549997" y="126.358911" transform="rotate(-0 330.549997 126.358911)">&lt;= 12</text>
    </g>
    <g id="text_2">
-    <text style="font-size: 10px; font-family: 'Arial'; text-anchor: middle" x="345.629327" y="215.968869" transform="rotate(-0 345.629327 215.968869)">37.5%</text>
+    <text style="font: 10px 'Arial'; text-anchor: middle" x="272.345544" y="150.467986" transform="rotate(-0 272.345544 150.467986)">37.5%</text>
    </g>
    <g id="text_3">
-    <text style="font-size: 10px; font-family: 'Arial'; text-anchor: end" x="26.940625" y="347.974013" transform="rotate(-0 26.940625 347.974013)">&gt; 12</text>
+    <text style="font: 10px 'Arial'; text-anchor: end" x="74.450391" y="232.438818" transform="rotate(-0 74.450391 232.438818)">&gt; 12</text>
    </g>
    <g id="text_4">
-    <text style="font-size: 10px; font-family: 'Arial'; text-anchor: middle" x="120.672599" y="309.148977" transform="rotate(-0 120.672599 309.148977)">62.5%</text>
+    <text style="font: 10px 'Arial'; text-anchor: middle" x="132.654849" y="208.329753" transform="rotate(-0 132.654849 208.329753)">62.5%</text>
    </g>
    <g id="text_5">
-    <text style="font-weight: 700; font-size: 14px; font-family: 'Arial'" transform="translate(228.095334 17.220937)">B</text>
-    <text style="font-weight: 700; font-size: 14px; font-family: 'Arial'" transform="translate(160.394397 32.213625)">Marker1 Volume (µm³)</text>
+    <text style="font: 700 14px 'Arial'" transform="translate(197.444687 17.220937)">B</text>
+    <text style="font: 700 14px 'Arial'" transform="translate(129.74375 32.213625)">Marker1 Volume (µm³)</text>
    </g>
   </g>
  </g>

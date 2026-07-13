@@ -10,6 +10,19 @@ Use it to scan the direction and size of many group differences at once.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_group_matrix(
+    exp,
+    filtered_columns=["Marker1_Count", "Marker2_Count", "Marker3_Count"],
+    control="A",
+    save=True,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_group_matrix example figure](../gallery/images/plot_group_matrix.svg)
 
 *Marker × group signed-Hedges-g matrix vs control A. Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -66,12 +79,10 @@ plot_group_matrix(
 | Parameter | Type | Default | Meaning |
 |---|---|---:|---|
 | `experiment` | `Batch`, `Experiment`, or `pandas.DataFrame` | required | Data source. |
-| `data_cols` | list-like or `None` | `None` | Exact data columns to analyze. Preferred public name. |
-| `filtered_columns` | list-like or `None` | `None` | Exact summary columns to compare. Internal/legacy name. |
-| `by` | `str` | `"conditions"` | Grouping mode. Common values are `"conditions"` and `"all"`. |
-| `factor` | `str` or `None` | `None` | Group by a factor column instead of main condition groups. |
-| `split_by` | `str` or `None` | `None` | Public grouping alias. Values such as a column name usually resolve to `factor`. |
-| `filter_by` | dict, tuple, queue, or `None` | `None` | Preferred public row filter before grouping. Legacy alias: `specificity`. |
+| `data_cols` | list-like or `None` | `None` | Exact data columns to analyze. Alias: `filtered_columns`. |
+| `by` | `str` | `"conditions"` | Grouping mode. |
+| `split_by` | `str` or `None` | `None` | Group by a factor column instead of main condition groups. Alias: `factor`. |
+| `filter_by` | dict, tuple, queue, or `None` | `None` | Row filter before grouping. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | ROI-base selector. Multiple ROI bases return a queue dictionary. |
 | `control` | `str` or `None` | `None` | Reference group. If omitted, the first resolved group is used. Matching is case-insensitive. |
 | `alpha` | number | `0.05` | Kept for the shared renderer. The standalone matrix does not mark significance because it has no p-value column. |
@@ -80,21 +91,23 @@ plot_group_matrix(
 | `min_n` | `int` | `3` | Minimum finite subject-level values required in both reference and comparison groups. |
 | `tick_label_size` | number | `20` | Base font size for labels and title. |
 | `save` | `bool` | `True` | Save the SVG figure under the input object's figure folder. |
-| `group_col` | `str` or `None` | `None` | Preferred public grouping column. Legacy alias: `condition_col`. |
-| `group_cols` | list-like or `None` | `None` | Preferred public crossed-group columns. Legacy alias: `factor_cols`. |
-| `subject_col` | `str` or `None` | `None` | Subject/sample ID column. Legacy alias: `animal_col`. |
-| `group_list` | `groupList` or `None` | `None` | Optional group metadata for raw DataFrame input. |
-| `groups` | `groupList` or `None` | `None` | Alternative public spelling for `group_list`. |
-| `data_col_contains` | `str`, list-like, or `None` | `None` | Include data columns whose names contain these strings. Preferred public name. |
-| `data_col_regex` | `str` or `None` | `None` | Include data columns matching this regex. Preferred public name. |
-| `data_col_exclude` | `str`, list-like, or `None` | `None` | Exclude matching data columns after selection. Preferred public name. |
-| `condition_col` | `str` | `"Condition"` | Legacy alias for `group_col`. |
-| `factor_cols` | list-like or `None` | `None` | Legacy alias for `group_cols`. |
-| `animal_col` | `str` | `"AnimalName"` | Legacy alias for `subject_col`. |
-| `column_strings` | `str`, list-like, or `None` | `None` | Legacy/internal alias for `data_col_contains`. |
-| `regex_string` | `str` or `None` | `None` | Legacy/internal alias for `data_col_regex`. |
-| `exclude` | `str` or list-like | `""` | Legacy/internal alias for `data_col_exclude`. |
+| `group_col` | `str` or `None` | `None` | Grouping column for raw DataFrame input. Alias: `condition_col`. |
+| `group_cols` | list-like or `None` | `None` | Crossed-group columns for raw DataFrame input. Alias: `factor_cols`. |
+| `subject_col` | `str` or `None` | `None` | Subject/sample ID column. Alias: `animal_col`. |
+| `group_list` | `groupList` or `None` | `None` | Optional group metadata for raw DataFrame input. Alias: `groups`. |
+| `data_col_contains` | `str`, list-like, or `None` | `None` | Include data columns whose names contain these strings. Alias: `column_strings`. |
+| `data_col_regex` | `str` or `None` | `None` | Include data columns matching this regex. Alias: `regex_string`. |
+| `data_col_exclude` | `str`, list-like, or `None` | `None` | Exclude matching data columns after selection. Alias: `exclude`, whose legacy default is `""`. |
 | `dataframe_kwargs` | `dict` or `None` | `None` | Advanced `from_dataframe` options. |
+
+## Parameter Options
+
+### `by` options
+
+| Option | Behavior |
+|---|---|
+| `"conditions"` (default) | Use resolved condition/group panels. |
+| `"all"` | Pool rows where supported. |
 
 ## Returns
 
@@ -115,7 +128,8 @@ Common filename:
 Group Difference Matrix.svg
 ```
 
-Specificity and ROI suffixes are added when those filters are active.
+Factor and row-filter contexts are encoded into filename suffixes. When several
+ROI bases are queued, the ROI base is prepended as a top-level folder.
 
 ## Examples
 

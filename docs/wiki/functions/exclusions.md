@@ -107,30 +107,23 @@ mark_animals(experiment, animals, ...)
 | Parameter | Type | Default | Meaning |
 |---|---|---:|---|
 | `experiment` | PyFLASH object | required | Object whose summary table should be marked or cleaned. |
-| `data_cols` | list-like or `None` | `None` | Exact metric columns considered for outlier detection. Preferred public name. |
-| `filtered_columns` | list-like or `None` | `None` | Legacy/internal alias for `data_cols`. |
-| `data_col_contains` | list-like, `str`, or `None` | `None` | Include columns whose names contain these substrings. Preferred public name. |
-| `column_strings` | list-like, `str`, or `None` | `None` | Legacy/internal alias for `data_col_contains`. |
-| `data_col_regex` | `str` or `None` | `None` | Include columns matching this regular expression. Preferred public name. |
-| `regex_string` | `str` or `None` | `None` | Legacy/internal alias for `data_col_regex`. |
-| `data_col_exclude` | `str` or list-like | `None` | Exclude matching column names after selection. Preferred public name. |
-| `exclude` | `str` or list-like | `""` | Legacy/internal alias for `data_col_exclude`. |
+| `data_cols` | list-like or `None` | `None` | Exact metric columns considered for outlier detection. Alias: `filtered_columns`. |
+| `data_col_contains` | list-like, `str`, or `None` | `None` | Include columns whose names contain these substrings. Alias: `column_strings`. |
+| `data_col_regex` | `str` or `None` | `None` | Include columns matching this regular expression. Alias: `regex_string`. |
+| `data_col_exclude` | `str` or list-like | `None` | Exclude matching column names after selection. Alias: `exclude`, whose legacy default is `""`. |
 | `by` | `str` | `"all"` | Outlier grouping mode passed to `data_overview` detection. |
 | `factor` | `str` or `None` | `None` | Factor column or condition factor for grouped outlier detection. |
 | `split_by` | `str` or `None` | `None` | Public grouping alias resolved to `by` or `factor`. |
-| `filter_by` | tuple, list, dict, or `None` | `None` | Row filter before detection. Preferred public name. |
-| `specificity` | tuple, list, dict, or `None` | `None` | Legacy/internal alias for `filter_by`. |
-| `scope` | `str` | `"cell"` | Accepted values: `"cell"` blanks each flagged cell; `"animal"` blanks every selected metric for subjects flagged on enough metrics. The `animal` value is retained for compatibility. |
-| `methods` | tuple/list of `str` | `("rout",)` | Outlier rules passed to `data_overview`; common values include `"rout"`, `"mad"`, and `"iqr"`. |
+| `filter_by` | tuple, list, dict, or `None` | `None` | Row filter before detection. Alias: `specificity`. |
+| `scope` | `str` | `"cell"` | Exclusion scope for detected outliers. |
+| `methods` | tuple/list of `str` | `("rout",)` | Outlier rules passed to `data_overview`. |
 | `iqr_k` | `float` | `1.5` | IQR multiplier for IQR outlier detection. |
 | `mad_threshold` | `float` | `3.5` | Modified z-score threshold for MAD outlier detection. |
 | `rout_q` | `float` | `1.0` | ROUT false discovery rate percentage. |
-| `subject_min_flags` | `int` or `None` | `None` | Preferred name for the minimum number of flagged metrics required to blank a subject across metrics. |
-| `animal_min_flags` | `int` | `2` | Legacy/internal alias for `subject_min_flags`; retained because the compatibility scope is still `scope="animal"`. |
+| `subject_min_flags` | `int` or `None` | `None` | Minimum number of flagged metrics required to blank a subject across metrics. Alias: `animal_min_flags`, retained because the compatibility scope is still `scope="animal"`. |
 | `outliers` | `pandas.DataFrame` or `None` | `None` | Precomputed outlier table, usually from `data_overview`, to skip re-detection. |
 | `cells` | iterable of `(subject, column)` or `None` | `None` | Explicit manual cells for `apply_exclusions` or `mark_exclusions`. |
-| `subjects` | `str`, list-like, dict, or `None` | `None` | Whole subjects to exclude or mark; dict values are per-subject reasons. |
-| `animals` | `str`, list-like, dict, or `None` | `None` | Legacy/internal alias for `subjects`. |
+| `subjects` | `str`, list-like, dict, or `None` | `None` | Whole subjects to exclude or mark; dict values are per-subject reasons. Alias: `animals`. |
 | `columns` | list-like or `None` | `None` | Metric columns affected by whole-subject manual exclusions. `None` means every metric column. |
 | `reason` | `str` or `None` | `None` | Manual exclusion reason stored in the ledger and sentinel token. |
 | `kind` | `str` | `"manual"` | Ledger kind for explicit `apply_exclusions`; ordinary users usually leave this alone. |
@@ -139,6 +132,23 @@ mark_animals(experiment, animals, ...)
 | `save` | `bool` | `False` | Save the exclusion ledger CSV for helpers that expose this option. |
 | `run_label` | `str` or `None` | `None` | Label used in saved exclusion CSV filenames. |
 | `verbose` | `bool` | `True` | Print a compact summary of marked or excluded cells. |
+
+## Parameter Options
+
+### `scope` options
+
+| Option | Behavior |
+|---|---|
+| `"cell"` (default) | Blank each flagged metric cell. |
+| `"animal"` | Blank every selected metric for subjects flagged on enough metrics. This value is retained for compatibility with older naming. |
+
+### `methods` options
+
+| Option | Behavior |
+|---|---|
+| `"rout"` (default) | Use ROUT outlier detection with `rout_q`. |
+| `"mad"` | Use modified-z-score outlier detection with `mad_threshold`. |
+| `"iqr"` | Use interquartile-range outlier detection with `iqr_k`. |
 
 ## Returns
 

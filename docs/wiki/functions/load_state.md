@@ -53,7 +53,10 @@ these cases:
 - paths were rebased and `resave_if_rebased=True`.
 
 No figures, CSV tables, Excel workbooks, or pipeline run folders are created by
-`load_state` itself.
+`load_state` itself. With the default `normalize_paths=True`, loading may
+refresh derived save paths through `createSavePaths()`. For object types whose
+`createSavePaths()` creates standard output directories, this can create
+missing folders, but not analysis result files.
 
 ## Examples
 
@@ -100,6 +103,9 @@ batch = load_state(
 - `normalize_paths=True` can update the in-memory object without saving it. Use
   `resave_if_rebased=True` or call [`save_state`](save_state.md) if you want the
   repaired paths persisted.
+- Because path normalization refreshes derived save paths, it can indirectly
+  create standard output directories for object types whose `createSavePaths()`
+  method creates folders.
 - Individual plot or pipeline outputs are not regenerated when a pickle is
   loaded. The saved object just points to its output folders.
 

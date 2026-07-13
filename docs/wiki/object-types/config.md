@@ -40,7 +40,7 @@ are restored.
 
 | Attribute | Meaning |
 |---|---|
-| `THRESHOLD` | Default colocalisation threshold. Used when an experiment or object marker does not receive an explicit threshold. |
+| `THRESHOLD` | Default colocalisation threshold used by automatic object-marker colocalisation cleaning. |
 | `PIXEL_SIZE` | Microns per pixel used by coordinate conversions. |
 | `SECTION_THICKNESS_UM` | Fallback section thickness in microns when ROI volume is unavailable. |
 | `FALLBACK_USERS` | Optional usernames used by path resolution when moving data between machines. |
@@ -105,17 +105,11 @@ finally:
     Config.THRESHOLD = old
 ```
 
-Prefer an explicit argument when available:
-
-```python
-batch = create_batch(
-    "threshold-50",
-    groups,
-    "/path/to/output-folder",
-    experiments="/path/to/experiment-parent-folder",
-    threshold=50,
-)
-```
+This global setting is the value used by automatic object-marker
+colocalisation cleaning. The `objectMarker.threshold` constructor value is
+stored on the object, but current automatic cleaning calls
+`addColocData(Config.THRESHOLD)`; call `addColocData(threshold)` explicitly if
+you need to recompute colocalisation columns with a different threshold.
 
 Customize condition color keys:
 

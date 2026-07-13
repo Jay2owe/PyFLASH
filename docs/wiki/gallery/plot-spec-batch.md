@@ -36,7 +36,6 @@ spec = {
             "data_cols": ["GFAP Volume", "Iba1 Volume"],
             "group_col": "Diagnosis",
             "subject_col": "Subject",
-            "split_by": "all",
             "save": False,
         },
     ]

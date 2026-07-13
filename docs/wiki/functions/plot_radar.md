@@ -11,6 +11,24 @@ Registry name: `radar`.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_radar(
+    exp,
+    filtered_columns=[
+        "Marker1_Count",
+        "Marker2_Count",
+        "Marker3_Count",
+        "Marker1_IntDenMean",
+    ],
+    combine=True,
+    save=True,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_radar example figure](../gallery/images/plot_radar.svg)
 
 *Marker-profile radar for groups A/B/C. Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -43,7 +61,7 @@ plot_radar(
     fill=True,
     alpha=0.20,
     line_width=2.0,
-    point_size=28,
+    point_size=None,
     tick_label_size=10,
     label_wrap=18,
     include_N=False,
@@ -61,7 +79,7 @@ plot_radar(
     radial_value_color="grey",
     radial_value_size=None,
     figsize=(8, 8),
-    auto_style=True,
+    auto_style=None,
     style_cycle=None,
     conditions=None,
     condition_col="Condition",
@@ -73,6 +91,8 @@ plot_radar(
     group_cols=None,
     subject_col=None,
     dataframe_kwargs=None,
+    _scale_reference=None,
+    _resolved_columns=None,
 )
 ```
 
@@ -90,33 +110,46 @@ plot_radar(
 | Parameter | Type | Default | Meaning |
 |---|---|---:|---|
 | `experiment` | PyFLASH-like object or `DataFrame` | required | Summary data source. |
-| `data_cols` | list-like or `None` | `None` | Preferred exact columns for radar axes. Legacy alias: `filtered_columns`. |
-| `data_col_contains` | `str`, list-like, or `None` | `None` | Include columns containing text. Legacy alias: `column_strings`. |
-| `data_col_regex` | `str`, list-like, or `None` | `None` | Include columns matching regex. Legacy alias: `regex_string`. |
-| `data_col_exclude` | `str`, list-like, or `None` | `None` | Exclude matching columns. Legacy alias: `exclude`. |
-| `split_by` | `str` or `None` | `None` | Preferred grouping mode. Legacy alias: `factor` or `by`. |
-| `filter_by` | dict, tuple, list, or `None` | `None` | Preferred row filter. Legacy alias: `specificity`. |
+| `data_cols` | list-like or `None` | `None` | Exact columns for radar axes. Alias: `filtered_columns`. |
+| `data_col_contains` | `str`, list-like, or `None` | `None` | Include columns containing text. Alias: `column_strings`. |
+| `data_col_regex` | `str`, list-like, or `None` | `None` | Include columns matching regex. Alias: `regex_string`. |
+| `data_col_exclude` | `str`, list-like, or `None` | `None` | Exclude matching columns. Alias: `exclude`. |
+| `split_by` | `str` or `None` | `None` | Grouping mode. Aliases: `factor`, `by`. |
+| `filter_by` | dict, tuple, list, or `None` | `None` | Row filter. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | ROI-base selector. Multiple ROI bases run queue mode. |
 | `save` | `bool` | `True` | Save radar figures under `experiment.fig_path`. |
 | `combine` | `bool` | `False` | Overlay all groups on one radar axis. |
-| `statistic` | `str` or callable | `"mean"` | Summary per axis. Built-ins include `"mean"`, `"median"`, `"sum"`, `"min"`, and `"max"`. |
+| `statistic` | `str` or callable | `"mean"` | Summary per axis. |
 | `normalize` | `bool` | `True` | Normalize each column to a 0 to 1 scale before plotting. |
 | `share_scale` | `bool` | `True` | Use one per-column scale across queued sibling radar plots. |
 | `share_columns_across_panels` | `bool` | `True` | Use the same resolved column set for each panel. |
 | `fill` | `bool` | `True` | Fill radar polygons as well as drawing outlines. |
 | `alpha` | number | `0.20` | Fill transparency. |
 | `line_width` | number | `2.0` | Polygon outline width. |
-| `point_size` | number | `28` | Vertex marker size. |
+| `point_size` | number or `None` | `None` | Vertex marker diameter in points. `None` uses `set_pyflash_style(point_size=...)`; Matplotlib receives area after conversion. |
 | `tick_label_size` | number | `10` | Axis label size. |
 | `label_wrap` | `int` | `18` | Wrap long axis labels at this width. Use `0` to disable wrapping. |
 | `include_N` | `bool` | `False` | Add contributing subject count to labels. |
-| `show_subject_points` | `bool` or `None` | `None` | Preferred alias for showing subject-level markers. |
-| `show_animal_xs` | `bool` | `True` | Legacy name for subject-level markers. |
-| `subject_point_marker`, `subject_point_size`, `subject_point_alpha`, `subject_point_color` | style values | `None` | Preferred aliases for subject marker styling. |
+| `show_subject_points` | `bool` or `None` | `None` | Show subject-level markers. Alias: `show_animal_xs`. |
+| `subject_point_marker`, `subject_point_size`, `subject_point_alpha`, `subject_point_color` | style values | `None` | Subject marker styling aliases. |
 | `radial_value_radii` | tuple or `None` | `(0.30, 1.00)` | Radial fractions to label with values. `None` hides labels. |
 | `figsize` | tuple | `(8, 8)` | Figure size in inches. |
-| `auto_style`, `style_cycle` | style controls | `True`, `None` | Control hatch/fill styles for groups sharing colours. |
+| `auto_style`, `style_cycle` | style controls | `None`, `None` | Control hatch/fill styles for groups sharing colours. `None` uses the active style default. |
 | `group_col`, `group_cols`, `subject_col`, `group_list`, `dataframe_kwargs` | raw DataFrame controls | varies | Used only when `experiment` is a raw `pandas.DataFrame`. |
+| `_scale_reference`, `_resolved_columns` | internal use | `None`, `None` | Internal queue helpers used to share scale and resolved columns across queued radar calls. |
+
+## Parameter Options
+
+### `statistic` options
+
+| Option | Behavior |
+|---|---|
+| `"mean"` (default) | Use mean values per radar axis. |
+| `"median"` | Use median values per radar axis. |
+| `"sum"` | Use summed values per radar axis. |
+| `"min"` | Use minimum values per radar axis. |
+| `"max"` | Use maximum values per radar axis. |
+| Callable | Use the provided function to summarize each axis. |
 
 ## Returns
 

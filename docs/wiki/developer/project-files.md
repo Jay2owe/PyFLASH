@@ -15,6 +15,7 @@ The `Project` dataclass round-trips to JSON via `to_json` / `from_json`. Its
 fields:
 
 - `name` — project label.
+- `experiment_paths` — ordered experiment folders selected in the UI.
 - `batch_path` — root/results folder; `experiments` — an optional
   `{name: folder}` map (manual mode), empty when auto-discovering from
   `batch_path`; `pickle_path` — the cache directory.

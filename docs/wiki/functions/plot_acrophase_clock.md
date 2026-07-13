@@ -10,6 +10,21 @@ Registry name: `acrophase_clock`.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_acrophase_clock(
+    exp,
+    phase_col="Acrophase (h)",
+    group_col="Condition",
+    period=24,
+    radius_col="Amplitude",
+    save=True,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_acrophase_clock example figure](../gallery/images/plot_acrophase_clock.svg)
 
 *Circular acrophase clock; the three groups cluster at different phases. Rendered from the [synthetic example dataset](../examples/README.md).*

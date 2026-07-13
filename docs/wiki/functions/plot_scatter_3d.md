@@ -11,6 +11,14 @@ Registry name: `scatter_3d`.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_scatter_3d(exp, x="x1", y="x2", z="Signal", combine=True, save=True)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_scatter_3d example figure](../gallery/images/plot_scatter_3d.svg)
 
 *`x1`×`x2`×`Signal` in 3D, coloured by group. Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -42,14 +50,16 @@ plot_scatter_3d(
     normalize_x=False,
     normalize_y=False,
     normalize_z=False,
-    point_size=40,
+    point_size=None,
     size_by=None,
     size_factor=1.0,
-    alpha=0.7,
+    alpha=None,
     elevation=None,
     azimuth=None,
     figsize=(10, 8),
     share_axes=True,
+    point_edge=None,
+    point_linewidth=None,
 )
 ```
 
@@ -68,22 +78,31 @@ plot_scatter_3d(
 |---|---|---:|---|
 | `experiment` | PyFLASH-like object | required | Source object with `.summary`, `.condition_list`, and `.fig_path`. |
 | `x`, `y`, `z` | `str` or list-like | required | Summary columns for the 3D axes. List-like values queue all combinations. |
-| `by` | `str` | `"conditions"` | Iteration level when `factor` is not set. Usually `"conditions"` or `"all"`. |
+| `by` | `str` | `"conditions"` | Iteration level when `factor` is not set. |
 | `factor` | `str` or `None` | `None` | Factor column to group by instead of full condition. |
-| `filter_by` | dict, tuple, list, or `None` | `None` | Preferred row filter. Lists run queue mode. Legacy alias: `specificity`. |
+| `filter_by` | dict, tuple, list, or `None` | `None` | Row filter. Lists run queue mode. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | ROI-base selector. Multiple ROI bases run queue mode. |
 | `save` | `bool` | `True` | Save figures under `experiment.fig_path`. |
 | `combine` | `bool` | `False` | Overlay groups on one 3D axis and save one combined figure. |
 | `x_range`, `y_range`, `z_range` | pair or `None` | `None` | Manual axis limits. |
 | `xmin`, `xmax`, `ymin`, `ymax`, `zmin`, `zmax` | number or `None` | `None` | Lower/upper limit aliases merged into axis ranges. |
 | `normalize_x`, `normalize_y`, `normalize_z` | `bool`, pair, or `"Z-score"` | `False` | Axis normalization mode. |
-| `point_size` | number | `40` | Baseline point area. |
+| `point_size` | number or `None` | `None` | Marker diameter in points. `None` uses `set_pyflash_style(point_size=...)`; Matplotlib receives area after conversion. |
 | `size_by` | `str` or `None` | `None` | Numeric summary column used to scale point size. |
 | `size_factor` | number | `1.0` | Multiplier for point sizes. |
-| `alpha` | number | `0.7` | Point transparency. |
+| `alpha` | number or `None` | `None` | Point transparency. `None` uses the active PyFLASH style default, currently `scatter_3d_alpha=0.7`. |
 | `elevation`, `azimuth` | number or `None` | `None` | 3D camera view angles. |
 | `figsize` | tuple | `(10, 8)` | Figure size in inches. |
 | `share_axes` | `bool` | `True` | Share ranges across queued sibling combinations when the same column repeats. |
+
+## Parameter Options
+
+### `by` options
+
+| Option | Behavior |
+|---|---|
+| `"conditions"` (default) | Iterate over resolved conditions/groups. |
+| `"all"` | Pool rows where supported. |
 
 ## Returns
 

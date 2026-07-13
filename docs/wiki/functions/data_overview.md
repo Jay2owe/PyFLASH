@@ -51,7 +51,7 @@ data_overview(
 )
 ```
 
-Only the public arguments are shown. Internal underscore-prefixed queue arguments
+Common public arguments are shown. Internal underscore-prefixed queue arguments
 are reserved for PyFLASH.
 
 ## Input Object Types
@@ -64,46 +64,149 @@ are reserved for PyFLASH.
 
 ## Parameters
 
-| Parameter | Meaning |
+| Parameter | Type | Default | Meaning |
+|---|---|---:|---|
+| `experiment` | `Batch`, `Experiment`, `MiniExperiment`, or wrapped `DataFrame` | required | Data source containing a summary table. |
+| `data_cols` | list-like or `None` | `None` | Numeric columns to include. If omitted, PyFLASH selects usable numeric summary columns. Alias: `filtered_columns`. |
+| `data_col_contains` | `str`, list-like, or `None` | `None` | Include columns containing these case-sensitive text fragments. Alias: `column_strings`. |
+| `data_col_regex` | `str`, list-like, or `None` | `None` | Include columns matching one or more Python regular expressions. Alias: `regex_string`. |
+| `data_col_exclude` | `str`, list-like, or `None` | `""` | Remove columns containing these text fragments. The empty-string default excludes nothing. Alias: `exclude`. |
+| `by` | `str` | `"all"` | Overview grouping mode. |
+| `split_by` | `str`, list-like, or `None` | `None` | Group by one or more summary-table columns or condition factors. Can be a list. Alias: `factor`. |
+| `split_mode` | `str` | `"cross"` | Multi-key `split_by` behavior. |
+| `nest` | `bool` | `False` | Nested grouping mode for compatible grouped summaries. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Restrict rows before analysis. A list of filters runs queue mode and tags outputs by filter value. Alias: `specificity`. |
+| `roi` | `str`, list-like, or `None` | `None` | Restrict to one or more ROI bases. `None` uses the object's default summary. |
+| `include_inventory` | `bool` | `True` | Build `column_inventory` with role, missingness, sentinel counts, and availability. |
+| `include_group_counts` | `bool` | `True` | Build group/sample count summaries. |
+| `include_descriptives` | `bool` | `True` | Build numeric descriptive statistics by group. |
+| `include_normality` | `bool` | `True` | Run normality summaries for numeric columns. |
+| `include_outliers` | `bool` | `True` | Flag outlying values and affected subjects. |
+| `include_covariation` | `bool` | `True` | Find highly correlated numeric column pairs. |
+| `include_condition_distributions` | `bool` | `True` | Summarize per-condition or per-factor distributions. |
+| `include_effect_sizes` | `bool` | `True` | Compute control-vs-group effect sizes. |
+| `include_significance_audit` | `bool` | `True` | Run the statistical audit. Disable this for a faster descriptive-only overview. |
+| `include_scorecard` | `bool` | `True` | Build the dataset-health scorecard and narrative. |
+| `include_readiness` | `bool` | `True` | Estimate marker readiness and minimum detectable effect. |
+| `audit_comparisons` | list-like or `None` | `None` | Significance-audit contrasts, for example `["1-2"]` or explicit label pairs. `None` uses planned/default comparisons. |
+| `audit_control` | `str` or `None` | `None` | Control group for audit contrasts. `None` uses the resolved comparison/default logic. |
+| `audit_axis` | `str` | `"split"` | Transition axis for significance-audit summaries. |
+| `screen` | `bool` | `False` | Add FDR q-values to audit/group-testing outputs. Required when `gate="fdr"`. |
+| `gate` | `str` | `"p"` | Audit/significance gate. |
+| `run_both` | `bool` | `True` | In the audit, run companion parametric/non-parametric tests where supported so concordance can be assessed. |
+| `outlier_methods` | tuple/list of `str` or `str` | `("rout",)` | Outlier methods to run. Combine values with a tuple/list. |
+| `iqr_k` | `float` | `1.5` | Interquartile-range multiplier used when `outlier_methods` includes `"iqr"`. |
+| `mad_threshold` | `float` | `3.5` | Modified z-score threshold used when `outlier_methods` includes `"mad"`. |
+| `rout_q` | `float` | `1.0` | ROUT false-discovery percentage used when `outlier_methods` includes `"rout"`. |
+| `covariation_method` | `str` | `"pearsonr"` | Correlation method for high-covariation detection. |
+| `covariation_threshold` | `float` | `0.9` | Absolute correlation threshold for high-covariation detection. |
+| `min_n` | `int` | `3` | Minimum rows needed for statistical summaries. |
+| `alpha` | `float` | `0.05` | Significance cutoff for audit and plotting annotations. |
+| `plot_missingness`, `plot_covariation`, `plot_group_counts`, `plot_availability`, `plot_descriptives`, `plot_normality`, `plot_outliers` | `bool` | `True` | Saved-figure toggles for the corresponding overview sections. Tables still compute when the matching `include_*` flag is enabled. |
+| `plot_covariation_pairs`, `plot_condition_distributions`, `plot_condition_distribution_zscores`, `plot_condition_fingerprint`, `plot_condition_variability` | `bool` | `True` | Saved-figure toggles for covariation and condition-distribution sections. |
+| `plot_effect_sizes`, `plot_significance_audit`, `plot_scorecard`, `plot_readiness` | `bool` | `True` | Saved-figure toggles for effect-size, audit, scorecard, and readiness sections. |
+| `scorecard_thresholds` | mapping or `None` | `None` | Override dataset-health grade thresholds such as imbalance or missingness cutoffs. `None` uses built-in thresholds. |
+| `power` | `float` | `0.8` | Target statistical power for readiness summaries. |
+| `mde_threshold` | `float` | `0.8` | Effect-size threshold for marker-readiness summaries. |
+| `condition_distribution_plot` | `str` | `"raincloud"` | Figure style for condition distributions. |
+| `fingerprint_stat` | `str` | `"median"` | Statistic used in condition fingerprint heatmaps. |
+| `variability_stat` | `str` | `"cv_pct"` | Statistic used in condition variability heatmaps. |
+| `effect_control` | `str` or `None` | `None` | Control group for effect-size comparisons. `None` uses the first resolved group. |
+| `max_plot_items` | `int` | `30` | Limits very large overview figures. |
+| `tick_label_size` | `int` or `float` | `20` | Tick-label size for saved overview figures. |
+| `run_label` | `str` or `None` | `None` | Run folder name. `None` builds a deterministic slug from settings. |
+| `if_exists` | `str` | `"overwrite"` | Run-folder collision policy. |
+| `save` | `bool` | `True` | Write run files. `False` computes and returns results without clearing or writing a run folder. |
+| `write_manifest` | `bool` | `True` | Write `manifest.json` and update `_runs_index.csv` when saving. |
+| `verbose` | `bool` | `True` | Print progress messages. |
+| `montage` | `bool` | `True` | Create `! Overview Montage.png` in the run folder when saving. |
+| `group_col` | `str` or `None` | `None` | Public alias for `condition_col` when wrapping a raw `DataFrame`. If both are omitted, the adapter uses `condition_col="Condition"`. |
+| `group_cols` | list-like or `None` | `None` | Crossed grouping columns used when wrapping a raw `DataFrame`. Alias: `factor_cols`. |
+| `subject_col` | `str` or `None` | `None` | Public alias for `animal_col` when wrapping a raw `DataFrame`. If both are omitted, the adapter uses `animal_col="AnimalName"`. |
+| `group_list` | `groupList` or `None` | `None` | Optional group metadata for raw `DataFrame` input. Aliases: `groups`, legacy `conditions`. |
+| `dataframe_kwargs` | `dict` or `None` | `None` | Advanced options forwarded to the raw `DataFrame` adapter. |
+
+## Parameter Options
+
+### `by` options
+
+| Option | Behavior |
 |---|---|
-| `data_cols`, `filtered_columns` | Numeric columns to include. If omitted, PyFLASH selects usable numeric summary columns. |
-| `data_col_contains`, `data_col_regex`, `data_col_exclude` | Select columns by substring, regular expression, or exclusion text. Legacy aliases are `column_strings`, `regex_string`, and `exclude`. |
-| `by`, `factor`, `split_by` | Define overview groups. `by="all"` pools rows. `by="conditions"` uses the group list. `factor` or `split_by` names one or more grouping columns. |
-| `split_mode` | For multiple `split_by` keys, `cross` analyzes populated combinations and `parallel` analyzes each axis independently. |
-| `nest` | Nested grouping mode for compatible grouped summaries. |
-| `filter_by`, `specificity`, `roi` | Restrict rows before analysis. `filter_by` is the preferred public name; `specificity` remains supported for older code. A filter queue writes one combined run folder with tagged files and a `conditions` ledger. |
-| `include_inventory` | Build `column_inventory` with role, missingness, sentinel counts, and availability. |
-| `include_group_counts` | Build group/sample count summaries. |
-| `include_descriptives` | Build numeric descriptive statistics by group. |
-| `include_normality` | Run normality summaries for numeric columns. |
-| `include_outliers` | Flag outlying values and affected subjects. |
-| `include_covariation` | Find highly correlated numeric column pairs. |
-| `include_condition_distributions` | Summarize per-condition or per-factor distributions. |
-| `include_effect_sizes` | Compute control-vs-group effect sizes. |
-| `include_significance_audit` | Run the statistical audit. This is on by default. |
-| `include_scorecard` | Build the dataset-health scorecard and narrative. |
-| `include_readiness` | Estimate marker readiness and minimum detectable effect. |
-| `audit_comparisons`, `audit_control`, `audit_axis` | Configure significance-audit contrasts and transition axes. `audit_axis` accepts modes such as `split`, `fdr`, and `exclusions`. |
-| `screen` | Add FDR q-values to audit/group-testing outputs. Required when `gate="fdr"`. |
-| `gate` | Audit/significance gate: `p` or FDR/q-value aliases. |
-| `run_both` | In the audit, run companion parametric/non-parametric tests where supported so concordance can be assessed. |
-| `outlier_methods` | Outlier methods: `rout`, `iqr`, `mad`, or a tuple combining them. |
-| `iqr_k`, `mad_threshold`, `rout_q` | Thresholds for the outlier methods. |
-| `covariation_method`, `covariation_threshold` | Correlation method and absolute threshold for high-covariation detection. |
-| `min_n` | Minimum rows needed for statistical summaries. |
-| `alpha` | Significance cutoff for audit and plotting annotations. |
-| `plot_*` flags | Control saved figures independently from table computation. For example, `plot_significance_audit=False` suppresses the SVG but still allows `significance_audit.csv` when the section is included. |
-| `scorecard_thresholds` | Override dataset-health grade thresholds such as imbalance or missingness cutoffs. |
-| `power`, `mde_threshold` | Power target and effect-size threshold for readiness summaries. |
-| `condition_distribution_plot` | Figure style for condition distributions: `raincloud`, `boxstrip`, `violin`, or `strip`. |
-| `fingerprint_stat`, `variability_stat` | Statistics used in condition fingerprint and variability heatmaps. |
-| `effect_control` | Control group for effect-size comparisons. Defaults to the first resolved group. |
-| `max_plot_items` | Limits very large overview figures. |
-| `run_label` | Run folder name. If omitted, PyFLASH builds a deterministic slug from settings. |
-| `if_exists` | Run-folder collision policy: `overwrite`, `version`, `error`, or `skip`. |
-| `save` | If true, write run files. |
-| `write_manifest` | Write `manifest.json` and update `_runs_index.csv` when saving. |
-| `montage` | If true and saving, create `! Overview Montage.png`. |
+| `"all"` (default) | Pool rows for overview summaries. |
+| `"conditions"` | Use the resolved group list for grouped overview summaries. |
+
+### `split_mode` options
+
+| Option | Behavior |
+|---|---|
+| `"cross"` (default) | Analyze populated combinations of all requested `split_by` keys. |
+| `"parallel"` | Analyze each requested `split_by` key independently. |
+
+### `audit_axis` options
+
+| Option | Behavior |
+|---|---|
+| `"split"` (default) | Summarize significance-audit transitions by split/group context. |
+| `"fdr"` | Summarize transitions around FDR screening. |
+| `"exclusions"` | Summarize transitions around exclusion handling. |
+
+### `gate` options
+
+| Option | Behavior |
+|---|---|
+| `"p"` (default) | Use raw p-values for audit/significance decisions. |
+| `"fdr"` | Use corrected q-values. Requires `screen=True`. |
+
+### `outlier_methods` options
+
+| Option | Behavior |
+|---|---|
+| `"rout"` (default) | Use ROUT outlier detection with `rout_q`. |
+| `"iqr"` | Use interquartile-range outlier detection with `iqr_k`. |
+| `"mad"` | Use modified-z-score outlier detection with `mad_threshold`. |
+
+### `covariation_method` options
+
+| Option | Behavior |
+|---|---|
+| `"pearsonr"` (default) | Pearson linear correlation. Aliases: `"pearson"`, `"p"`. |
+| `"spearmanr"` | Spearman rank correlation. Aliases: `"spearman"`, `"s"`. |
+| `"kendalltau"` | Kendall rank correlation. Aliases: `"kendall"`, `"k"`. |
+
+### `condition_distribution_plot` options
+
+| Option | Behavior |
+|---|---|
+| `"raincloud"` (default) | Draw raincloud-style condition distributions. |
+| `"boxstrip"` | Draw box plots with overlaid strip points. |
+| `"violin"` | Draw violin plots. |
+| `"strip"` | Draw strip plots. |
+
+### `fingerprint_stat` options
+
+| Option | Behavior |
+|---|---|
+| `"median"` (default) | Use medians in condition fingerprint heatmaps. |
+| `"mean"` | Use means in condition fingerprint heatmaps. |
+| Other supported numeric summary statistic | Use that statistic if the overview path can compute it. |
+
+### `variability_stat` options
+
+| Option | Behavior |
+|---|---|
+| `"cv_pct"` (default) | Use percent coefficient of variation. |
+| `"sd"` | Use standard deviation. |
+| `"iqr"` | Use interquartile range. |
+| Other column from `condition_distribution_stats.csv` | Use that saved distribution-statistic column. |
+
+### `if_exists` options
+
+| Option | Behavior |
+|---|---|
+| `"overwrite"` (default) | Clear the existing generated run folder, then recompute. |
+| `"version"` | Keep the old run and write to the next free suffix such as `_v2`. |
+| `"error"` | Raise if the run folder already exists. |
+| `"skip"` | Reuse the cached manifest when available instead of recomputing. |
 
 ## Returns
 
@@ -146,6 +249,11 @@ than inventing values.
 When `if_exists="skip"` reuses an existing run, the returned object is the cached
 manifest and may not contain in-memory DataFrames.
 
+When the `PyFLASH.report` collector is active, `data_overview` also emits
+structured report records. These are report side effects, not keys in the
+returned dictionary. Depending on enabled sections, record kinds can include
+`audit_transitions`, `power_mde`, `marker_readiness`, and `dataset_health`.
+
 ## Saved Outputs
 
 With `save=True`, files are written below:
@@ -176,7 +284,7 @@ The run folder is both `fig_dir` and `data_dir`.
 | `sig_audit/` | Reproducibility bundle for the significance audit when assembled. |
 | `*.svg` | Overview figures such as missingness, group counts, descriptives, normality, outliers, covariation, condition distributions, effect sizes, audit, scorecard, MDE, and readiness plots. |
 | `manifest.json` | Stable run summary for reuse and reporting. |
-| `../_runs_index.csv` | Append-only index of data-overview runs. |
+| `../_runs_index.csv` | One-row-per-run index for data-overview runs; reruns with the same run label replace the matching index row. |
 | `! Overview Montage.png` | Overview montage when `montage=True`. |
 
 For a filter queue, child files receive tags such as
@@ -199,6 +307,9 @@ result = data_overview(
     include_readiness=False,
     save=False,
 )
+
+print(result["column_inventory"].head())
+print(result["inventory_counts"])
 ```
 
 Saved condition overview with audit and readiness:

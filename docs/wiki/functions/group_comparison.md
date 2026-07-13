@@ -51,7 +51,7 @@ group_comparison(
 )
 ```
 
-Only the public arguments are shown. Internal underscore-prefixed queue arguments
+Common public arguments are shown. Internal underscore-prefixed queue arguments
 are reserved for PyFLASH.
 
 ## Input Object Types
@@ -64,33 +64,120 @@ are reserved for PyFLASH.
 
 ## Parameters
 
-| Parameter | Meaning |
+| Parameter | Type | Default | Meaning |
+|---|---|---:|---|
+| `experiment` | `Batch`, `Experiment`, `MiniExperiment`, or wrapped `DataFrame` | required | Data source containing a summary table. |
+| `data_cols` | list-like or `None` | `None` | Marker/outcome columns to compare. If omitted, PyFLASH selects usable numeric summary columns. Alias: `filtered_columns`. |
+| `data_col_contains` | `str`, list-like, or `None` | `None` | Include marker columns containing these case-sensitive text fragments. Alias: `column_strings`. |
+| `data_col_regex` | `str`, list-like, or `None` | `None` | Include marker columns matching one or more Python regular expressions. Alias: `regex_string`. |
+| `data_col_exclude` | `str`, list-like, or `None` | `""` | Remove marker columns containing these text fragments. The empty-string default excludes nothing. Alias: `exclude`. |
+| `by` | `str` | `"conditions"` | Grouping mode. `"conditions"` uses the group list; `"all"` pools rows where supported. |
+| `split_by` | `str`, list-like, or `None` | `None` | Group by a summary-table column or condition factor such as `Diagnosis`. Alias: `factor`. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Restrict rows before analysis. A list of filters runs queue mode and tags outputs by filter value. Alias: `specificity`. |
+| `roi` | `str`, list-like, or `None` | `None` | Restrict to one or more ROI bases. `None` uses the object's default summary. |
+| `comparisons` | list-like or `None` | `None` | Pairwise comparisons, for example `["1-2"]` or explicit group-label pairs. `None` resolves comparisons from groups/control/default group order. |
+| `control` | `str` or `None` | `None` | Control group for fold change and effect-size direction. `None` uses comparison/default logic. |
+| `engine` | `str` | `"auto"` | Test engine. |
+| `force_nonparametric` | `bool` | `False` | Force non-parametric testing even if normality checks support parametric tests. |
+| `posthoc` | `str` | `"Conover"` | Post-hoc test for one-way ANOVA or Kruskal-Wallis paths. ANOVA accepts Tukey, Dunnett, Fisher LSD, Bonferroni, Sidak, Holm-Sidak, Scheffe, and Tamhane T2. Kruskal-Wallis accepts Conover, Dunn, Nemenyi, and DSCF. |
+| `posthoc_correction` | `str` or `bool` | `"auto"` | Post-hoc correction for Dunn/Conover and Fisher LSD paths. |
+| `n_boot` | `int` | `2000` | Bootstrap count for bootstrap engine paths. |
+| `random_state` | `int` or `None` | `0` | Random seed for bootstrap/resampling paths. |
+| `screen` | `bool` | `False` | Add FDR q-values. P-values are always retained. Required when `gate="fdr"`. |
+| `families` | `str`, list-like, or mapping | `"comparison"` | FDR family definition. `"comparison"` corrects within each comparison; other family specifications can group tests by marker or global analysis needs. |
+| `gate` | `str` | `"p"` | Figure/significance gate. |
+| `alpha` | `float` | `0.05` | Significance cutoff for tests, gate counts, and figures. |
+| `effect_ci` | `bool` | `True` | Compute bootstrap confidence intervals for effect sizes. |
+| `n_resamples` | `int` | `5000` | Bootstrap resamples used for effect-size confidence intervals. |
+| `report_power` | `bool` | `True` | Include power-related columns where estimable. |
+| `plot_volcano`, `plot_forest`, `plot_stats_matrix`, `plot_bars` | `bool` | `True` | Saved figure toggles. Tables are still returned/written when plots are disabled. |
+| `plot_superplots` | `bool` | `False` | Also save marker-level superplots. Disabled by default because this can create many files. |
+| `max_bar_markers` | `int` | `30` | Maximum number of marker bar charts to save when `plot_bars=True`. |
+| `tick_label_size` | `int` or `float` | `20` | Tick-label size for saved matrix-style figures. |
+| `min_n` | `int` | `3` | Minimum sample count per group before a marker/comparison is tested. |
+| `run_label` | `str` or `None` | `None` | Run folder name. `None` builds a deterministic slug from settings. |
+| `if_exists` | `str` | `"overwrite"` | Run-folder collision policy. |
+| `save` | `bool` | `True` | Write run files. `False` computes and returns results without clearing or writing a run folder. |
+| `write_manifest` | `bool` | `True` | Write `manifest.json` and update `_runs_index.csv` when saving. |
+| `montage` | `bool` | `True` | Create `! Overview Montage.png` in the run folder when saving. |
+| `group_col` | `str` or `None` | `None` | Public alias for `condition_col` when wrapping a raw `DataFrame`. If both are omitted, the adapter uses `condition_col="Condition"`. |
+| `group_cols` | list-like or `None` | `None` | Crossed grouping columns used when wrapping a raw `DataFrame`. Alias: `factor_cols`. |
+| `subject_col` | `str` or `None` | `None` | Public alias for `animal_col` when wrapping a raw `DataFrame`. If both are omitted, the adapter uses `animal_col="AnimalName"`. |
+| `group_list` | `groupList` or `None` | `None` | Optional group metadata for raw `DataFrame` input. Aliases: `groups`, legacy `conditions`. |
+| `dataframe_kwargs` | `dict` or `None` | `None` | Advanced options forwarded to the raw `DataFrame` adapter. |
+
+## Parameter Options
+
+### `by` options
+
+| Option | Behavior |
 |---|---|
-| `data_cols`, `filtered_columns` | Marker/outcome columns to compare. If omitted, PyFLASH selects numeric summary columns. |
-| `data_col_contains`, `data_col_regex`, `data_col_exclude` | Select marker columns by substring, regular expression, or exclusion text. |
-| `by`, `factor`, `split_by` | Define groups. `by="conditions"` uses the group list. `factor` or `split_by` can name a summary-table column. |
-| `filter_by`, `specificity`, `roi` | Restrict rows before analysis. `filter_by` is the preferred public name; `specificity` remains supported for older code. A filter queue writes one combined run folder with tagged files and a `conditions` ledger. |
-| `comparisons` | Pairwise comparisons, for example `["1-2"]` or explicit group-label pairs. If omitted, PyFLASH resolves comparisons from groups/control. |
-| `control` | Control group for fold change and effect-size direction. |
-| `engine` | Test engine: `auto`, `mixed`, or `bootstrap`. `auto` selects the appropriate tested path. |
-| `force_nonparametric` | Force non-parametric testing even if normality checks support parametric tests. |
-| `posthoc` | Post-hoc test for multi-group non-parametric comparisons: `Conover` or `Dunn`. |
-| `posthoc_correction` | Post-hoc correction: `auto`, `Bonferroni`, or `Uncorrected`. |
-| `n_boot`, `random_state` | Bootstrap count and random seed for resampling paths. |
-| `screen` | Add FDR q-values. P-values are always retained. Required when `gate="fdr"`. |
-| `families` | FDR family definition, commonly `comparison`. |
-| `gate` | Figure/significance gate: `p` or FDR/q-value aliases. |
-| `alpha` | Significance cutoff. |
-| `effect_ci`, `n_resamples` | Whether and how to compute bootstrap confidence intervals for effect sizes. |
-| `report_power` | Include power-related columns where estimable. |
-| `plot_volcano`, `plot_forest`, `plot_stats_matrix`, `plot_bars`, `plot_superplots` | Saved figure toggles. Tables are still returned/written when plots are disabled. |
-| `max_bar_markers` | Maximum number of marker bar charts to save. |
-| `min_n` | Minimum sample count per group before a marker/comparison is tested. |
-| `run_label` | Run folder name. If omitted, PyFLASH builds a deterministic slug. |
-| `if_exists` | Run-folder collision policy: `overwrite`, `version`, `error`, or `skip`. |
-| `save` | If true, write run files. |
-| `write_manifest` | Write `manifest.json` and update `_runs_index.csv` when saving. |
-| `montage` | If true and saving, create `! Overview Montage.png`. |
+| `"conditions"` (default) | Compare resolved groups. |
+| `"all"` | Pool rows where the selected comparison path supports pooled mode. |
+
+### `engine` options
+
+| Option | Behavior |
+|---|---|
+| `"auto"` (default) | Selects the appropriate tested path. |
+| `"mixed"` | Uses the mixed-model comparison path where supported. |
+| `"bootstrap"` | Uses bootstrap/resampling paths where supported. |
+
+### `posthoc` options
+
+| Option | Behavior |
+|---|---|
+| `"Tukey"` | Uses Tukey HSD after one-way ANOVA. This remains the default parametric path even though this function's default `posthoc` value is `"Conover"` for non-parametric runs. |
+| `"Dunnett"` | Uses Dunnett comparisons against one control group after one-way ANOVA. Comparison tokens must all share one control, for example `["1-2", "1-3"]`. |
+| `"Fisher LSD"` | Uses Fisher's least significant difference p-values after one-way ANOVA. |
+| `"Bonferroni"`, `"Sidak"`, `"Holm-Sidak"` | Uses Fisher LSD p-values with the named selected-pair adjustment. |
+| `"Scheffe"` | Uses Scheffe all-pairs comparisons after one-way ANOVA. |
+| `"Tamhane T2"` | Uses Tamhane T2 all-pairs comparisons for unequal-variance-style post-hoc analysis. |
+| `"Conover"` (default) | Uses Conover post-hoc comparisons after Kruskal-Wallis. |
+| `"Dunn"` | Uses Dunn post-hoc comparisons after Kruskal-Wallis. Common text variants normalize to this option. |
+| `"Nemenyi"` | Uses Nemenyi rank-based all-pairs comparisons after Kruskal-Wallis. |
+| `"DSCF"` | Uses Dwass-Steel-Critchlow-Fligner all-pairs comparisons after Kruskal-Wallis. |
+
+### `posthoc_correction` options
+
+| Option | Behavior |
+|---|---|
+| `"auto"` (default) | For Dunn/Conover, applies Bonferroni only when there are more than three comparisons. For explicit Fisher LSD, leaves p-values uncorrected. |
+| `"Bonferroni"` | Applies Bonferroni correction. |
+| `"Sidak"` | Applies Sidak correction. |
+| `"Holm"` | Applies Holm correction. |
+| `"Holm-Sidak"` | Applies Holm-Sidak correction. |
+| `"Simes-Hochberg"` | Applies Simes-Hochberg correction. |
+| `"Hommel"` | Applies Hommel correction. |
+| `"FDR-BH"` | Applies Benjamini-Hochberg FDR correction. |
+| `"FDR-BY"` | Applies Benjamini-Yekutieli FDR correction. |
+| `"FDR-TSBH"` | Applies two-stage Benjamini-Hochberg FDR correction. |
+| `"FDR-TSBKY"` | Applies two-stage Benjamini-Krieger-Yekutieli FDR correction. |
+| `"Uncorrected"` | Leaves post-hoc p-values uncorrected. |
+| Boolean or common yes/no synonym | Normalized to the matching corrected or uncorrected behavior. |
+
+### `gate` options
+
+| Option | Behavior |
+|---|---|
+| `"p"` (default) | Use raw p-values for figure/significance decisions. |
+| `"fdr"` | Use corrected q-values. Requires `screen=True`. |
+
+### `families` options
+
+| Option | Behavior |
+|---|---|
+| `"comparison"` (default) | Corrects within each comparison. |
+| List-like or mapping | Groups tests by marker, comparison, or another family structure needed for the analysis. |
+
+### `if_exists` options
+
+| Option | Behavior |
+|---|---|
+| `"overwrite"` (default) | Clear the existing generated run folder, then recompute. |
+| `"version"` | Keep the old run and write to the next free suffix such as `_v2`. |
+| `"error"` | Raise if the run folder already exists. |
+| `"skip"` | Reuse the cached manifest when available instead of recomputing. |
 
 ## Returns
 
@@ -113,6 +200,11 @@ in-memory tables:
 
 When `if_exists="skip"` reuses an existing run, the returned object is the cached
 manifest and may not include in-memory DataFrames.
+
+When the `PyFLASH.report` collector is active, `group_comparison` also emits
+structured report records with `kind="group_comparison"`. Those records
+summarize the metric, tests, post-hoc comparisons, p-values, and group data;
+they are report side effects, not extra keys in the returned dictionary.
 
 ## Saved Outputs
 
@@ -137,7 +229,7 @@ The run folder is both `fig_dir` and `data_dir`.
 | `SuperPlots/SuperPlot <marker>*.svg` | Optional superplots when `plot_superplots=True`. |
 | Bar-chart SVGs | Optional marker bar charts from the mean-bar plotting layer. |
 | `manifest.json` | Stable run summary for reuse and reporting. |
-| `../_runs_index.csv` | Append-only index of group-comparison runs. |
+| `../_runs_index.csv` | One-row-per-run index for group-comparison runs; reruns with the same run label replace the matching index row. |
 | `! Overview Montage.png` | Overview montage when `montage=True`. |
 
 For a filter queue, child files receive tags such as
@@ -158,6 +250,9 @@ result = group_comparison(
     comparisons=["1-2"],
     save=False,
 )
+
+print(result["results_table"].head())
+print(result["skipped"].head())
 ```
 
 Run a saved, FDR-screened comparison:
@@ -195,6 +290,7 @@ result = group_comparison(
 - [Pipeline manifests](../data-structures/pipeline-manifests.md)
 - [Group comparison statistics](../statistics/group-comparisons.md)
 - [Effect sizes](../statistics/effect-sizes.md)
+- [Power](../statistics/power.md)
 - [Multiple testing](../statistics/multiple-testing.md)
 - [Saving](../parameters/saving.md)
 - [Filter By](../parameters/specificity.md)

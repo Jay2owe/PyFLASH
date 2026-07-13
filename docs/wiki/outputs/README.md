@@ -22,7 +22,7 @@ Output files are created by these main routes:
 | Pipeline functions such as [`correlation`](../functions/correlation.md), [`data_overview`](../functions/data_overview.md), and [`linear_model`](../functions/linear_model.md) | Run folders with figures, CSV tables, `manifest.json`, `_runs_index.csv`, and often `! Overview Montage.png`. |
 | `Batch.export_all_excel()` and the `Batch.export_*_excel()` methods | `.xlsx` workbooks and matching `*_RegexFilters.txt` reports under `batch.export_path` or a supplied export folder. |
 | [`iterative_model_sweep`](../functions/iterative_model_sweep.md) | Classifier sweep CSVs, PNG summaries, `manifest.json`, and a run README. |
-| The PyFLASH runner around `PyFLASH.report` | `.runtime/results_store/<run_id>.results.json`, `.results.md`, and `index.jsonl`. |
+| The PyFLASH runner around `PyFLASH.report` | `.claude/skills/pyflash/.runtime/results_store/<run_id>.results.json`, `.results.md`, and `index.jsonl`. |
 | [`save_state`](../functions/save_state.md), [`load_state`](../functions/load_state.md), [`normalize_paths`](../functions/normalize_paths.md), and `create_batch(..., pickle_path=...)` | `.pkl` saved-state files and path-rebased objects. |
 
 ## Folder Layout

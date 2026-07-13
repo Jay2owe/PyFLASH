@@ -9,6 +9,14 @@ Use it when you want to compare distributions without choosing histogram bins.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_ecdf(exp, marker="Marker1", x_attr="Volume", save=True)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_ecdf example figure](../gallery/images/plot_ecdf.svg)
 
 *`Marker1` volume empirical CDF (group A). Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -55,20 +63,35 @@ plot_ecdf(
 | `experiment` | `Batch` or `Experiment` | required | Data source containing marker tables. |
 | `marker` | `str` or list-like | required | Marker table key. List-like values queue plots. |
 | `x_attr` | `str` or list-like | required | Attribute to plot. May be a full marker-table column or marker suffix. List-like values queue plots. |
-| `by` | `str` | `"conditions"` | Iteration level. Common value: `"conditions"`. |
+| `by` | `str` | `"conditions"` | Iteration level. |
 | `factor` | `str` or `None` | `None` | Group by factor values instead of conditions. |
 | `line_width` | number | `2.0` | Width of each ECDF line. |
 | `alpha` | number | `1.0` | Line transparency, clamped between `0` and `1`. |
-| `stat` | `str` | `"proportion"` | Y-axis scale. Accepted values: `"proportion"` or `"count"`. |
+| `stat` | `str` | `"proportion"` | Y-axis scale. |
 | `complementary` | `bool` | `False` | Plot the complementary ECDF, useful for upper-tail comparisons. |
 | `save` | `bool` | `True` | Save SVG figures under the input object's figure folder. |
-| `filter_by` | dict, tuple, queue, or `None` | `None` | Preferred row filter applied before plotting. A queue returns a dictionary keyed by filter. Legacy alias: `specificity`. |
+| `filter_by` | dict, tuple, queue, or `None` | `None` | Row filter applied before plotting. A queue returns a dictionary keyed by filter. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | ROI-base selector. Multiple ROI bases run queue mode. |
 | `bottom_ticks` | `bool` | `True` | Show bottom-axis tick marks. |
 | `bottom_tick_labels` | `bool` | `True` | Show bottom-axis tick labels. |
 | `x_range` | `(min, max)` or `None` | `None` | Explicit x-axis range. |
 | `xmin`, `xmax` | number or `None` | `None` | Convenience aliases for lower/upper values in `x_range`. |
 | `share_axes` | `bool` | `True` | Use registered axis limits when available and no explicit range is supplied. |
+
+## Parameter Options
+
+### `by` options
+
+| Option | Behavior |
+|---|---|
+| `"conditions"` (default) | Iterate over resolved conditions/groups. |
+
+### `stat` options
+
+| Option | Behavior |
+|---|---|
+| `"proportion"` (default) | Plot cumulative proportions. |
+| `"count"` | Plot cumulative counts. |
 
 ## Returns
 
@@ -82,8 +105,10 @@ figure handle.
 
 ## Saved Outputs
 
-When `save=True`, figures are written below `experiment.fig_path` in an `ECDFs`
-subfolder, with marker, factor, row-filter, and ROI suffixes when relevant.
+When `save=True`, figures are written below `experiment.fig_path` under
+`<marker>/ECDFs/`, for example `GFAP/ECDFs`. Factor and row-filter contexts are
+encoded into filename suffixes. When several ROI bases are queued, the ROI base
+is prepended as a top-level folder.
 
 Common filename:
 

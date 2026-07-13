@@ -11,6 +11,19 @@ against behavior, age, batch metrics, or covariates.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_rect_matrices(
+    exp,
+    filtered_columns=["Marker1_Count", "Marker2_Count", "Marker3_Count"],
+    against_columns=["x1", "x2", "Signal"],
+    save=True,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_rect_matrices example figure](../gallery/images/plot_rect_matrices.svg)
 
 *Rectangular correlation heatmap: marker counts (rows) vs `x1`/`x2`/`Signal` (columns). Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -35,11 +48,11 @@ plot_rect_matrices(experiment, filtered_columns=None, data_cols=None, against_co
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `experiment` | `Batch`, experiment-like object, or `DataFrame` | required | Data source containing a summary table. |
-| `data_cols` / `filtered_columns` | list-like or `None` | `None` | Y-axis columns. |
-| `against_data_cols` / `against_columns` | list-like or `None` | `None` | X-axis columns. |
-| `data_col_contains`, `data_col_regex`, `data_col_exclude` | string/list filters | `None`, `None`, `None` | Discover Y-axis columns. |
-| `against_data_col_contains`, `against_data_col_regex`, `against_data_col_exclude` | string/list filters | `None`, `None`, `None` | Discover X-axis columns. |
-| `by` / `split_by` | string | `'conditions'` | Panel by conditions, by `"all"`, or by a factor. |
+| `data_cols` | list-like or `None` | `None` | Y-axis columns. Alias: `filtered_columns`. |
+| `against_data_cols` | list-like or `None` | `None` | X-axis columns. Alias: `against_columns`. |
+| `data_col_contains`, `data_col_regex`, `data_col_exclude` | string/list filters | `None`, `None`, `None` | Discover Y-axis columns. Aliases: `column_strings`, `regex_string`, `exclude`. |
+| `against_data_col_contains`, `against_data_col_regex`, `against_data_col_exclude` | string/list filters | `None`, `None`, `None` | Discover X-axis columns. Aliases: `against_column_strings`, `against_regex_string`, `against_exclude`. |
+| `split_by` | string | `'conditions'` | Panel by conditions, by `"all"`, or by a factor. Alias: `by`. |
 | `factor` | string or `None` | `None` | Explicit factor column for panels. |
 | `correlation` | string | `'pearsonr'` | Pearson, Spearman, Kendall, or aliases `p`, `s`, `k`. |
 | `encode_x_categorical` | bool | `True` | Encode non-numeric X columns when possible so categorical covariates can be correlated. |
@@ -47,7 +60,7 @@ plot_rect_matrices(experiment, filtered_columns=None, data_cols=None, against_co
 | `share_columns_across_panels` | bool | `True` | Keep a shared valid Y/X set across panels. |
 | `blank_panel_on_nan` | bool | `False` | Keep requested axes and mark invalid cells as `NaN` instead of dropping axes. |
 | `triangle`, `show_diagonal`, `show_values`, `value_format` | display options | `None`, `True`, `False`, `'.2f'` | Compact matrix rendering controls. |
-| `filter_by` / `specificity` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. Alias: `specificity`. |
 | `roi` | string, list, or `None` | `None` | Select one ROI summary or run an ROI queue. |
 | `save` | bool | `True` | Write the combined heatmap figure to disk. |
 

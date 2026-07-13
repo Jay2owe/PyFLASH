@@ -11,6 +11,14 @@ to resolve a save folder.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_power_curve(effect_sizes=(0.2, 0.5, 0.8), n_range=(2, 20), save=False)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_power_curve example figure](../gallery/images/plot_power_curve.svg)
 
 *Statistical power vs n per group for effect sizes 0.2 / 0.5 / 0.8. Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -41,11 +49,20 @@ plot_power_curve(batch=None, *, effect_sizes=(0.2, 0.5, 0.8), n_range=(2, 30), a
 | `observed` | float or `None` | `None` | Optional observed effect size to add as a highlighted curve. |
 | `observed_n` | int or `None` | `None` | Optional vertical reference line for observed per-group sample size. |
 | `target_powers` | sequence of floats | `(0.8, 0.9)` | Horizontal guide lines. |
-| `test` | string | `'t-test'` | Accepted values include `'t-test'` and `'anova'`/`'f'`/`'f-test'`. |
+| `test` | string | `'t-test'` | Power-test family. |
 | `k_groups` | int | `2` | Number of groups for ANOVA power. |
 | `title` | string or `None` | `None` | Custom title. |
-| `save`, `save_path`, `save_name`, `dpi` | saving options | `False`, `None`, `'power_curve'`, `600` | Figure saving controls. |
+| `save`, `save_path`, `save_name`, `dpi` | saving options | `False`, `None`, `'power_curve'`, `600` | Figure saving controls. Current SVG saving uses PyFLASH's shared `save_fig` DPI rather than passing this `dpi` value through. |
 | `return_data` | bool | `False` | Return the computed power table with the figure. |
+
+## Parameter Options
+
+### `test` options
+
+| Option | Behavior |
+|---|---|
+| `'t-test'` (default) | Compute two-sample t-test power. |
+| `'anova'` | Compute ANOVA/F-test power. Aliases: `'f'`, `'f-test'`. |
 
 ## Returns
 
@@ -62,6 +79,7 @@ plot_power_curve(batch=None, *, effect_sizes=(0.2, 0.5, 0.8), n_range=(2, 30), a
 `batch.data_path`, then the current folder.
 
 The default filename stem is `power_curve`; pass `save_name` to override it.
+The current SVG save path uses the shared `save_fig` DPI setting.
 
 ## Examples
 

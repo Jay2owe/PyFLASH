@@ -11,6 +11,20 @@ model results inspectable from Python.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_multivariable_regression_matrix(
+    exp,
+    filtered_columns=["Signal"],
+    predictors={"Predictors": ["x1", "x2"]},
+    by="all",
+    save=True,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_multivariable_regression_matrix example figure](../gallery/images/plot_multivariable_regression_matrix.svg)
 
 *Joint regression of `Signal` on predictors `x1`+`x2` (model R²). Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -35,20 +49,39 @@ plot_multivariable_regression_matrix(experiment, filtered_columns=None, data_col
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `experiment` | `Batch`, experiment-like object, or `DataFrame` | required | Data source containing a summary table. |
-| `data_cols` / `filtered_columns` | list-like or `None` | `None` | Outcome columns. If discovered broadly, predictor columns are removed from the outcome list. |
+| `data_cols` | list-like or `None` | `None` | Outcome columns. If discovered broadly, predictor columns are removed from the outcome list. Alias: `filtered_columns`. |
 | `predictors` | mapping or iterable | required | Predictor-set definitions, usually `{"label": ["col1", "col2"]}`. |
-| `by` / `split_by` | string | `'conditions'` | Panel by conditions, by `"all"`, or by a factor. |
+| `split_by` | string | `'conditions'` | Panel by conditions, by `"all"`, or by a factor. Alias: `by`. |
 | `factor` | string or `None` | `None` | Explicit factor column for panels. |
-| `filter_by` / `specificity` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. Alias: `specificity`. |
 | `roi` | string, list, or `None` | `None` | Select one ROI summary or run an ROI queue. |
 | `min_n` | int or `None` | `None` | Minimum complete rows per model. The effective minimum is at least `number_of_predictors + 2`. |
-| `value` | string | `'r2'` | Heatmap value. Accepted values: `'r2'`, `'adj_r2'`, `'p'`, or `'q'`. |
+| `value` | string | `'r2'` | Heatmap value. |
 | `correction` | string | `'fdr'` | Star annotation basis: `'fdr'` for q-values or `'none'`/`'p'` for raw p-values. |
 | `alpha` | float | `0.05` | Threshold for star annotations. |
 | `column_order`, `predictor_order` | list-like or `None` | `None` | Reorder outcome rows or predictor-set columns. |
 | `share_columns_across_panels` | bool | `True` | Keep only outcome/predictor combinations valid in every panel. |
 | `blank_panel_on_nan` | bool | `False` | Keep invalid cells as NaN instead of dropping empty axes. |
 | `save` | bool | `True` | Write one combined SVG figure. |
+
+## Parameter Options
+
+### `value` options
+
+| Option | Behavior |
+|---|---|
+| `'r2'` (default) | Plot model R-squared. |
+| `'adj_r2'` | Plot adjusted R-squared. |
+| `'p'` | Plot raw model p-values. |
+| `'q'` | Plot corrected q-values. |
+
+### `correction` options
+
+| Option | Behavior |
+|---|---|
+| `'fdr'` (default) | Use q-values for star annotations. |
+| `'p'` | Use raw p-values for star annotations. |
+| `'none'` | Do not use corrected q-values for star annotations. |
 
 ## Returns
 

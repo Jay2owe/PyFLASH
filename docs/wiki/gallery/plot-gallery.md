@@ -1,6 +1,6 @@
 # Plot Gallery
 
-Every plot below was rendered from one small, seeded, domain-neutral synthetic study (groups A/B/C, `Marker1`–`Marker3`, predictors `x1`/`x2`/`Signal`, a 24 h rhythm, colocalisation). The generator and its schema are documented under [examples](../examples/README.md). Click any figure for that function's reference page.
+Every plot below was rendered from one small, seeded, domain-neutral synthetic study (groups A/B/C, `Marker1`–`Marker3`, predictors `x1`/`x2`/`Signal`, a 24 h rhythm, colocalisation). The generator and its schema are documented under [examples](../examples/README.md). Click any figure for that function's reference page; the exact render call is shown above the full-size example figure there.
 
 > The two image plots (`plot_images`, `plot_representative_images`) are not shown here because they require real microscopy image files.
 

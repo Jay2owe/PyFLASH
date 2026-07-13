@@ -164,6 +164,12 @@ plot launcher, and plot spec files.
 Detailed pages:
 
 - [`plot_mean_bars`](functions/plot_mean_bars.md)
+- [`plot_histograms`](functions/plot_histograms.md)
+- [`plot_ridgeline`](functions/plot_ridgeline.md)
+- [`plot_ecdf`](functions/plot_ecdf.md)
+- [`plot_superplot`](functions/plot_superplot.md)
+- [`plot_effect_forest`](functions/plot_effect_forest.md)
+- [`plot_group_matrix`](functions/plot_group_matrix.md)
 
 ## Declarative Specs
 

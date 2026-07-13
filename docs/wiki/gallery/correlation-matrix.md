@@ -23,27 +23,27 @@ result = plot_matrices(
     data_cols=["GFAP Volume", "Iba1 Volume", "DAPI Count"],
     group_col="Diagnosis",
     subject_col="Subject",
-    split_by="all",
     correlation="spearman",
     show_values=True,
     save=False,
 )
 
-combined = result.get("Combined") or next(iter(result.values()))
-print(combined["correlations"].keys())
+print(len(result["correlations"]))
+print(result["correlations"][0].keys())
 ```
 
 ## Result
 
-The result dictionary contains a combined matrix panel with pairwise
-correlation entries such as `GFAP Volume vs Iba1 Volume`. No SVG is written
-because `save=False`.
+The result dictionary contains one correlation dictionary per diagnosis panel.
+Each panel includes pairwise entries such as `GFAP Volume vs Iba1 Volume`. No
+SVG is written because `save=False`.
 
 ## Notes
 
-Use `split_by="Diagnosis"` when you want one matrix per diagnosis group. Use
-the [`correlation`](../functions/correlation.md) pipeline when you also need
-CSV matrices, p/q-value gates, regression plots, and a manifest.
+The default condition split uses the `Diagnosis` groups supplied through the
+raw DataFrame adapter. Use the [`correlation`](../functions/correlation.md)
+pipeline when you also need CSV matrices, p/q-value gates, regression plots,
+and a manifest.
 
 ## See Also
 

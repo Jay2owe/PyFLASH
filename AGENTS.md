@@ -44,7 +44,7 @@ Registered pipeline callables are supported the same way through `PLOT_REGISTRY`
 Keep SVG text editable. PyFLASH-generated Matplotlib SVGs must emit labels,
 tick text, legends, p-value annotations, and matrix cell annotations as real
 `<text>` elements, not glyph paths. Prefer `PyFLASH.utils.save_fig` or call
-`PyFLASH.utils.rc_params()` before plotting. In one-off/custom agent scripts
+`PyFLASH.set_pyflash_style()` before plotting. In one-off/custom agent scripts
 that call `fig.savefig(... ".svg")` directly, set this before creating or
 saving figures:
 

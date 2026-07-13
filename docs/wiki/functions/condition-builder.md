@@ -25,13 +25,16 @@ objects.
 from PyFLASH import (
     GroupBuilder,
     group,
+    multiGroup,
     groupList,
     zipGroups,
     zipGroupLists,
 )
 
+builder = GroupBuilder(factor)
+
 groups = (
-    GroupBuilder(factor)
+    builder
     .add(label, short=None, color=None, style="fill")
     .compare(a, b)
     .compare_all_pairs()
@@ -40,6 +43,12 @@ groups = (
     .explain(explanation)
     .build()
 )
+
+group_obj = group(label, name, color, factor, explanation=None, style="fill")
+multi_group_obj = multiGroup(conditionsList, name=None, label=None, color=None, style=None)
+groups = groupList(condition_list, comparisons=None, explanation=None)
+groups_tuple = zipGroups(condition_labels, condition_names, condition_colors, factor)
+crossed_tuple = zipGroupLists(group_list1, group_list2, newColors=None)
 
 crossed = (
     GroupBuilder.cross(group_list1, group_list2, colors=None)
@@ -56,8 +65,8 @@ crossed = (
 
 | Object type | Accepted? | Notes |
 |---|---:|---|
-| `groupList` / `conditionList` | Yes | Used as builder input for crossed designs and as output for downstream functions. |
-| `group` / `condition` | Yes | Manual low-level objects can be wrapped in `groupList`. |
+| `groupList` | Yes | Used as builder input for crossed designs and as output for downstream functions. Alias object name: `conditionList`. |
+| `group` | Yes | Manual low-level objects can be wrapped in `groupList`. Alias object name: `condition`. |
 | `Batch` | No | Builders create metadata before a batch exists. |
 | `Experiment` | No | Builders do not read measurements. |
 | `pandas.DataFrame` | No | Use [`from_dataframe`](from_dataframe.md) to infer groups from `group_col` or `group_cols`. |
@@ -70,16 +79,26 @@ crossed = (
 | `label` | `str` | required for `.add()` and `group()` | Full display label shown in plots and exports. |
 | `short` | `str` or `None` | `None` | Stored short name used for matching data values, filenames, and comparison lookup. Defaults to `label.strip()`. |
 | `name` | `str` | required for `group()` | Low-level equivalent of `short`; the value stored in the group object. |
-| `color` | color-like or `None` | `None` | Hex color, key in `Config.COLORS`, matplotlib color name, or `None` for automatic palette assignment. |
-| `style` | `str` | `"fill"` | Secondary visual channel. Accepted values include `"fill"`, `"hollow"`, or matplotlib hatch strings such as `"///"`. |
+| `color` | color-like or `None` | `None` | In `GroupBuilder.add()`, hex colors, `Config.COLORS` keys, matplotlib color names, and `None` are resolved to a stored color. In low-level `group()` / `condition()`, the value is stored directly. |
+| `style` | `str` | `"fill"` | Secondary visual channel. |
 | `a`, `b` | `str` | required for `.compare()` | Short names to compare. Builder methods resolve these to one-based comparison strings such as `"1-2"`. |
 | `control` | `str` | required for `.compare_to_control()` | Short name of the control group. |
 | `explanation` | `str` | required for `.explain()` | Explanation text; `<>` is replaced with each group label. |
-| `group_list1`, `group_list2` | `groupList` / `conditionList` | required for `.cross()` | Two group lists to cross into compound groups. |
-| `colors` | list-like or `None` | `None` | Optional explicit colors for the crossed groups. |
+| `group_list1`, `group_list2` | `groupList` | required for `.cross()` | Two group lists to cross into compound groups. `conditionList` is accepted as the legacy object name. |
+| `colors` | list-like or `None` | `None` | Optional explicit colors for `GroupBuilder.cross(...)`; values are passed into the crossed groups. |
 | `within` | `str` or `None` | `None` | Crossed-design disambiguator for `.compare(a, b, within=...)`. |
 | `within_factor` | `str` or `None` | `None` | Run all-pair or control comparisons within each level of another factor. |
-| `newColors` | list-like or `None` | `None` | Classic `zipConditionLists` argument for explicit crossed-condition colors. |
+| `newColors` | list-like or `None` | `None` | Classic `zipConditionLists` argument for explicit crossed-condition colors; values are passed through directly. |
+
+## Parameter Options
+
+### `style` options
+
+| Option | Behavior |
+|---|---|
+| `"fill"` (default) | Draw the group with the normal filled style. |
+| `"hollow"` | Draw the group with hollow markers/bars where supported. |
+| Matplotlib hatch string such as `"///"` | Use the hatch pattern as the secondary visual channel. |
 
 ## Returns
 
@@ -193,6 +212,9 @@ crossed = conditionList(list(zipConditionLists(diagnosis, sex)))
 - `.compare_all_pairs()` expands to every pair in the current order.
 - `.compare_to_control(control)` compares the control to every other group.
 - `.compare_sequential()` compares adjacent groups in order.
+- `GroupBuilder.add()` resolves `None`, `Config.COLORS` keys, matplotlib color
+  names, and hex strings. Low-level `group()` / `condition()` and
+  `zipGroups()` / `zipConditions()` store the color values they are given.
 - In crossed designs, color comes from the primary factor unless an explicit
   crossed color is supplied. Style can carry the secondary factor visually.
 - `conditionList` is iterable, indexable, and has a length, so users can unpack

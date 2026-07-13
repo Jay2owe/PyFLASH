@@ -32,7 +32,9 @@ used only to resolve a default save folder.
 
 Use [`data_cols`](../parameters/column-selection.md) or discovery filters for
 volcano and PCA feature selection. Use [`filter_by`](../parameters/specificity.md)
-to focus on one region, timepoint, sex, diagnosis, or a queue of subsets.
+to focus on one region, timepoint, sex, or diagnosis. `plot_volcano` supports
+filter queues; `plot_marker_pca` and `plot_timecourse` apply one filter context
+per call.
 
 For volcano plots, `control` chooses the reference group, `p_threshold` controls
 the horizontal significance line, and `label_points` controls which marker names

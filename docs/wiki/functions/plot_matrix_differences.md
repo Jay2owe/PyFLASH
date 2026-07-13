@@ -12,6 +12,26 @@ matrices.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_matrix_differences(
+    exp,
+    filtered_columns=[
+        "Marker1_Count",
+        "Marker2_Count",
+        "Marker3_Count",
+        "Marker1_IntDenMean",
+        "Marker2_IntDenMean",
+        "Marker3_IntDenMean",
+    ],
+    comparisons=[("A", "C")],
+    save=True,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_matrix_differences example figure](../gallery/images/plot_matrix_differences.svg)
 
 *Signed correlation-matrix difference between groups A and C (Fisher z). Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -36,9 +56,9 @@ plot_matrix_differences(experiment, filtered_columns=None, data_cols=None, again
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `experiment` | `Batch`, experiment-like object, or `DataFrame` | required | Data source containing a summary table. |
-| `data_cols` / `filtered_columns` | list-like or `None` | `None` | Row-side columns. In square mode these also form the column side. |
-| `against_data_cols` / `against_columns` | list-like or `None` | `None` | Optional column-side set for rectangular matrix differences. |
-| `by` / `split_by` | string | `'conditions'` | Grouping source used to build matrices. |
+| `data_cols` | list-like or `None` | `None` | Row-side columns. In square mode these also form the column side. Alias: `filtered_columns`. |
+| `against_data_cols` | list-like or `None` | `None` | Optional column-side set for rectangular matrix differences. Alias: `against_columns`. |
+| `split_by` | string | `'conditions'` | Grouping source used to build matrices. Alias: `by`. |
 | `factor` | string or `None` | `None` | Explicit factor column for group matrices. |
 | `comparisons` | list-like or `None` | `None` | Pairwise group comparisons. Strings such as `"1-2"` use the current group order. |
 | `correlation` | string or sequence | `'pearsonr'` | One or more methods: Pearson, Spearman, Kendall, or aliases. |
@@ -50,7 +70,7 @@ plot_matrix_differences(experiment, filtered_columns=None, data_cols=None, again
 | `value_matrices` | string | `'p'` | Which inferential value heatmaps to save: `'p'`, `'q'`, `'both'`, or `'none'`. |
 | `plot_gate_matrix` | bool | `True` | Save a binary gate heatmap for inferential Pearson differences. |
 | `run_label` | string or `None` | `None` | Output folder label. Auto-derived when omitted. |
-| `filter_by` / `specificity` | mapping, tuple, list, or `None` | `None` | Row filter. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Row filter. Alias: `specificity`. |
 | `roi` | string or `None` | `None` | Select an ROI summary. |
 | `save` | bool | `True` | Write figures, CSVs, and manifest. |
 
@@ -78,7 +98,10 @@ Saved files can include:
 - per-comparison long CSVs such as `matrix_differences_<comparison>.csv`
 - signed delta CSVs and SVGs
 - absolute delta CSVs and SVGs
-- Pearson-only p-value, q-value, and gate CSVs/SVGs when enabled
+- Pearson-only p-value, q-value, and gate CSVs whenever saved inferential
+  differences are available; `value_matrices`, `plot_pvalue_matrices`,
+  `plot_qvalue_matrices`, and `plot_gate_matrix` control the corresponding SVG
+  heatmaps
 
 Spearman and Kendall difference matrices are saved as descriptive signed and
 absolute differences, but they do not get p/q/gate files in the current

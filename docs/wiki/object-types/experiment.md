@@ -65,8 +65,8 @@ ImageJ-style exports with `Results/Tables/`.
 | `summaries` | Dictionary of subject-level summary tables keyed by region of interest base. |
 | `summary` | Primary summary table. It returns the `SCN` summary when present, otherwise the first available summary. |
 | `master_region` | Region mapping table produced by `assign_region`. |
-| `images` | Image metadata table, or an empty table if no images were found. |
-| `imagesDict` | Lookup dictionary derived from `images`. |
+| `images` | Image metadata table when images are imported. This is `None` when `processData(import_images=False)` skips image import, and may be empty when import ran but no images were found. |
+| `imagesDict` | Lookup dictionary derived from `images`; `{}` when image import is skipped. |
 | `image_root` | Folder where images were discovered, when available. |
 | `fig_path`, `image_fig_path`, `representative_path`, `legend_path`, `data_path` | Standard output folders under the experiment root. |
 | `csv_path`, `column_path`, `attribute_path` | CSV export folders under the experiment root. |

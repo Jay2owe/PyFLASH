@@ -10,6 +10,14 @@ Registry name: `coloc_sankey`.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_coloc_sankey(exp, "Marker1", save=True)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_coloc_sankey example figure](../gallery/images/plot_coloc_sankey.svg)
 
 *Sankey flow of `Marker1`–`Marker2` colocalisation categories (group C). Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -55,7 +63,7 @@ plot_coloc_sankey(
 | `source` | PyFLASH-like object or `DataFrame` | required | Marker data source. |
 | `marker` | `str` or list-like | required | Base marker. A list queues one Sankey plot per marker. |
 | `df` | `pandas.DataFrame` or `None` | `None` | Optional pre-filtered marker table override for one marker. |
-| `filter_by` | dict, tuple, list, or `None` | `None` | Preferred row filter. Lists run queue mode. Legacy alias: `specificity`. |
+| `filter_by` | dict, tuple, list, or `None` | `None` | Row filter. Lists run queue mode. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | ROI-base selector. Multiple ROI bases run queue mode. |
 | `by` | `str` or `None` | `None` | Group panels. `None` auto-groups by condition only when multiple conditions remain. |
 | `remove_closest` | `bool` | `False` | Exclude `<marker>_ClosestTo_<other>` columns. |
@@ -63,11 +71,23 @@ plot_coloc_sankey(
 | `include_neither` | `bool` | `True` | Include false branches. `False` keeps only true branches. |
 | `min_count` | `int` | `1` | Hide branches with fewer rows. Values below 1 are clamped to 1. |
 | `normalize` | `bool` | `False` | Use percent of panel rows for link values instead of raw counts. |
-| `order` | `str` or list-like | `"auto"` | Indicator order. Accepted strings include `"auto"`, `"detected"`, `"stable"`, `"alphabetical"`, and `"alpha"`. |
+| `order` | `str` or list-like | `"auto"` | Indicator order. |
 | `title` | `str` or `None` | `None` | Base plot title. |
 | `save` | `bool` | `True` | Save figures when an experiment context is available. |
 | `experiment` | PyFLASH-like object or `None` | `None` | Legacy/context object for DataFrame input and saving. |
 | `dpi` | `int` | `110` | Used to scale saved Plotly figure size. |
+
+## Parameter Options
+
+### `order` options
+
+| Option | Behavior |
+|---|---|
+| `"auto"` (default) | Let PyFLASH choose a stable detected indicator order. |
+| `"detected"` | Use the detected indicator order. |
+| `"stable"` | Use the stable indicator order. |
+| `"alphabetical"` | Sort indicators alphabetically. Alias: `"alpha"`. |
+| List-like | Use the supplied explicit indicator order. |
 
 ## Returns
 

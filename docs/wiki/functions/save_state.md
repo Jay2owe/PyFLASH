@@ -23,7 +23,7 @@ save_state(obj, filename=None, verbose=True)
 | `Batch` | Yes | Main supported object for full workflows. |
 | `Experiment` | Yes | Saves the imported experiment object and its current summaries, metadata, and output paths. |
 | `MiniExperiment` | Yes | Works when the object is picklable and has a usable `name`; `filename=None` also needs `csv_path`. |
-| `DataFrameExperiment` | Yes | Saves the adapted table object, including inferred or supplied groups and paths. |
+| `DataFrameExperiment` | Yes, with explicit `filename` | Saves the adapted table object, including inferred or supplied groups and paths. Current `DataFrameExperiment` objects do not expose `csv_path`, so `save_state(df_exp)` without `filename` fails. |
 | `pandas.DataFrame` | No | Pickling a bare table is not the public PyFLASH state format. Use pandas IO or wrap it with [`from_dataframe`](from_dataframe.md). |
 
 ## Parameters
@@ -31,7 +31,7 @@ save_state(obj, filename=None, verbose=True)
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `obj` | PyFLASH object | required | Object to pickle. Public use is intended for `Batch`, `Experiment`, `MiniExperiment`, and `DataFrameExperiment`. |
-| `filename` | Path-like or `None` | `None` | Destination pickle path. If omitted, PyFLASH uses `obj.csv_path / f"{obj.name}.pkl"`. |
+| `filename` | Path-like or `None` | `None` | Destination pickle path. If omitted, PyFLASH uses `obj.csv_path / f"{obj.name}.pkl"`, so the object must expose `csv_path`. |
 | `verbose` | `bool` | `True` | Print a confirmation message with object name, path, and file size. |
 
 ## Returns
@@ -91,6 +91,7 @@ print(batch._state_path)
   `save_state`.
 - `filename=None` is convenient for classic imported objects that have
   `csv_path`, but explicit filenames are clearer in scripts and UI workflows.
+  Use an explicit filename for `DataFrameExperiment` objects.
 - Moving a pickle between machines can leave absolute paths stale. Load it with
   path normalization, or call [`normalize_paths`](normalize_paths.md) after
   loading.

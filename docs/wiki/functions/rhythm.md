@@ -52,7 +52,7 @@ rhythm(
 )
 ```
 
-Only the public arguments are shown. Internal underscore-prefixed queue arguments
+Common public arguments are shown. Internal underscore-prefixed queue arguments
 are reserved for PyFLASH.
 
 ## Input Object Types
@@ -65,31 +65,79 @@ are reserved for PyFLASH.
 
 ## Parameters
 
-| Parameter | Meaning |
+| Parameter | Type | Default | Meaning |
+|---|---|---:|---|
+| `experiment` | `Batch`, `Experiment`, `MiniExperiment`, or `DataFrame` | required | Data source containing a summary table. |
+| `data_col` | `str` or `None` | `None` | Single measurement column for cosinor mode. Alias: `column`. |
+| `data_cols` | list-like or `None` | `None` | One or more measurement columns for cosinor mode. Alias: `columns`. |
+| `time_col` | `str` | `"Time"` | Time axis column for cosinor mode. Values are coerced to numeric time units. |
+| `group_col` | `str` or `None` | `None` | Optional grouping column such as `Diagnosis` or `Condition`. |
+| `group_order` | list-like or `None` | `None` | Explicit group order for colors, legends, and result tables. `None` uses observed/group-list order. |
+| `period` | `float` | `24.0` | Rhythm period in the same units as `time_col`; `24.0` is the default daily cycle. |
+| `period_free` | `bool` | `False` | If `True`, fit the period freely instead of holding it fixed at `period`. |
+| `method` | `str` | `"pooled"` | Cosinor fit method. |
+| `subject_col` | `str` or `None` | `None` | Subject identifier column. Alias: `animal_col`. |
+| `phase_col` | `str` or `None` | `None` | Circular phase/acrophase column for parameter mode. Supplying `phase_col` selects parameter mode. |
+| `param_cols` | list-like or `None` | `None` | Optional additional rhythmic parameter columns to test in parameter mode, such as amplitude or mesor. |
+| `radius_col` | `str` or `None` | `None` | Optional radial column for phase-amplitude plotting. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Restrict rows before analysis. A list of filters runs queue mode and tags outputs by filter value. Alias: `specificity`. |
+| `screen` | `bool` | `False` | Add q-values to parameter tests. Required when `gate="fdr"`. |
+| `families` | `str`, list-like, or mapping | `"parameter"` | Multiple-testing family definition for screened parameter tests. |
+| `gate` | `str` | `"p"` | Significance gate for mode-specific summaries. |
+| `alpha` | `float` | `0.05` | Significance cutoff. |
+| `palette` | mapping, sequence, or `None` | `None` | Optional color mapping for groups. `None` uses PyFLASH/group-list colors where available. |
+| `run_label` | `str` or `None` | `None` | Run folder name. `None` builds a deterministic slug from settings. |
+| `if_exists` | `str` | `"overwrite"` | Run-folder collision policy. |
+| `save` | `bool` | `True` | Write run files. `False` computes and returns results without clearing or writing a run folder. |
+| `write_manifest` | `bool` | `True` | Write `manifest.json` and update `_runs_index.csv` when saving. |
+| `montage` | `bool` | `True` | Create `! Overview Montage.png` in the run folder when saving. |
+| `condition_col` | `str` | `"Condition"` | Legacy group column used when wrapping a raw `DataFrame`; prefer `group_col` where possible. |
+| `group_cols` | list-like or `None` | `None` | Crossed grouping columns used when wrapping a raw `DataFrame`. Alias: `factor_cols`. |
+| `group_list` | `groupList` or `None` | `None` | Optional group metadata for raw `DataFrame` input. Aliases: `groups`, legacy `conditions`. |
+| `dataframe_kwargs` | `dict` or `None` | `None` | Advanced options forwarded to the raw `DataFrame` adapter. |
+
+## Parameter Options
+
+### `period_free` options
+
+| Option | Behavior |
 |---|---|
-| `column`, `data_col` | Single measurement column for cosinor mode. |
-| `columns`, `data_cols` | One or more measurement columns for cosinor mode. |
-| `time_col` | Time axis column for cosinor mode. Values are coerced to numeric time units. |
-| `group_col` | Optional grouping column such as `Diagnosis` or `Condition`. |
-| `group_order` | Explicit group order for colors, legends, and result tables. |
-| `period` | Rhythm period in the same units as `time_col`; `24.0` is the default daily cycle. |
-| `period_free` | If true, fit the period freely instead of holding it fixed. |
-| `method` | Cosinor fit method. Public workflows normally use `pooled`. |
-| `subject_col`, `animal_col` | Subject identifier column. `animal_col` is the legacy alias. |
-| `phase_col` | Circular phase/acrophase column for parameter mode. Supplying `phase_col` selects parameter mode. |
-| `param_cols` | Optional additional rhythmic parameter columns to test in parameter mode. |
-| `radius_col` | Optional radial column for phase-amplitude plotting. |
-| `filter_by`, `specificity` | Restrict rows before analysis. `filter_by` is the preferred public name; `specificity` remains supported for older code. A filter queue writes one combined run folder with tagged files and a `conditions` ledger. |
-| `screen` | Add q-values to parameter tests. Required when `gate="fdr"`. |
-| `families` | Multiple-testing family definition for screened parameter tests. |
-| `gate` | Significance gate for mode-specific summaries: `p` or FDR/q-value aliases. |
-| `alpha` | Significance cutoff. |
-| `palette` | Optional color mapping for groups. |
-| `run_label` | Run folder name. If omitted, PyFLASH builds a deterministic slug. |
-| `if_exists` | Run-folder collision policy: `overwrite`, `version`, `error`, or `skip`. |
-| `save` | If true, write run files. |
-| `write_manifest` | Write `manifest.json` and update `_runs_index.csv` when saving. |
-| `montage` | If true and saving, create `! Overview Montage.png`. |
+| `False` (default) | Hold the rhythm period fixed at `period`. |
+| `True` | Fit the period as a free parameter. |
+
+### `method` options
+
+| Option | Behavior |
+|---|---|
+| `"pooled"` (default) | Fits one curve to all rows in a group. |
+| `"population_mean"` | Fits per-subject curves and averages coefficients. Requires `subject_col`/`animal_col` and enough repeated timepoints. |
+| `"mixed"` | Fits a mixed-effects cosinor with random subject intercepts. Requires `subject_col`/`animal_col` and enough repeated observations. |
+
+### `families` options
+
+| Option | Behavior |
+|---|---|
+| `"parameter"` (default) | Treats the parameter panel as one Benjamini-Hochberg family. |
+| `"none"` | Treats each parameter separately. |
+| `"each"` | Treats each parameter separately. |
+| `"per-parameter"` | Treats each parameter separately. |
+| Mapping such as `{"Amplitude": "fit"}` | Assigns named parameters to explicit correction families. |
+
+### `gate` options
+
+| Option | Behavior |
+|---|---|
+| `"p"` (default) | Use raw p-values for significance summaries. |
+| `"fdr"` | Use corrected q-values. Requires `screen=True`. |
+
+### `if_exists` options
+
+| Option | Behavior |
+|---|---|
+| `"overwrite"` (default) | Clear the existing generated run folder, then recompute. |
+| `"version"` | Keep the old run and write to the next free suffix such as `_v2`. |
+| `"error"` | Raise if the run folder already exists. |
+| `"skip"` | Reuse the cached manifest when available instead of recomputing. |
 
 ## Returns
 
@@ -162,7 +210,7 @@ Both modes write:
 | Output | Meaning |
 |---|---|
 | `manifest.json` | Stable run summary for reuse and reporting. |
-| `../_runs_index.csv` | Append-only index of rhythm runs. |
+| `../_runs_index.csv` | One-row-per-run index for rhythm runs; reruns with the same run label replace the matching index row. |
 | `! Overview Montage.png` | Overview montage when `montage=True`. |
 
 ## Examples
@@ -180,6 +228,9 @@ result = rhythm(
     period=24,
     run_label="activity_cosinor",
 )
+
+print(result["mode"])
+print(result["cosinor_parameters"].head())
 ```
 
 Parameter mode:

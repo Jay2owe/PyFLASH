@@ -10,6 +10,52 @@ Registry name: `locations`.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+import numpy as np
+import pandas as pd
+from PyFLASH import from_dataframe
+
+r = np.random.default_rng(7)
+n = 110
+cluster = r.integers(0, 2, n)
+x = np.where(cluster == 0, r.normal(180, 45, n), r.normal(330, 50, n))
+y = np.where(cluster == 0, r.normal(300, 55, n), r.normal(520, 60, n))
+marker_table = pd.DataFrame(
+    {
+        "AnimalName": ["A1"] * n,
+        "Condition": ["A"] * n,
+        "Region": ["ROIa1"] * n,
+        "ROI": ["ROIa"] * n,
+        "Marker1_XM": np.clip(x, 20, 480),
+        "Marker1_YM": -np.clip(y, 20, 780),
+        "Marker1_IntDen": np.clip(r.normal(100, 25, n), 0, None),
+        "Marker1_Volume": np.clip(r.normal(12, 3, n), 1, None),
+    }
+)
+summary = pd.DataFrame(
+    {"AnimalName": ["A1"], "Condition": ["A"], "Marker1_Count": [float(n)]}
+)
+spatial_exp = from_dataframe(
+    summary,
+    group_col="Condition",
+    subject_col="AnimalName",
+    data={"Marker1": marker_table},
+    fig_path=TMP,
+)
+P.plot_locations(
+    spatial_exp,
+    objects=["Marker1"],
+    roi="ROIa",
+    black_background=True,
+    marker_colors={"Marker1": "#19e6ff"},
+    save=True,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_locations example figure](../gallery/images/plot_locations.svg)
 
 *Spatial map of one subject's `Marker1` object locations (points-only mode). Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -69,8 +115,8 @@ plot_locations(
 |---|---|---:|---|
 | `experiment` | `Batch` or `Experiment` | required | Source object with marker data and group metadata. |
 | `objects` | marker spec | required | Marker panels to plot as object coordinates. Strings make one panel; tuples merge markers into one panel. |
-| `separate_by` | `str` | `"groups"` | Outer figure grouping. Common values: `"groups"` or `"subjects"`. Legacy/internal aliases: `"conditions"` and `"animals"`. |
-| `join_by` | `str` | `"subjects"` | Rows within a figure. Common values: `"subjects"` or `"rois"`. Legacy/internal alias: `"animals"`. |
+| `separate_by` | `str` | `"groups"` | Outer figure grouping. Aliases: `"conditions"` for groups, `"animals"` for subjects. |
+| `join_by` | `str` | `"subjects"` | Rows within a figure. Alias: `"animals"` for subjects. |
 | `merge` | `bool` | `True` | Merge marker panels where marker specs request combined panels. |
 | `colocalise` | `bool` | `True` | Preserve legacy colocalisation behaviour for object panels. |
 | `annotate` | `bool` | `True` | Label panels with marker or overlay names. |
@@ -78,7 +124,7 @@ plot_locations(
 | `images` | marker spec or `None` | `None` | Image marker panels to draw as backgrounds or side-by-side panels. |
 | `colocaliser` | `bool`, `str`, list, or `None` | `None` | Add panels using detected `<object>_Contains_<marker>` columns. |
 | `extra_graph_colors` | colour spec or `None` | `None` | Colours for extra filtered panels. |
-| `image_layout` | `str` | `"shared"` | `"shared"` overlays points on image axes; `"separate"` places images beside points. |
+| `image_layout` | `str` | `"shared"` | Image/point panel layout. |
 | `draw_rois` | `bool`, marker-panel spec, or `None` | `None` | Draw ROI outlines on matching image panels. |
 | `hue` | `bool` | `True` | Colour points by `<marker>_IntDen` when available. |
 | `marker_colors` | `dict` or `None` | `None` | Override marker colours. |
@@ -91,8 +137,31 @@ plot_locations(
 | `image_adjustments` | `dict` or `None` | `None` | Per-marker brightness/contrast settings. |
 | `edit_mode` | `bool` | `False` | Open the image-adjustment editor for image overlays. |
 | `use_existing_edits` | `bool` | `False` | Reuse saved image adjustments. |
-| `filter_by` | dict, tuple, list, or `None` | `None` | Preferred row filter. Lists run queue mode. Legacy alias: `specificity`. |
+| `filter_by` | dict, tuple, list, or `None` | `None` | Row filter. Lists run queue mode. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | ROI-base selector. Multiple ROI bases run queue mode. |
+
+## Parameter Options
+
+### `separate_by` options
+
+| Option | Behavior |
+|---|---|
+| `"groups"` (default) | Create separate outer figures by group. Alias: `"conditions"`. |
+| `"subjects"` | Create separate outer figures by subject. Alias: `"animals"`. |
+
+### `join_by` options
+
+| Option | Behavior |
+|---|---|
+| `"subjects"` (default) | Use subjects as rows within a figure. Alias: `"animals"`. |
+| `"rois"` | Use ROIs as rows within a figure. |
+
+### `image_layout` options
+
+| Option | Behavior |
+|---|---|
+| `"shared"` (default) | Overlay points on image axes. |
+| `"separate"` | Place images beside point panels. |
 
 ## Returns
 

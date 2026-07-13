@@ -14,34 +14,19 @@ pipelines, several functions can now accept a raw DataFrame directly with
 ## Signature
 
 ```python
-from_dataframe(
-    summary,
-    group_list=None,
-    *,
-    name="DataFrame",
-    group_col=None,
-    group_cols=None,
-    subject_col=None,
-    factor_mappings=None,
-    fig_path=None,
-    data_path=None,
-    file_path=None,
-    aliases=None,
-    summaries=None,
-    data=None,
-    images=None,
-    representative_images=None,
-    roi_base="SCN",
-    region_col=None,
-)
+from_dataframe(summary, conditions=None, **kwargs)
 ```
+
+`from_dataframe` is a thin wrapper around `DataFrameExperiment(summary,
+conditions, **kwargs)`. The detailed keyword options below are forwarded through
+`**kwargs`.
 
 ## Input Object Types
 
 | Object type | Accepted? | Notes |
 |---|---:|---|
 | `pandas.DataFrame` | Yes | Required as `summary`. Optional marker tables in `data` must also be DataFrames or objects with `.df`. |
-| `groupList` / `conditionList` | Yes | Optional as `group_list`. Build it with `GroupBuilder`/`ConditionBuilder` or the classic condition API. |
+| `groupList` | Yes | Optional as `group_list`. Alias object name: `conditionList`; build it with `GroupBuilder` or the legacy `ConditionBuilder` name. |
 | `Batch` | No | Use `Batch` directly; no wrapping needed. |
 | `Experiment` | No | Use `Experiment` directly; no wrapping needed. |
 
@@ -50,19 +35,19 @@ from_dataframe(
 | Parameter | Type | Default | Meaning |
 |---|---|---:|---|
 | `summary` | `pandas.DataFrame` | required | Summary-level table, usually one row per animal or subject. |
-| `group_list` | `groupList` or `None` | `None` | Optional group metadata. If omitted, PyFLASH infers defaults from `group_col` or `group_cols`. |
+| `conditions` | `groupList` or `None` | `None` | Optional group metadata. If omitted, PyFLASH infers defaults from `group_col` or `group_cols`. Aliases: `group_list`, `groups`. |
 | `name` | `str` | `"DataFrame"` | Name stored on the returned object. |
 | `group_col` | `str` or `None` | `None` | Column whose values identify the PyFLASH group. When omitted, PyFLASH falls back to a `Condition` column (via the legacy `condition_col="Condition"` default) or derives it from `group_cols`. |
 | `group_cols` | list-like or `None` | `None` | One or more grouping columns used to infer simple or crossed groups. |
 | `subject_col` | `str` or `None` | `None` | Column containing subject, sample, or animal IDs. When omitted, PyFLASH falls back to an `AnimalName` column (via the legacy `animal_col="AnimalName"` default), then to the row index. |
 | `factor_mappings` | `dict` or `None` | `None` | Optional value remapping for factor columns, e.g. `"Healthy control"` to `"Control"`. |
-| `group_order` | list-like, dict, or `None` | `None` | Optional order for inferred group or factor levels. Legacy alias: `condition_order`. |
+| `group_order` | list-like, dict, or `None` | `None` | Optional order for inferred group or factor levels. Alias: `condition_order`. |
 | `group_labels` | list-like, dict, or `None` | `None` | Optional display labels for inferred groups. |
 | `group_colors` | list-like, dict, or `None` | `None` | Optional colors for inferred groups. |
 | `group_styles` | list-like, dict, or `None` | `None` | Optional bar styles for inferred groups. |
-| `group_comparisons` | list-like or `None` | `None` | Optional default group comparisons. Legacy alias: `comparisons`. |
-| `group_comparison_mode` | `str` or `None` | `None` | Optional inferred comparisons: `"all"`, `"control"`, or `"sequential"`. Legacy alias: `comparison_mode`. |
-| `group_control` | `str` or `None` | `None` | Control group name used when `group_comparison_mode="control"`. Legacy alias: `control`. |
+| `group_comparisons` | list-like or `None` | `None` | Optional default group comparisons. Alias: `comparisons`. |
+| `group_comparison_mode` | `str` or `None` | `None` | Optional inferred comparison mode. Alias: `comparison_mode`. |
+| `group_control` | `str` or `None` | `None` | Control group name used when `group_comparison_mode="control"`. Alias: `control`. |
 | `fig_path` | Path-like or `None` | `None` | Folder used by plotting functions when `save=True`. |
 | `data_path` | Path-like or `None` | `None` | Folder used by pipeline functions for result tables. |
 | `file_path` | Path-like or `None` | `None` | Base path used to derive default output folders. |
@@ -74,14 +59,32 @@ from_dataframe(
 | `roi_base` | `str` | `"SCN"` | Default key for `summaries`. |
 | `region_col` | `str` or `None` | `None` | Optional region column used to build `getRegionDict()`. |
 
-Legacy aliases still work: `conditions`, `condition_col`, `factor_cols`,
-`animal_col`, and the older `condition_*` style options.
+Aliases also work: `conditions`, `condition_col`, `factor_cols`, `animal_col`,
+and the older `condition_*` style options.
+
+## Parameter Options
+
+### `group_comparison_mode` options
+
+| Option | Behavior |
+|---|---|
+| `None` (default) | Do not infer extra comparisons beyond provided group metadata. |
+| `"all"` | Infer all pairwise group comparisons. |
+| `"control"` | Infer comparisons against `group_control`. |
+| `"sequential"` | Infer adjacent/sequential group comparisons. |
 
 ## Returns
 
 | Return value | Type | Meaning |
 |---|---|---|
 | `obj` | `DataFrameExperiment` | PyFLASH-compatible object with `summary`, `condition_list`, `fig_path`, `data_path`, `summaries`, optional `data`, and `getRegionDict()`. |
+
+## Saved Outputs
+
+No files or folders are written by `from_dataframe` itself. The returned object
+stores output path attributes such as `fig_path`, `data_path`, and
+`export_path`; later plotting, pipeline, export, `createSavePaths()`, or
+[`save_state`](save_state.md) calls may create directories or files.
 
 ## Supported Workflows
 
@@ -234,7 +237,7 @@ do not need to repeat group labels if the IDs match.
 ## See Also
 
 - [Object model](../object-model.md)
-- `create_batch`
-- `GroupBuilder`
-- `plot_mean_bars`
-- `correlation`
+- [create_batch](create_batch.md)
+- [GroupBuilder](condition-builder.md)
+- [plot_mean_bars](plot_mean_bars.md)
+- [correlation](correlation.md)

@@ -11,6 +11,14 @@ Registry name: `coloc_upset`.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_coloc_upset(exp, "Marker1", save=True)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_coloc_upset example figure](../gallery/images/plot_coloc_upset.svg)
 
 *UpSet plot of `Marker1`–`Marker2` colocalisation sets (group C). Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -54,19 +62,28 @@ plot_coloc_upset(
 |---|---|---:|---|
 | `source` | PyFLASH-like object or `DataFrame` | required | Marker data source. |
 | `marker` | `str` or list-like | required | Base marker. A list queues one UpSet plot per marker. |
-| `filter_by` | dict, tuple, list, or `None` | `None` | Preferred row filter. Lists run queue mode. Legacy alias: `specificity`. |
+| `filter_by` | dict, tuple, list, or `None` | `None` | Row filter. Lists run queue mode. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | ROI-base selector. Multiple ROI bases run queue mode. |
 | `by` | `str` or `None` | `None` | Group panels. `None` auto-groups by condition only when multiple conditions remain. |
 | `remove_closest` | `bool` | `False` | Exclude `<marker>_ClosestTo_<other>` columns. |
 | `include_neither` | `bool` | `False` | Include the all-false intersection. |
 | `min_count` | `int` | `1` | Hide intersections with fewer rows. |
 | `normalize` | `bool` | `False` | Plot percent of panel rows instead of raw counts. |
-| `sort_by` | `str` | `"cardinality"` | UpSet sorting mode. Common values: `"cardinality"` or `"degree"`. |
+| `sort_by` | `str` | `"cardinality"` | UpSet sorting mode. |
 | `title` | `str` or `None` | `None` | Base plot title. |
 | `save` | `bool` | `True` | Save figures when an experiment context is available. |
 | `df` | `pandas.DataFrame` or `None` | `None` | Optional pre-filtered marker table override for one marker. |
 | `experiment` | PyFLASH-like object or `None` | `None` | Legacy/context object for DataFrame input and saving. |
 | `dpi` | `int` | `110` | Figure DPI. |
+
+## Parameter Options
+
+### `sort_by` options
+
+| Option | Behavior |
+|---|---|
+| `"cardinality"` (default) | Sort intersections by size. |
+| `"degree"` | Sort intersections by number of participating sets. |
 
 ## Returns
 

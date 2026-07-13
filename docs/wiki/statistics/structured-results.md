@@ -50,10 +50,16 @@ trace what was run, compare options across runs, or generate a report digest.
 For detailed interpretation, open the corresponding CSV tables and read the
 specific statistics page for the method.
 
-The describe registry is a coverage tool. Functions in the covered set have
-reviewed structured descriptions. Exempt functions are intentionally excluded
-from describe coverage. Unreviewed functions are known gaps rather than hidden
-methods.
+The describe registry is a coverage tool. `DESCRIBE_COVERED` contains functions
+that emit structured report records or return a pipeline manifest. That can
+happen through the shared statistics engine, a direct `report.emit(...)` call,
+or a pipeline return object.
+
+`DESCRIBE_EXEMPT` contains visual or descriptive functions that do not have an
+inferential result to capture. `DESCRIBE_UNREVIEWED` contains functions that do
+compute quantitative or inferential results, such as p-values, correlations, or
+variance explained, but have not yet been wired into the structured-results
+layer. Treat unreviewed entries as tracked coverage gaps, not hidden methods.
 
 ## Limitations
 

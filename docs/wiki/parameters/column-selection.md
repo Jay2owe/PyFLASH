@@ -26,32 +26,31 @@ expression discovery when you want PyFLASH to find a family of columns.
 
 ## Accepted Values
 
-| Parameter | Accepted values | Behavior |
+| Parameter | Meaning | Aliases |
 |---|---|---|
-| `data_cols` | List of exact summary column names. | Preferred public name for exact data columns. Plot wrappers resolve known aliases and raise if no provided name matches. |
-| `filtered_columns` | List of exact summary column names. | Legacy/internal alias for `data_cols`. |
-| `data_col_contains` | String list. | Preferred public substring selector. |
-| `column_strings` | String list such as `["Count", "Volume"]`. | Legacy/internal alias for `data_col_contains`. Matching is substring-based and case-sensitive. |
-| `data_col_regex` | Regular expression string. | Preferred public regex selector. |
-| `regex_string` | Python regular expression string. | Legacy/internal alias for `data_col_regex`. Selects columns matching the regex when substring filters are not supplied in the shared `get_columns` path. |
-| `data_col_exclude` | String or list of strings. | Preferred public exclusion selector. |
-| `exclude` | String or list of strings. | Legacy/internal alias for `data_col_exclude`. Removes selected columns whose names contain any exclude token. The default empty string excludes nothing. |
+| `data_cols` | Select exact summary columns. Plot wrappers resolve known column-name aliases and raise if no provided name matches. | `filtered_columns`; plot specs may also use `columns`. |
+| `data_col_contains` | Discover columns whose names contain one or more case-sensitive text fragments. | `column_strings`. |
+| `data_col_regex` | Discover columns whose names match one Python regular expression in the shared resolver. | `regex_string`. |
+| `data_col_exclude` | Remove selected columns whose names contain one or more exclude tokens. | `exclude`; the legacy alias may default to `""`, which excludes nothing. |
 
 Second-axis matrix and correlation parameters follow the same pattern:
 
 | First-axis option | Second-axis option |
 |---|---|
-| `data_cols` / legacy `filtered_columns` | `against_data_cols` / legacy `against_columns` |
-| `data_col_contains` / legacy `column_strings` | `against_data_col_contains` / legacy `against_column_strings` |
-| `data_col_regex` / legacy `regex_string` | `against_data_col_regex` / legacy `against_regex_string` |
-| `data_col_exclude` / legacy `exclude` | `against_data_col_exclude` / legacy `against_exclude` |
+| `data_cols` | `against_data_cols` |
+| `data_col_contains` | `against_data_col_contains` |
+| `data_col_regex` | `against_data_col_regex` |
+| `data_col_exclude` | `against_data_col_exclude` |
+
+Second-axis aliases are `against_columns`, `against_column_strings`,
+`against_regex_string`, and `against_exclude`.
 
 Predictor-selection variants:
 
 | Function family | Predictor options |
 |---|---|
-| `iterative_model_sweep` | `possible_predictors`, `data_cols`, `predictors`, or `candidate_predictors` choose the predictor pool; `data_col_contains`/`data_col_regex` filter it; `data_col_exclude` removes name substrings; `excluded_predictors` removes exact names. Legacy aliases include `column_strings`, `regex_string`, and `predictor_exclude`. |
-| `iterative_best_fit` | `possible_predictors` plus `data_col_contains`, `data_col_regex`, and `data_col_exclude`. Legacy aliases include `column_strings`, `regex_string`, and `predictor_exclude`. |
+| `iterative_model_sweep` | `data_cols` chooses the predictor pool. Aliases: `possible_predictors`, `predictors`, `candidate_predictors`. `data_col_contains`/`data_col_regex` filter it; `data_col_exclude` removes name substrings; `excluded_predictors` removes exact names. |
+| `iterative_best_fit` | `possible_predictors` chooses the predictor pool. `data_col_contains`, `data_col_regex`, and `data_col_exclude` refine it. Alias for exclusion: `predictor_exclude`. |
 | `linear_model` | `predictors` are model terms or column names, not discovered by `column_strings`. |
 | Multivariable matrix plots | `predictors` can be a mapping of named predictor sets. |
 
@@ -117,10 +116,11 @@ resolution, which can handle several legacy summary-column aliases. Discovery
 filters inspect the actual DataFrame column names.
 
 `data_col_contains` and `data_col_regex` do not always combine the same way. The
-shared column resolver prioritizes substring selection when it is supplied;
-some modelling predictor filters apply both substring and regex filters to an
-explicit predictor pool. Check the function page for exact behavior when using
-both at once. Legacy aliases are `column_strings` and `regex_string`.
+shared column resolver prioritizes substring selection when it is supplied and
+passes one regex string to pandas when regex discovery is used. Some modelling
+predictor filters apply both substring and regex filters to an explicit
+predictor pool. Check the function page for exact behavior when using both at
+once. Legacy aliases are `column_strings` and `regex_string`.
 
 Column selection happens before numeric validation. A selected column may still
 be dropped later if it cannot be converted to numeric for a numeric-only plot or

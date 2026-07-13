@@ -43,7 +43,7 @@ is human-readable.
 ## The Runner's results_store Tiers
 
 The `/pyflash` runner arms the collector per run, then persists three tiers under
-`.runtime/results_store/`:
+`.claude/skills/pyflash/.runtime/results_store/`:
 
 - **Tier 1** — `<run_id>.results.json`: the canonical structured manifest.
 - **Tier 2** — `<run_id>.results.md`: a deterministic markdown digest rendered

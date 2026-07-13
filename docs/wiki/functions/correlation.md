@@ -45,7 +45,7 @@ correlation(
 )
 ```
 
-Only the public arguments are shown. Internal underscore-prefixed queue arguments
+Common public arguments are shown. Internal underscore-prefixed queue arguments
 are reserved for PyFLASH.
 
 ## Input Object Types
@@ -61,47 +61,106 @@ are reserved for PyFLASH.
 | Parameter | Type | Default | Meaning |
 |---|---|---:|---|
 | `experiment` | `Batch`, `Experiment`, `MiniExperiment`, or wrapped `DataFrame` | required | Data source containing a numeric summary table. |
-| `data_cols` / `filtered_columns` | list-like or `None` | `None` | Exact first-axis columns. `filtered_columns` is the legacy alias. If omitted, PyFLASH discovers usable numeric columns. |
-| `against_data_cols` / `against_columns` | list-like or `None` | `None` | Optional second-axis columns. `None` runs a square all-vs-all matrix; supplying columns runs a rectangular matrix. |
-| `data_col_contains` / `column_strings` | `str`, list-like, or `None` | `None` | Include first-axis columns containing these case-sensitive text fragments. |
-| `data_col_regex` / `regex_string` | `str`, list-like, or `None` | `None` | Include first-axis columns matching one or more Python regular expressions. |
-| `data_col_exclude` / `exclude` | `str`, list-like, or `None` | `""` | Remove first-axis columns containing these text fragments. The empty-string default excludes nothing. |
-| `against_data_col_contains` / `against_column_strings` | `str`, list-like, or `None` | `None` | Substring selector for the optional second axis. |
-| `against_data_col_regex` / `against_regex_string` | `str`, list-like, or `None` | `None` | Regex selector for the optional second axis. |
-| `against_data_col_exclude` / `against_exclude` | `str`, list-like, or `None` | `""` | Exclusion selector for the optional second axis. |
-| `by` | `str` | `"all"` | Grouping mode. Accepted values include `"all"` to pool rows and `"conditions"` to run by group list. |
-| `factor` / `split_by` | `str`, list-like, or `None` | `None` | Group by one summary-table column or condition factor such as `Diagnosis`; `split_by` is the newer public name. |
-| `filter_by` / `specificity` | mapping, tuple, list, or `None` | `None` | Restrict rows before analysis. A list of filters runs queue mode and tags outputs by filter value. |
+| `data_cols` | list-like or `None` | `None` | Exact first-axis columns. If omitted, PyFLASH discovers usable numeric columns. Alias: `filtered_columns`. |
+| `against_data_cols` | list-like or `None` | `None` | Optional second-axis columns. `None` runs a square all-vs-all matrix; supplying columns runs a rectangular matrix. Alias: `against_columns`. |
+| `data_col_contains` | `str`, list-like, or `None` | `None` | Include first-axis columns containing these case-sensitive text fragments. Alias: `column_strings`. |
+| `data_col_regex` | `str`, list-like, or `None` | `None` | Include first-axis columns matching one or more Python regular expressions. Alias: `regex_string`. |
+| `data_col_exclude` | `str`, list-like, or `None` | `""` | Remove first-axis columns containing these text fragments. The empty-string default excludes nothing. Alias: `exclude`. |
+| `against_data_col_contains` | `str`, list-like, or `None` | `None` | Substring selector for the optional second axis. Alias: `against_column_strings`. |
+| `against_data_col_regex` | `str`, list-like, or `None` | `None` | Regex selector for the optional second axis. Alias: `against_regex_string`. |
+| `against_data_col_exclude` | `str`, list-like, or `None` | `""` | Exclusion selector for the optional second axis. Alias: `against_exclude`. |
+| `by` | `str` | `"all"` | Grouping mode for matrix blocks. |
+| `split_by` | `str`, list-like, or `None` | `None` | Group by one summary-table column or condition factor such as `Diagnosis`. Alias: `factor`. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Restrict rows before analysis. A list of filters runs queue mode and tags outputs by filter value. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | Restrict to one or more ROI bases. `None` uses the object's default summary. |
-| `tests` | tuple/list of `str` | `("pearsonr", "spearmanr", "kendalltau")` | Correlation methods. Accepted values: `"pearsonr"`, `"spearmanr"`, `"kendalltau"` and common aliases `"pearson"`/`"p"`, `"spearman"`/`"s"`, `"kendall"`/`"k"`. |
-| `require` | `str` | `"and"` | Multi-method gate logic. Accepted values: `"and"` means every method in `tests` must pass; `"or"` means any method may pass. |
-| `gate` | `str` | `"p"` | Significance gate. `"p"` uses raw p-values; `"fdr"`, `"q"`, `"q_value"`, `"q-value"`, `"fdr_bh"`, and `"bh"` use corrected q-values. |
+| `tests` | tuple/list of `str` | `("pearsonr", "spearmanr", "kendalltau")` | Correlation methods to run for each pair. |
+| `require` | `str` | `"and"` | Multi-method gate logic for selected pairs. |
+| `gate` | `str` | `"p"` | Significance gate used for pair selection. |
 | `alpha` | `float` | `0.05` | Significance cutoff for p/q gate decisions and matrix annotations. |
 | `min_n` | `int` | `3` | Minimum complete paired observations before a pair is tested. Underpowered pairs remain in the long table with missing statistics. |
 | `max_regressions` | `int` or `None` | `12` | Maximum selected pairs to send to regression plots. Use `0` to suppress regression plots or `None` to allow all selected pairs. |
 | `regression_factor` | `str` or `None` | `None` | Grouping column used to color or split regression plots. `None` reuses the matrix grouping where appropriate. |
-| `regression_test` | `str` | `"pearsonr"` | Correlation method annotated on regression plots. Accepts the same method names and aliases as `tests`. |
+| `regression_test` | `str` | `"pearsonr"` | Correlation method annotated on regression plots. Uses the same option names as `tests`. |
 | `regression_combine` | `bool` | `True` | Overlay grouped regression fits in one panel where supported. |
-| `normalize_x`, `normalize_y` | `bool`, tuple, `str`, or `None` | `False` | Optional normalization for regression axes. Accepted forms include `False`, `True` for min-max, explicit `(min, max)`, and `"Z-score"`. |
+| `normalize_x`, `normalize_y` | `bool`, tuple, `str`, or `None` | `False` | Optional normalization for regression axes. |
 | `tick_label_size` | `int` or `float` | `20` | Tick-label size for saved matrix-style figures. |
-| `value_matrices` | `str`, list-like, or `None` | `"p"` | Which p/q heatmap figures to save. Accepted values: `"p"`, `"q"`, `"both"`, `"none"`, or a list containing `"p"` and/or `"q"`. CSV matrices are still written for both p and q when `save=True`. |
+| `value_matrices` | `str`, list-like, or `None` | `"p"` | Which p/q heatmap figures to save. CSV matrices are still written for both p and q when `save=True`. |
 | `plot_pvalue_matrices`, `plot_qvalue_matrices` | `bool` or `None` | `None` | Legacy boolean overrides for p/q heatmap saving. `None` follows `value_matrices`. |
 | `plot_difference_matrices` | `bool` | `False` | Also compare correlation matrices between groups from `factor`/`split_by`. |
 | `difference_comparisons` | list-like or `None` | `None` | Group comparisons for matrix differences, for example `["1-2"]` or explicit label pairs. `None` uses available planned/default comparisons. |
 | `difference_gate` | `str` or `None` | `None` | Gate for matrix-difference outputs. `None` reuses `gate`; otherwise accepts the same p/q gate names. |
 | `difference_alpha` | `float` or `None` | `None` | Significance cutoff for matrix differences. `None` reuses `alpha`. |
 | `difference_test` | `str` | `"fisher_z"` | Statistical comparison for difference matrices. `"fisher_z"` compares independent Pearson correlations. |
-| `plot_difference_signed`, `plot_difference_absolute`, `plot_difference_pvalue_matrices`, `plot_difference_qvalue_matrices`, `plot_difference_gate_matrix` | `bool` | mixed | Toggle signed difference, absolute difference, raw p-value, q-value, and gate-summary difference figures. Defaults are `True`, `True`, `True`, `False`, and `True`. |
+| `plot_difference_signed`, `plot_difference_absolute`, `plot_difference_pvalue_matrices`, `plot_difference_qvalue_matrices`, `plot_difference_gate_matrix` | `bool` | `True`, `True`, `True`, `False`, `True` | Toggle signed difference, absolute difference, raw p-value, q-value, and gate-summary difference figures. |
 | `run_label` | `str` or `None` | `None` | Run folder name. `None` builds a deterministic slug from columns and settings. |
-| `if_exists` | `str` | `"overwrite"` | Run-folder collision policy. Accepted values: `"overwrite"`, `"version"`, `"error"`, or `"skip"`. |
+| `if_exists` | `str` | `"overwrite"` | Run-folder collision policy. |
 | `save` | `bool` | `True` | Write run files. `False` computes and returns results without clearing or writing a run folder. |
 | `write_manifest` | `bool` | `True` | Write `manifest.json` and update `_runs_index.csv` when saving. |
 | `montage` | `bool` | `True` | Create `! Overview Montage.png` in the run folder when saving. |
-| `group_col` / `condition_col` | `str` | `"Condition"` | Group column used when wrapping a raw `DataFrame`. `condition_col` is the legacy alias. |
-| `group_cols` / `factor_cols` | list-like or `None` | `None` | Crossed grouping columns used when wrapping a raw `DataFrame`. |
-| `subject_col` / `animal_col` | `str` | `"AnimalName"` | Subject/sample identifier column used by the raw `DataFrame` adapter. |
-| `group_list`, `groups`, `conditions` | `groupList` or `None` | `None` | Optional group metadata for raw `DataFrame` input. `conditions` is the legacy name. |
+| `group_col` | `str` or `None` | `None` | Public alias for `condition_col` when wrapping a raw `DataFrame`. If both are omitted, the adapter uses `condition_col="Condition"`. |
+| `group_cols` | list-like or `None` | `None` | Crossed grouping columns used when wrapping a raw `DataFrame`. Alias: `factor_cols`. |
+| `subject_col` | `str` or `None` | `None` | Public alias for `animal_col` when wrapping a raw `DataFrame`. If both are omitted, the adapter uses `animal_col="AnimalName"`. |
+| `group_list` | `groupList` or `None` | `None` | Optional group metadata for raw `DataFrame` input. Aliases: `groups`, legacy `conditions`. |
 | `dataframe_kwargs` | `dict` or `None` | `None` | Advanced options forwarded to the raw `DataFrame` adapter. |
+
+## Parameter Options
+
+### `by` options
+
+| Option | Behavior |
+|---|---|
+| `"all"` (default) | Pool rows for one overall matrix block. |
+| `"conditions"` | Run matrix blocks by resolved group-list condition. |
+
+### `tests` and `regression_test` options
+
+| Option | Behavior |
+|---|---|
+| `"pearsonr"` | Pearson linear correlation. Aliases: `"pearson"`, `"p"`. |
+| `"spearmanr"` | Spearman rank correlation. Aliases: `"spearman"`, `"s"`. |
+| `"kendalltau"` | Kendall rank correlation. Aliases: `"kendall"`, `"k"`. |
+
+### `require` options
+
+| Option | Behavior |
+|---|---|
+| `"and"` (default) | Every method in `tests` must pass the selected gate. |
+| `"or"` | Any method in `tests` may pass the selected gate. |
+
+### `gate` options
+
+| Option | Behavior |
+|---|---|
+| `"p"` (default) | Use raw p-values for pair selection. |
+| `"fdr"` | Use corrected q-values for pair selection. Aliases: `"q"`, `"q_value"`, `"q-value"`, `"fdr_bh"`, `"bh"`. |
+
+### `normalize_x` and `normalize_y` options
+
+| Option | Behavior |
+|---|---|
+| `False` (default) | Keep native axis values. |
+| `True` | Min-max normalize the axis. |
+| `(min, max)` | Map the axis to the supplied numeric range. |
+| `"Z-score"` | Standardize the axis to z-scores. |
+
+### `value_matrices` options
+
+| Option | Behavior |
+|---|---|
+| `"p"` (default) | Save p-value heatmap figures. |
+| `"q"` | Save q-value heatmap figures. |
+| `"both"` | Save both p-value and q-value heatmap figures. |
+| `"none"` | Skip p/q heatmap figures. |
+| List containing `"p"` and/or `"q"` | Save exactly the requested p/q heatmap figure types. |
+
+### `if_exists` options
+
+| Option | Behavior |
+|---|---|
+| `"overwrite"` (default) | Clear the existing generated run folder, then recompute. |
+| `"version"` | Keep the old run and write to the next free suffix such as `_v2`. |
+| `"error"` | Raise if the run folder already exists. |
+| `"skip"` | Reuse the cached manifest when available instead of recomputing. |
 
 ## Returns
 
@@ -154,7 +213,7 @@ The run folder is both `fig_dir` and `data_dir`.
 | `Regressions/**/*.svg` | Optional regression figures for selected pairs. |
 | `Matrix Differences/*` | Optional difference tables and matrix figures when `plot_difference_matrices=True`. |
 | `manifest.json` | Stable run summary for reuse and reporting. |
-| `../_runs_index.csv` | Append-only index of pipeline runs for this pipeline family. |
+| `../_runs_index.csv` | One-row-per-run index for this pipeline family; reruns with the same run label replace the matching index row. |
 | `! Overview Montage.png` | Overview montage when `montage=True` and enough panels are captured. |
 
 For a filter queue, each child group writes tagged filenames such as
@@ -177,6 +236,9 @@ result = correlation(
     max_regressions=0,
     save=False,
 )
+
+print(result["n_selected"])
+print(result["selected"].head())
 ```
 
 Run a grouped, saved analysis with p- and q-value heatmaps:

@@ -18,19 +18,22 @@ plot or pipeline request.
 | `PyFLASH.report.start()` / `emit(...)` / `collect()` | In-memory result records for direct Python use. |
 | Plot/statistics paths such as [`plot_mean_bars`](../functions/plot_mean_bars.md), [`plot_regressions`](../functions/plot_regressions.md), and [`plot_multivariable_regression_matrix`](../functions/plot_multivariable_regression_matrix.md) | `group_comparison`, `correlation`, or `multivariable_regression` records when the collector is active. |
 | Pipelines such as [`correlation`](../functions/correlation.md), [`adjusted_correlation`](../functions/adjusted_correlation.md), [`linear_model`](../functions/linear_model.md), and [`iterative_model_sweep`](../functions/iterative_model_sweep.md) | Pipeline return summaries that the runner can include in a results manifest. |
-| The PyFLASH runner | Persistent `.results.json`, `.results.md`, `index.jsonl`, and optional `lab_notebook.md` entries under `.runtime/results_store/`. |
+| The PyFLASH runner | Persistent `.results.json`, `.results.md`, `index.jsonl`, and optional `lab_notebook.md` entries under `.claude/skills/pyflash/.runtime/results_store/`. |
 
 ## Folder Layout
 
 Runner-persisted report records live in the local runtime results store:
 
 ```text
-.runtime/
-  results_store/
-    <run_id>.results.json
-    <run_id>.results.md
-    index.jsonl
-    lab_notebook.md
+.claude/
+  skills/
+    pyflash/
+      .runtime/
+        results_store/
+          <run_id>.results.json
+          <run_id>.results.md
+          index.jsonl
+          lab_notebook.md
 ```
 
 The store is separate from `batch.fig_path`. It is a session/project runtime
@@ -122,7 +125,7 @@ Read a persisted runner result:
 import json
 from pathlib import Path
 
-path = Path(".runtime/results_store/run123.results.json")
+path = Path(".claude/skills/pyflash/.runtime/results_store/run123.results.json")
 summary = json.loads(path.read_text(encoding="utf-8"))
 
 for metric in summary.get("metrics", []):
@@ -135,7 +138,7 @@ Search recent run summaries through the ledger:
 import json
 from pathlib import Path
 
-ledger = Path(".runtime/results_store/index.jsonl")
+ledger = Path(".claude/skills/pyflash/.runtime/results_store/index.jsonl")
 for line in ledger.read_text(encoding="utf-8").splitlines():
     entry = json.loads(line)
     if entry["plot"] == "plot_mean_bars":

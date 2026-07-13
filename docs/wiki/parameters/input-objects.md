@@ -28,22 +28,32 @@ also accept a raw `pandas.DataFrame` and wrap it as a
 
 ## Accepted Values
 
-| Parameter | Accepted values | Notes |
-|---|---|---|
-| `experiment` | `Batch`, `Experiment`, `MiniExperiment`, `DataFrameExperiment`, or another object exposing the attributes the function needs. | Most plots and pipelines read `.summary`; ROI-aware calls may read `.summaries`; image/location calls may also read `.data`, `.images`, or region dictionaries. |
-| `batch` | Usually a `Batch` or batch-like object with `.summary` and output paths. | Several statistical and modelling helpers use this name even when a `DataFrameExperiment` also works. |
-| `source` | Function-specific source object, often an experiment/batch or a marker-level `DataFrame`. | Used by colocalisation and image-related functions. Check the function page because `source` is not one universal type. |
-| `batch_or_df` | A batch-like object or a raw `pandas.DataFrame`. | Used by `iterative_model_sweep`. |
-| Raw `DataFrame` first argument | A subject-level summary table, when the function calls PyFLASH's DataFrame adapter. | Supply `group_col`/`subject_col`, or `conditions`/`groups` plus factor columns when the table is not already named `Condition` and `AnimalName`. |
+| Parameter | Meaning |
+|---|---|
+| `experiment` | Main data source for most plots and pipelines. Usually a `Batch`, `Experiment`, `MiniExperiment`, `DataFrameExperiment`, or another object exposing the attributes the function needs. |
+| `batch` | Batch-like data source used by several statistical and modelling helpers, even when a `DataFrameExperiment` also works. |
+| `source` | Function-specific source object, often an experiment/batch or a marker-level `DataFrame`. Check the function page because `source` is not one universal type. |
+| `batch_or_df` | Batch-like object or raw `pandas.DataFrame` accepted by `iterative_model_sweep`. |
+| Raw `DataFrame` first argument | Subject-level summary table used when the function calls PyFLASH's DataFrame adapter. Supply group and subject metadata when the table is not already named `Condition` and `AnimalName`. |
+
+### `experiment` options
+
+| Option | Behavior |
+|---|---|
+| `Batch` | Main processed PyFLASH object. Most plots and pipelines read `.summary`; ROI-aware calls may read `.summaries`. |
+| `Experiment` | Single-experiment PyFLASH object with summary data and output paths. |
+| `MiniExperiment` | Lightweight experiment-like object for flat CSV-style data. |
+| `DataFrameExperiment` | Adapter-created wrapper around a raw summary table. |
+| Raw `pandas.DataFrame` | Accepted only by functions that call the adapter. Image/location calls usually need richer object attributes such as `.data`, `.images`, or region dictionaries. |
 
 For raw DataFrame input, the important aliases are:
 
-| Public alias | Internal name | Meaning |
+| Preferred name | Meaning | Aliases |
 |---|---|---|
-| `group_col` | `condition_col` | Column containing group labels such as `Control` or `AD`. |
-| `group_cols` | `factor_cols` | Columns that define crossed groups, such as `["Diagnosis", "Sex"]`. |
-| `subject_col` | `animal_col` | Column containing subject or animal identifiers. |
-| `groups` / `group_list` | `conditions` | A group list that defines order, colors, and comparisons. |
+| `group_col` | Column containing group labels such as `Control` or `AD`. | `condition_col`. |
+| `group_cols` | Columns that define crossed groups, such as `["Diagnosis", "Sex"]`. | `factor_cols`. |
+| `subject_col` | Column containing subject, animal, or sample identifiers. | `animal_col`. |
+| `groups` | Group list that defines order, colors, and comparisons. | `group_list`, legacy `conditions`. |
 
 ## Examples
 

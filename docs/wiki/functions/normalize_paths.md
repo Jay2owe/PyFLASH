@@ -41,7 +41,10 @@ normalize_paths(obj, verbose=True)
 
 ## Saved Outputs
 
-No files are written by `normalize_paths`.
+`normalize_paths` does not write pickle files or rerun analyses. When a loaded
+object has an existing `filePath` and a `createSavePaths()` method, it refreshes
+derived save paths. For objects whose `createSavePaths()` creates directories,
+such as `DataFrameExperiment`, this can create missing output folders.
 
 The object is changed in memory. To persist the repaired paths, call
 [`save_state`](save_state.md) after normalization, or load with
@@ -90,8 +93,8 @@ batch = load_state(
 - A `Batch` is normalized recursively: the batch object is checked first, then
   each nested experiment in `experiment_list`.
 - Refreshing save paths depends on the object's `createSavePaths()` method. In
-  current PyFLASH objects, that method updates path attributes without forcing
-  unrelated analysis outputs to be created.
+  current PyFLASH objects, that method refreshes path attributes and may create
+  standard output directories, but it does not create analysis result files.
 - `normalize_paths` does not reload source data or rerun processing. It only
   repairs paths on an existing object.
 

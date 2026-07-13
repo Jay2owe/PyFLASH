@@ -49,7 +49,7 @@ adjusted_correlation(
 )
 ```
 
-Only the public arguments are shown. Internal underscore-prefixed queue arguments
+Common public arguments are shown. Internal underscore-prefixed queue arguments
 are reserved for PyFLASH.
 
 ## Input Object Types
@@ -62,31 +62,102 @@ are reserved for PyFLASH.
 
 ## Parameters
 
-| Parameter | Meaning |
+| Parameter | Type | Default | Meaning |
+|---|---|---:|---|
+| `experiment` | `Batch`, `Experiment`, `MiniExperiment`, or wrapped `DataFrame` | required | Data source containing a numeric summary table. |
+| `endpoints` | list-like or `None` | `None` | Endpoint columns to correlate. Aliases: `data_cols`, legacy `filtered_columns`. |
+| `covariates` | list-like or `None` | `None` | Columns that are always adjusted for. These stay in the adjustment model and are not screened. |
+| `candidate_covariates` | list-like or `None` | `None` | Columns screened against endpoints. Candidates that pass the covariate screen are promoted into the adjustment set and removed from the endpoint matrix. |
+| `categorical` | `"auto"`, list-like, `False`, or `None` | `"auto"` | Categorical covariate handling. |
+| `reference_levels` | mapping or `None` | `None` | Optional reference categories, for example `{"Diagnosis": "Control"}`. |
+| `covariate_gate` | `str` | `"fdr"` | Gate used during candidate screening. |
+| `covariate_alpha` | `float` or `None` | `None` | Candidate-screening threshold. `None` reuses `alpha`. |
+| `min_endpoint_hits` | `int` | `1` | Minimum number of endpoint associations needed before a candidate covariate is promoted. |
+| `by` | `str` | `"all"` | Grouping mode for raw and adjusted correlation blocks. |
+| `split_by` | `str`, list-like, or `None` | `None` | Group by one summary-table column or condition factor such as `Diagnosis`. Alias: `factor`. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Restrict rows before analysis. A list of filters runs queue mode and tags outputs by filter value. Alias: `specificity`. |
+| `roi` | `str`, list-like, or `None` | `None` | Restrict to one or more ROI bases. `None` uses the object's default summary. |
+| `data_col_contains` | `str`, list-like, or `None` | `None` | Include endpoint columns containing these case-sensitive text fragments. Alias: `column_strings`. |
+| `data_col_regex` | `str`, list-like, or `None` | `None` | Include endpoint columns matching one or more Python regular expressions. Alias: `regex_string`. |
+| `data_col_exclude` | `str`, list-like, or `None` | `""` | Remove endpoint columns containing these text fragments. The empty-string default excludes nothing. Alias: `exclude`. |
+| `tests` | tuple/list of `str` | `("pearsonr", "spearmanr", "kendalltau")` | Correlation methods to run for each endpoint pair. |
+| `require` | `str` | `"and"` | Multi-method gate logic for selected endpoint pairs. |
+| `gate` | `str` | `"p"` | Gate used for raw and adjusted endpoint-pair selection. Accepts the same p/q gate names as `covariate_gate`. |
+| `alpha` | `float` | `0.05` | Endpoint-correlation significance cutoff. Also supplies `covariate_alpha` when that is `None`. |
+| `min_n` | `int` | `3` | Minimum complete observations for screening, residual models, and adjusted correlations. |
+| `max_adjusted_regressions` | `int` or `None` | `None` | Cap for adjusted regression plot/report rows. `None` means no cap. |
+| `tick_label_size` | `int` or `float` | `20` | Tick-label size for saved matrix-style figures. |
+| `value_matrices` | `str`, list-like, or `None` | `"p"` | Which p/q heatmap figures to save for each raw/adjusted block. |
+| `plot_pvalue_matrices`, `plot_qvalue_matrices` | `bool` or `None` | `None` | Legacy boolean overrides for p/q heatmap saving. `None` follows `value_matrices`. |
+| `run_label` | `str` or `None` | `None` | Run folder name. `None` builds a deterministic slug from columns and settings. |
+| `if_exists` | `str` | `"overwrite"` | Run-folder collision policy. |
+| `save` | `bool` | `True` | Write run files. `False` computes and returns results without clearing or writing a run folder. |
+| `write_manifest` | `bool` | `True` | Write `manifest.json` and update `_runs_index.csv` when saving. |
+| `verbose` | `bool` | `True` | Print progress messages. |
+| `montage` | `bool` | `True` | Create `! Overview Montage.png` in the run folder when saving. |
+| `group_col` | `str` or `None` | `None` | Public alias for `condition_col` when wrapping a raw `DataFrame`. If both are omitted, the adapter uses `condition_col="Condition"`. |
+| `group_cols` | list-like or `None` | `None` | Crossed grouping columns used when wrapping a raw `DataFrame`. Alias: `factor_cols`. |
+| `subject_col` | `str` or `None` | `None` | Public alias for `animal_col` when wrapping a raw `DataFrame`. If both are omitted, the adapter uses `animal_col="AnimalName"`. |
+| `group_list` | `groupList` or `None` | `None` | Optional group metadata for raw `DataFrame` input. Aliases: `groups`, legacy `conditions`. |
+| `dataframe_kwargs` | `dict` or `None` | `None` | Advanced options forwarded to the raw `DataFrame` adapter. |
+
+## Parameter Options
+
+### `categorical` options
+
+| Option | Behavior |
 |---|---|
-| `endpoints`, `data_cols`, `filtered_columns` | Endpoint columns to correlate. `endpoints` and `data_cols` are public aliases. |
-| `covariates` | Columns that are always adjusted for. |
-| `candidate_covariates` | Columns screened against endpoints. Candidates that pass the covariate screen are promoted into the adjustment set and removed from the endpoint matrix. |
-| `categorical` | Categorical covariates. Use `auto` to infer text/bool columns, a list of names, or `False`/empty to force numeric treatment. |
-| `reference_levels` | Optional reference categories, for example `{"Diagnosis": "Control"}`. |
-| `covariate_gate` | Gate used during candidate screening. Use `p` for raw p-values or `fdr`/q-value aliases for corrected q-values. |
-| `covariate_alpha` | Candidate-screening threshold. If omitted, `alpha` is reused. |
-| `min_endpoint_hits` | Minimum number of endpoint associations needed before a candidate covariate is promoted. |
-| `by`, `factor`, `split_by` | Grouping for raw and adjusted correlation blocks. |
-| `filter_by`, `specificity`, `roi` | Restrict rows before analysis. `filter_by` is the preferred public name; `specificity` remains supported for older code. A filter queue writes one combined run folder with tagged files and a `conditions` ledger. |
-| `tests` | Correlation methods: `pearsonr`, `spearmanr`, and/or `kendalltau`. |
-| `require` | `and` requires every method to pass; `or` keeps a pair if any method passes. |
-| `gate` | Gate used for raw and adjusted endpoint-pair selection: `p` or FDR/q-value aliases. |
-| `alpha` | Endpoint-correlation significance cutoff. |
-| `min_n` | Minimum complete observations for screening, residual models, and adjusted correlations. |
-| `max_adjusted_regressions` | Cap for adjusted regression plot/report rows. Use `None` for no cap. |
-| `value_matrices` | Which p/q heatmaps to save for each raw/adjusted block: `p`, `q`, `both`, or `none`. |
-| `plot_pvalue_matrices`, `plot_qvalue_matrices` | Legacy boolean overrides for p/q heatmap saving. |
-| `run_label` | Run folder name. If omitted, PyFLASH builds a deterministic slug from columns and settings. |
-| `if_exists` | Run-folder collision policy: `overwrite`, `version`, `error`, or `skip`. |
-| `save` | If true, write run files. |
-| `write_manifest` | Write `manifest.json` and update `_runs_index.csv` when saving. |
-| `montage` | If true and saving, create `! Overview Montage.png` in the run folder. |
+| `"auto"` (default) | Infer text and boolean columns as categorical covariates. |
+| List-like | Treat the named columns as categorical covariates. |
+| `False` / empty | Force numeric treatment. |
+
+### `covariate_gate` and `gate` options
+
+| Option | Behavior |
+|---|---|
+| `"p"` | Use raw p-values. |
+| `"fdr"` | Use corrected q-values. Aliases: `"q"`, `"q_value"`, `"q-value"`, `"fdr_bh"`, `"bh"`. |
+
+### `by` options
+
+| Option | Behavior |
+|---|---|
+| `"all"` (default) | Pool rows for raw and adjusted correlation blocks. |
+| `"conditions"` | Run raw and adjusted correlation blocks by resolved group-list condition. |
+
+### `tests` options
+
+| Option | Behavior |
+|---|---|
+| `"pearsonr"` | Pearson linear correlation. Aliases: `"pearson"`, `"p"`. |
+| `"spearmanr"` | Spearman rank correlation. Aliases: `"spearman"`, `"s"`. |
+| `"kendalltau"` | Kendall rank correlation. Aliases: `"kendall"`, `"k"`. |
+
+### `require` options
+
+| Option | Behavior |
+|---|---|
+| `"and"` (default) | Every method in `tests` must pass the selected gate. |
+| `"or"` | Any method in `tests` may pass the selected gate. |
+
+### `value_matrices` options
+
+| Option | Behavior |
+|---|---|
+| `"p"` (default) | Save p-value heatmap figures. |
+| `"q"` | Save q-value heatmap figures. |
+| `"both"` | Save both p-value and q-value heatmap figures. |
+| `"none"` | Skip p/q heatmap figures. |
+| List containing `"p"` and/or `"q"` | Save exactly the requested p/q heatmap figure types. |
+
+### `if_exists` options
+
+| Option | Behavior |
+|---|---|
+| `"overwrite"` (default) | Clear the existing generated run folder, then recompute. |
+| `"version"` | Keep the old run and write to the next free suffix such as `_v2`. |
+| `"error"` | Raise if the run folder already exists. |
+| `"skip"` | Reuse the cached manifest when available instead of recomputing. |
 
 ## Returns
 
@@ -141,7 +212,7 @@ The run folder is both `fig_dir` and `data_dir`.
 | `Matrices/qvalues_<Method>_Raw*.csv` and `Matrices/qvalues_<Method>_Adjusted*.csv` | Raw and adjusted q-value matrices. |
 | `Matrices/*Raw*.svg`, `Matrices/*Adjusted*.svg` | Raw and adjusted heatmaps. |
 | `manifest.json` | Stable run summary for reuse and reporting. |
-| `../_runs_index.csv` | Append-only index of adjusted-correlation runs. |
+| `../_runs_index.csv` | One-row-per-run index for adjusted-correlation runs; reruns with the same run label replace the matching index row. |
 | `! Overview Montage.png` | Overview montage when `montage=True`. |
 
 For a filter queue, child files receive tags such as
@@ -166,6 +237,9 @@ result = adjusted_correlation(
     value_matrices="both",
     run_label="markers_adjusted_age_sex",
 )
+
+print(result["adjusted_regression_summaries"].head())
+print(result["adjusted"]["selected"].head())
 ```
 
 Let PyFLASH promote covariates that associate with at least two endpoints:
@@ -187,7 +261,7 @@ result = adjusted_correlation(
   correlation matrix so they are not analyzed as endpoint pairs.
 - Raw and adjusted blocks are both preserved. Use the `raw` and `adjusted`
   nested dictionaries to compare how adjustment changed selected pairs.
-- The manifest records stable summaries and table paths. Do not depend on
+- The manifest records stable summaries and output settings. Do not depend on
   private residual-model helper objects.
 
 ## See Also

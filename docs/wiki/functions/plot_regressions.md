@@ -10,6 +10,14 @@ per group or as a combined overlay.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_regressions(exp, x="x1", y="Signal", combine=True, save=True)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_regressions example figure](../gallery/images/plot_regressions.svg)
 
 *`x1` vs `Signal` regression with the three groups overlaid. Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -17,7 +25,7 @@ per group or as a combined overlay.
 ## Signature
 
 ```python
-plot_regressions(experiment, x, y, by='conditions', factor=None, test='pearsonr', normalize_x=True, normalize_y=True, specificity=None, filter_by=None, roi=None, save=True, combine=False, split_by=None, x_range=None, y_range=None, xmin=None, xmax=None, ymin=None, ymax=None, clip_fit_line=True, share_axes=True, margin=0.1, auto_style=True, style_cycle=None, conditions=None, condition_col='Condition', factor_cols=None, animal_col='AnimalName', group_list=None, groups=None, group_col=None, group_cols=None, subject_col=None, dataframe_kwargs=None)
+plot_regressions(experiment, x, y, by='conditions', factor=None, test='pearsonr', normalize_x=True, normalize_y=True, specificity=None, filter_by=None, roi=None, save=True, combine=False, split_by=None, x_range=None, y_range=None, xmin=None, xmax=None, ymin=None, ymax=None, clip_fit_line=True, share_axes=True, margin=0.1, auto_style=None, style_cycle=None, point_size=None, point_alpha=None, point_edge=None, point_linewidth=None, line_width=None, conditions=None, condition_col='Condition', factor_cols=None, animal_col='AnimalName', group_list=None, groups=None, group_col=None, group_cols=None, subject_col=None, dataframe_kwargs=None)
 ```
 
 ## Input Object Types
@@ -35,7 +43,7 @@ plot_regressions(experiment, x, y, by='conditions', factor=None, test='pearsonr'
 |---|---|---|---|
 | `experiment` | `Batch`, experiment-like object, or `DataFrame` | required | Data source containing a summary table. |
 | `x`, `y` | string or sequence | required | Columns to plot. If either is a list, PyFLASH runs all requested combinations. |
-| `by` / `split_by` | string | `'conditions'` | Plot by conditions, by `"all"`, or by a factor mode. |
+| `split_by` | string | `'conditions'` | Plot by conditions, by `"all"`, or by a factor mode. Alias: `by`. |
 | `factor` | string or `None` | `None` | Explicit factor column for grouping. |
 | `test` | string | `'pearsonr'` | Correlation annotation method: Pearson, Spearman, Kendall, or aliases `p`, `s`, `k`. |
 | `normalize_x`, `normalize_y` | bool, tuple, or string | `True`, `True` | `True` min-max normalizes to 0-1; `False` keeps native units; `(min, max)` maps to a range; `"Z-score"` standardizes. |
@@ -44,17 +52,22 @@ plot_regressions(experiment, x, y, by='conditions', factor=None, test='pearsonr'
 | `share_axes` | bool | `True` | Share axis limits across queued sibling plots when a column repeats. |
 | `margin` | float | `0.1` | Add breathing room around points unless the relevant bound is pinned. Use `0` to disable. |
 | `clip_fit_line` | bool | `True` | Trim the fitted line to the active axis limits. |
-| `filter_by` / `specificity` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. Alias: `specificity`. |
 | `roi` | string, list, or `None` | `None` | Select one ROI summary or run an ROI queue. |
-| `auto_style`, `style_cycle` | bool/list | `True`, `None` | Use condition styles to distinguish same-color crossed groups. |
+| `auto_style`, `style_cycle` | bool or `None`, list | `None`, `None` | Use condition styles to distinguish same-color crossed groups. `None` uses the active PyFLASH style default. |
+| `point_size`, `point_alpha`, `point_edge`, `point_linewidth` | style value or `None` | `None` | Point overlay style overrides. `None` uses the active PyFLASH style defaults. |
+| `line_width` | number or `None` | `None` | Regression line width override. `None` uses the active PyFLASH style default. |
 | `save` | bool | `True` | Write SVG figures to disk. |
 
 ## Returns
 
 | Return value | Type | Meaning |
 |---|---|---|
-| `result` | `dict` | Plot-run output keyed by group, queued `(x, y)` pair, ROI, or filter item depending on the call. |
-| leaf `result` | `dict` | Contains `regression`, `r`, `p`, and `group` for each rendered group. |
+| `result` | `dict` | Plot-run accumulator with list-valued fields. Ordinary calls include `regression`, `r`, `p`, and `group` lists. Queue modes may wrap this accumulator in outer column, ROI, or filter contexts. |
+| `result["regression"]` | `list` | Return from `seaborn.regplot` for each rendered group, typically the Matplotlib axes-style plotting object, or `None` for empty groups. |
+| `result["r"]` | `list[float]` | Correlation coefficient for each rendered group. |
+| `result["p"]` | `list[float]` | P-value for each rendered group. |
+| `result["group"]` | `list[str]` | Group labels in the same order as the other lists. |
 
 When `combine=True`, the same axes receives multiple group fits and the
 teardown writes or closes the combined figure after the final group.

@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
   "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="515.750362pt" height="488.933625pt" viewBox="0 0 515.750362 488.933625" xmlns="http://www.w3.org/2000/svg" version="1.1">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="504pt" height="360pt" viewBox="0 0 405 322.613625" xmlns="http://www.w3.org/2000/svg" version="1.1">
  <metadata>
   <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
    <cc:Work>
     <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
-    <dc:date>2026-07-10T09:22:01.231525</dc:date>
+    <dc:date>2026-07-12T20:53:38.083333</dc:date>
     <dc:format>image/svg+xml</dc:format>
     <dc:creator>
      <cc:Agent>
-      <dc:title>Matplotlib v3.10.0, https://matplotlib.org/</dc:title>
+      <dc:title>Matplotlib v3.9.2, https://matplotlib.org/</dc:title>
      </cc:Agent>
     </dc:creator>
    </cc:Work>
@@ -21,69 +21,70 @@
  </defs>
  <g id="figure_1">
   <g id="patch_1">
-   <path d="M 0 488.933625 
-L 515.750362 488.933625 
-L 515.750362 0 
+   <path d="M 0 322.613625 
+L 405 322.613625 
+L 405 0 
 L 0 0 
+L 0 322.613625 
 z
-" style="fill: #ffffff"/>
+" style="fill: none"/>
   </g>
   <g id="axes_1">
    <g id="patch_2">
-    <path d="M 437.476605 152.019518 
-C 419.212029 122.951599 393.865788 98.988853 363.819505 82.382857 
-C 333.773221 65.77686 299.998352 57.064542 265.668502 57.064542 
-L 265.668511 259.973696 
+    <path d="M 309.187284 109.777605 
+C 297.845571 91.727364 282.106373 76.847271 263.448599 66.535482 
+C 244.790825 56.223694 223.817721 50.813625 202.49999 50.813625 
+L 202.499996 176.813669 
 z
 " style="fill: #ffffff; stroke: #009e73; stroke-linejoin: miter"/>
    </g>
    <g id="patch_3">
-    <path d="M 310.82003 457.795493 
-C 342.411921 450.584855 371.821674 435.91025 396.579804 415.003886 
-C 421.337934 394.097521 440.731515 367.56138 453.13212 337.623673 
-C 465.532725 307.685969 470.583268 275.208745 467.859674 242.919069 
-C 465.136067 210.629394 454.716755 179.457056 437.476605 152.019518 
-L 265.668511 259.973696 
+    <path d="M 230.537634 299.654628 
+C 250.15518 295.177054 268.417689 286.064598 283.791689 273.08242 
+C 299.165689 260.100241 311.208479 243.622153 318.908854 225.031802 
+C 326.60923 206.441453 329.745455 186.274143 328.05419 166.223295 
+C 326.362919 146.172448 319.892862 126.815431 309.187284 109.777605 
+L 202.499996 176.813669 
 z
 " style="fill: #80ceb9; stroke: #009e73; stroke-linejoin: miter"/>
    </g>
    <g id="patch_4">
-    <path d="M 265.668513 57.064542 
-C 237.106032 57.064542 208.862758 63.095439 182.791402 74.761628 
-C 156.720046 86.427817 133.403427 103.468471 114.37091 124.765857 
-C 95.338392 146.063243 81.015478 171.141286 72.341717 198.354909 
-C 63.667955 225.568532 60.837229 254.309418 64.035211 282.692305 
-C 67.233193 311.075196 76.388394 338.465596 90.900282 363.066826 
-C 105.412169 387.668055 124.956374 408.930175 148.250811 425.458465 
-C 171.545255 441.986755 198.069236 453.411734 226.082898 458.984003 
-C 254.096561 464.556271 282.973668 464.151232 310.82003 457.795493 
-L 265.668511 259.973696 
+    <path d="M 202.499997 50.813625 
+C 184.763617 50.813625 167.225454 54.558618 151.035983 61.802945 
+C 134.846511 69.047272 120.367642 79.628969 108.549062 92.853959 
+C 96.730483 106.07895 87.836415 121.651606 82.450288 138.550389 
+C 77.064162 155.449171 75.306372 173.296335 77.292216 190.921193 
+C 79.27806 208.546053 84.963145 225.554609 93.974559 240.831179 
+C 102.985973 256.10775 115.122294 269.310841 129.587389 279.574376 
+C 144.052488 289.837912 160.523025 296.932456 177.918606 300.392655 
+C 195.314188 303.852853 213.245941 303.601337 230.537634 299.654628 
+L 202.499996 176.813669 
 z
 " style="fill: #009e73; stroke: #009e73; stroke-linejoin: miter"/>
    </g>
    <g id="matplotlib.axis_1"/>
    <g id="matplotlib.axis_2"/>
    <g id="text_1">
-    <text style="font-size: 10px; font-family: 'Arial'; text-anchor: start" x="373.634586" y="67.208915" transform="rotate(-0 373.634586 67.208915)">None</text>
+    <text style="font: 10px 'Arial'; text-anchor: start" x="269.543448" y="58.092811" transform="rotate(-0 269.543448 58.092811)">None</text>
    </g>
    <g id="text_2">
-    <text style="font-size: 10px; font-family: 'Arial'; text-anchor: middle" x="324.559097" y="156.004341" transform="rotate(-0 324.559097 156.004341)">16.1%</text>
+    <text style="font: 10px 'Arial'; text-anchor: middle" x="239.069152" y="113.231909" transform="rotate(-0 239.069152 113.231909)">16.1%</text>
    </g>
    <g id="text_3">
-    <text style="font-size: 10px; font-family: 'Arial'; text-anchor: start" x="471.878487" y="347.973824" transform="rotate(-0 471.878487 347.973824)">Marker2</text>
+    <text style="font: 10px 'Arial'; text-anchor: start" x="330.549744" y="232.438769" transform="rotate(-0 330.549744 232.438769)">Marker2</text>
    </g>
    <g id="text_4">
-    <text style="font-size: 10px; font-family: 'Arial'; text-anchor: middle" x="378.14668" y="309.148837" transform="rotate(-0 378.14668 309.148837)">30.4%</text>
+    <text style="font: 10px 'Arial'; text-anchor: middle" x="272.345313" y="208.329704" transform="rotate(-0 272.345313 208.329704)">30.4%</text>
    </g>
    <g id="text_5">
-    <text style="font-size: 10px; font-family: 'Arial'; text-anchor: end" x="43.871875" y="287.549322" transform="rotate(-0 43.871875 287.549322)">Marker3</text>
+    <text style="font: 10px 'Arial'; text-anchor: end" x="64.771434" y="194.917102" transform="rotate(-0 64.771434 194.917102)">Marker3</text>
    </g>
    <g id="text_6">
-    <text style="font-size: 10px; font-family: 'Arial'; text-anchor: middle" x="144.688528" y="276.190018" transform="rotate(-0 144.688528 276.190018)">53.6%</text>
+    <text style="font: 10px 'Arial'; text-anchor: middle" x="127.375326" y="187.86334" transform="rotate(-0 127.375326 187.86334)">53.6%</text>
    </g>
    <g id="text_7">
-    <text style="font-weight: 700; font-size: 14px; font-family: 'Arial'" transform="translate(260.613205 17.220937)">C</text>
-    <text style="font-weight: 700; font-size: 14px; font-family: 'Arial'" transform="translate(189.170549 32.213625)">Marker1 VolComboAny</text>
+    <text style="font: 700 14px 'Arial'" transform="translate(197.444687 17.220937)">C</text>
+    <text style="font: 700 14px 'Arial'" transform="translate(126.002031 32.213625)">Marker1 VolComboAny</text>
    </g>
   </g>
  </g>

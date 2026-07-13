@@ -25,8 +25,9 @@ families:
 
 ## Accepted Values
 
-Accepted values are documented in each page. The most important rule is that
-newer public aliases are usually accepted alongside older internal names:
+Parameter meanings and option behavior are documented in each page. The most
+important alias rule is that newer public names are usually accepted alongside
+older internal names:
 
 | Newer public name | Older/internal name |
 |---|---|

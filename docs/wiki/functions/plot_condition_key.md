@@ -10,6 +10,14 @@ Registry name: `condition_key`.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_condition_key(exp, save=False)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_condition_key example figure](../gallery/images/plot_condition_key.svg)
 
 *Standalone colour/style key for groups A/B/C. Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -22,7 +30,7 @@ plot_condition_key(
     save=True,
     save_path=None,
     filename="condition_key",
-    auto_style=True,
+    auto_style=None,
     style_cycle=None,
     ncol=1,
     title=None,
@@ -47,7 +55,7 @@ plot_condition_key(
 | `save` | `bool` | `True` | Save the key to disk. When `False`, return the figure. |
 | `save_path` | Path-like or `None` | `None` | Exact output path. Overrides `fig_path/filename.png`. |
 | `filename` | `str` | `"condition_key"` | Base file name used when `save_path` is omitted. |
-| `auto_style` | `bool` | `True` | Apply PyFLASH's style-collision rules for crossed designs. |
+| `auto_style` | `bool` or `None` | `None` | Apply PyFLASH's style-collision rules for crossed designs. `None` uses the active style default. |
 | `style_cycle` | list-like or `None` | `None` | Custom style cycle for groups sharing colours. |
 | `ncol` | `int` | `1` | Number of legend columns. |
 | `title` | `str` or `None` | `None` | Optional legend title. |
@@ -106,8 +114,8 @@ plot_condition_key(
 ## Notes
 
 - The function raises `ValueError` when no condition handles can be built.
-- `auto_style=True` is useful for crossed designs where two groups share a
-  colour but differ by hatch or fill style.
+- `auto_style=None` uses the active style default and is useful for crossed
+  designs where two groups share a colour but differ by hatch or fill style.
 - Unlike most PyFLASH figure saves, this function writes a PNG directly with
   `fig.savefig()` rather than `save_fig()`.
 

@@ -28,7 +28,7 @@ create_batch(
 
 | Object type | Accepted? | Notes |
 |---|---:|---|
-| `groupList` / `conditionList` | Yes | Required by the current signature as `conditions`. Build it with `GroupBuilder`; `ConditionBuilder` remains a legacy alias. |
+| `groupList` | Yes | Required by the current signature as `conditions`. Alias object name: `conditionList`. Build it with `GroupBuilder`; `ConditionBuilder` remains a legacy builder name. |
 | Path-like folder | Yes | Used for `batch_path`, `pickle_path`, and experiment paths. |
 | `Experiment` list | Yes | Pass as `experiments` when experiments are already constructed. |
 | `pandas.DataFrame` | No | `create_batch` imports experiment folders; it does not create a batch directly from a table. |
@@ -38,7 +38,7 @@ create_batch(
 | Parameter | Type | Default | Meaning |
 |---|---|---:|---|
 | `name` | `str` | required | Batch name. Also used as the pickle filename when `pickle_path` is set. |
-| `conditions` | `groupList` / `conditionList` | required | Experimental groups, labels, colors, factors, and comparisons. The parameter name is retained by the current `create_batch` signature. |
+| `conditions` | `groupList` | required | Experimental groups, labels, colors, factors, and comparisons. The parameter name is retained by the current `create_batch` signature; `conditionList` is accepted as the legacy object name. |
 | `batch_path` | Path-like | required | Output folder for the batch. Also used for experiment discovery when `experiments=None`. |
 | `experiments` | `dict`, `list`, path-like, or `None` | `None` | Source experiments. A dict maps experiment names to paths; a list contains prebuilt experiments; a folder is scanned; `None` scans `batch_path`. |
 | `threshold` | `int` or `None` | `None` | Colocalisation threshold. `None` uses `Config.THRESHOLD`. |

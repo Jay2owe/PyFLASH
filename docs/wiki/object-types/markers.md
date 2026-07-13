@@ -56,7 +56,7 @@ can take a `threshold` argument.
 | `df` | All marker objects | Cleaned `pandas.DataFrame` containing the imported measurements. |
 | `experiment` | All marker objects | Parent experiment. This is removed during pickling and re-linked after loading. |
 | `color` | `Antibody`, `cellMarker`, `objectMarker` | Marker color used by plotting helpers. |
-| `threshold` | `objectMarker` | Colocalisation threshold used when adding colocalisation columns. |
+| `threshold` | `objectMarker` | Stored constructor value. Current automatic cleaning calls `addColocData(Config.THRESHOLD)`; call `addColocData(threshold)` explicitly if you need a different threshold. |
 
 Important table columns vary by source file. Common normalized columns include
 `AnimalName`, `Condition`, `Region`, `ROI`, and marker-prefixed measurement

@@ -62,8 +62,7 @@ plot_images(
 |---|---|---:|---|
 | `experiment` | `Batch` or `Experiment` | required | Source object with an image table. |
 | `markers` | `str`, list-like, or `None` | `None` | Marker image names to show. `None` uses available markers. |
-| `subject_filter` | `str`, list-like, or `None` | `None` | Preferred subject filter. Matches `AnimalName` by string. |
-| `animal_filter` | `str`, list-like, or `None` | `None` | Legacy alias for `subject_filter`. |
+| `subject_filter` | `str`, list-like, or `None` | `None` | Subject filter. Matches `AnimalName` by string. Alias: `animal_filter`. |
 | `roi_filter` | `str`, list-like, or `None` | `None` | Filter image rows by `ROI`. |
 | `save` | `bool` | `True` | Save the figure under the object's image figure folder. |
 | `ncols` | `int` or `None` | `None` | Number of grid columns. `None` chooses a square-ish layout. |
@@ -73,15 +72,15 @@ plot_images(
 | `show` | `bool` | `True` | Keep the figure open for interactive display. `False` closes it after creation. |
 | `verbose` | `bool` | `True` | Print save messages. |
 | `tile_gap` | `float` | `0.0` | Gap between tiles. |
-| `tile_gap_units` | `str` | `"points"` | Gap units. Accepted values: `"points"` or `"inches"`. |
-| `image_backend` | `str` | `"auto"` | Image reader. Accepted values: `"auto"`, `"tifffile"`, `"cv2"`, `"imageio"`, `"pil"`. |
+| `tile_gap_units` | `str` | `"points"` | Gap units. |
+| `image_backend` | `str` | `"auto"` | Image reader. |
 | `merge` | `bool` | `False` | Include merged marker panels when several markers are requested. |
 | `merge_label` | `str` | `"Merge"` | Label for merged marker panels. |
 | `draw_rois` | `bool`, marker-panel spec, or `None` | `None` | Draw ROI outlines on matching image panels. |
 | `scale_bar` | `bool` | `False` | Add scale bars to tiles. |
 | `scale_bar_location` | `str` | `"bottom left"` | Scale-bar corner. |
 | `scale_bar_size` | number or `None` | `None` | Explicit scale-bar length. Auto-selects a reasonable length when omitted. |
-| `scale_bar_units` | `str` | `"microns"` | `"microns"` or `"pixels"`. |
+| `scale_bar_units` | `str` | `"microns"` | `"microns"`, `"percent"`, or `"fraction"`. |
 | `image_width_microns` | number or `None` | `None` | Known image width used to compute micron scale. |
 | `pixel_size` | number or `None` | `None` | Microns per pixel. Overrides package default pixel size. |
 | `fast_loading` | `bool` | `False` | Use preview-sized loading when no explicit preview size is supplied. |
@@ -91,6 +90,25 @@ plot_images(
 | `use_existing_edits` | `bool` | `False` | Reuse saved image edits for the same marker/filter context. |
 | `image_workers` | `int`, `"auto"`, or `None` | `None` | Parallel image-loading workers. |
 | `progress` | `bool` | `True` | Show progress for prepare, filter, load, render, and save steps. |
+
+## Parameter Options
+
+### `tile_gap_units` options
+
+| Option | Behavior |
+|---|---|
+| `"points"` (default) | Interpret `tile_gap` in typographic points. |
+| `"relative"` | Interpret `tile_gap` as a relative gap fraction. Aliases: `"fraction"`, `"ratio"`. |
+
+### `image_backend` options
+
+| Option | Behavior |
+|---|---|
+| `"auto"` (default) | Let PyFLASH choose an available image reader. |
+| `"tifffile"` | Read images with tifffile. |
+| `"cv2"` | Read images with OpenCV. |
+| `"imageio"` | Read images with imageio. |
+| `"pil"` | Read images with Pillow. |
 
 ## Returns
 

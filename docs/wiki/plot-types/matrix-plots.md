@@ -39,8 +39,9 @@ matching `against_*` discovery options for the second axis.
 
 Use [`split_by`](../parameters/conditions-and-factors.md) or `factor` to choose
 whether panels are by condition, by a factor such as `Diagnosis`, or pooled as
-`all`. Use [`filter_by`](../parameters/specificity.md) for row filters and
-filter queues.
+`all`. Use [`filter_by`](../parameters/specificity.md) for row filters. The
+square and rectangular matrix functions support filter queues; matrix
+differences resolve one filter context per call.
 
 `correlation` accepts Pearson, Spearman, or Kendall methods. The aliases
 `"pearson"`, `"p"`, `"spearman"`, `"s"`, `"kendall"`, and `"k"` are normalized.

@@ -14,8 +14,8 @@
 ## Likely Causes
 
 - The group **short name** in the builder does not match the value in the
-  data. Matching is case- and whitespace-insensitive, but not fuzzy: `AD ` and
-  `ad` match, `AlzD` does not match `AD`.
+  data. Treat matching as exact for classic imported batches and iterator
+  paths: `AD`, `AD `, and `ad` can be different values.
 - The internal `Condition` group column was parsed from folder names differently than the
   builder's short names expect.
 - For a raw DataFrame, `group_col`/`group_cols` (or `subject_col`) point at a
@@ -34,9 +34,10 @@ print([c.name for c in batch.condition_list])
 print(batch.summary["Condition"].dropna().unique())
 ```
 
-Make the two sets agree — fix the builder short name or map the raw value with
-`factor_mappings` / `condition_labels`. For a raw DataFrame, name the grouping
-columns so the adapter can derive `Condition`:
+Make the two sets agree exactly: fix the builder short name, strip or
+case-normalize the source column, or map the raw value with `factor_mappings` /
+`condition_labels`. For a raw DataFrame, name the grouping columns so the
+adapter can derive `Condition`:
 
 ```python
 from PyFLASH import data_overview

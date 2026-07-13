@@ -28,7 +28,18 @@ GALLERY_EXAMPLES: tuple[GalleryExample, ...] = (
     GalleryExample(
         "plot_matrices",
         _code("""
-        P.plot_matrices(exp, filtered_columns=NUM, save=True)
+        P.plot_matrices(
+            exp,
+            filtered_columns=[
+                "Marker1_Count",
+                "Marker2_Count",
+                "Marker3_Count",
+                "Marker1_IntDenMean",
+                "Marker2_IntDenMean",
+                "Marker3_IntDenMean",
+            ],
+            save=True,
+        )
         """),
         pick=0,
     ),
@@ -48,7 +59,14 @@ GALLERY_EXAMPLES: tuple[GalleryExample, ...] = (
         _code("""
         P.plot_matrix_differences(
             exp,
-            filtered_columns=NUM,
+            filtered_columns=[
+                "Marker1_Count",
+                "Marker2_Count",
+                "Marker3_Count",
+                "Marker1_IntDenMean",
+                "Marker2_IntDenMean",
+                "Marker3_IntDenMean",
+            ],
             comparisons=[("A", "C")],
             save=True,
         )
@@ -76,7 +94,19 @@ GALLERY_EXAMPLES: tuple[GalleryExample, ...] = (
     GalleryExample(
         "plot_volcano",
         _code("""
-        P.plot_volcano(exp, filtered_columns=NUM, control="A", save=True)
+        P.plot_volcano(
+            exp,
+            filtered_columns=[
+                "Marker1_Count",
+                "Marker2_Count",
+                "Marker3_Count",
+                "Marker1_IntDenMean",
+                "Marker2_IntDenMean",
+                "Marker3_IntDenMean",
+            ],
+            control="A",
+            save=True,
+        )
         """),
         pick=1,
     ),
@@ -105,7 +135,18 @@ GALLERY_EXAMPLES: tuple[GalleryExample, ...] = (
     GalleryExample(
         "plot_marker_pca",
         _code("""
-        P.plot_marker_pca(exp, columns=NUM, save=True)
+        P.plot_marker_pca(
+            exp,
+            columns=[
+                "Marker1_Count",
+                "Marker2_Count",
+                "Marker3_Count",
+                "Marker1_IntDenMean",
+                "Marker2_IntDenMean",
+                "Marker3_IntDenMean",
+            ],
+            save=True,
+        )
         """),
     ),
     GalleryExample(
@@ -113,7 +154,7 @@ GALLERY_EXAMPLES: tuple[GalleryExample, ...] = (
         _code("""
         P.plot_effect_forest(
             exp,
-            filtered_columns=NUM[:3],
+            filtered_columns=["Marker1_Count", "Marker2_Count", "Marker3_Count"],
             control="A",
             effect_ci=False,
             save=True,
@@ -123,7 +164,12 @@ GALLERY_EXAMPLES: tuple[GalleryExample, ...] = (
     GalleryExample(
         "plot_group_matrix",
         _code("""
-        P.plot_group_matrix(exp, filtered_columns=NUM[:3], control="A", save=True)
+        P.plot_group_matrix(
+            exp,
+            filtered_columns=["Marker1_Count", "Marker2_Count", "Marker3_Count"],
+            control="A",
+            save=True,
+        )
         """),
     ),
     GalleryExample(

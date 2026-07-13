@@ -10,6 +10,14 @@ Use it for first-pass group comparisons and publication-style summary plots.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_mean_bars(exp, filtered_columns=["Marker1_Count"], save=True)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_mean_bars example figure](../gallery/images/plot_mean_bars.svg)
 
 *`Marker1_Count` across groups A/B/C with individual points and pairwise tests. Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -23,10 +31,10 @@ plot_mean_bars(
     data_cols=None,
     points=True,
     normalize=False,
-    point_fill="white",
-    point_edge="group",
-    point_size=9,
-    point_linewidth=3,
+    point_fill=None,
+    point_edge=None,
+    point_size=None,
+    point_linewidth=None,
     specificity=None,
     filter_by=None,
     roi=None,
@@ -49,10 +57,20 @@ plot_mean_bars(
     data_col_exclude=None,
     save_normality=True,
     normality_dpi=96,
-    auto_style=True,
+    auto_style=None,
     style_cycle=None,
     legend=False,
     dry_run=False,
+    conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
+    dataframe_kwargs=None,
 )
 ```
 
@@ -70,46 +88,58 @@ plot_mean_bars(
 | Parameter | Type | Default | Meaning |
 |---|---|---:|---|
 | `experiment` | `Batch`, `Experiment`, or `MiniExperiment` | required | Data source to plot. |
-| `data_cols` | list-like or `None` | `None` | Exact data columns to plot. Legacy alias: `filtered_columns`. |
-| `data_col_contains` | list-like, `str`, or `None` | `None` | Include columns whose names contain these strings. Legacy alias: `column_strings`. |
-| `data_col_regex` | `str` or list-like | `None` | Include columns matching one or more regular expressions. Legacy alias: `regex_string`. |
-| `data_col_exclude` | `str` or list-like | `None` | Exclude columns whose names contain these strings. Legacy alias: `exclude` (which defaults to `""`). |
+| `data_cols` | list-like or `None` | `None` | Exact data columns to plot. Alias: `filtered_columns`. |
+| `data_col_contains` | list-like, `str`, or `None` | `None` | Include columns whose names contain these strings. Alias: `column_strings`. |
+| `data_col_regex` | `str` or list-like | `None` | Include columns matching one or more regular expressions. Alias: `regex_string`. |
+| `data_col_exclude` | `str` or list-like | `None` | Exclude columns whose names contain these strings. Alias: `exclude`, whose legacy default is `""`. |
 | `points` | `bool` | `True` | Overlay individual observations on bars. |
 | `normalize` | `bool` | `False` | Normalize values before plotting. |
-| `filter_by` | dict, tuple, list, or `None` | `None` | Row filter such as `{"Time": "WeekEight"}`. Legacy alias: `specificity`. |
+| `filter_by` | dict, tuple, list, or `None` | `None` | Row filter such as `{"Time": "WeekEight"}`. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | ROI-base selector. Multiple ROI bases run queue mode. |
 | `comparisons` | list-like or `None` | `None` | Comparison pairs. `None` uses planned comparisons from the group list when available. |
-| `force_nonparametric` | `bool` | `False` | Force nonparametric tests even if normality checks pass. |
-| `posthoc` | `str` | `"Conover"` | Post-hoc test for multi-group comparisons. |
-| `posthoc_correction` | `str` | `"auto"` | Multiple-testing correction for post-hoc comparisons. |
+| `force_nonparametric` | `bool` | `False` | Forces the multi-group path toward non-parametric testing. The current two-group path still uses the t-test branch when both groups have enough observations. |
+| `posthoc` | `str` | `"Conover"` | Post-hoc test for multi-group comparisons. ANOVA accepts Tukey, Dunnett, Fisher LSD, Bonferroni, Sidak, Holm-Sidak, Scheffe, and Tamhane T2. Kruskal-Wallis accepts Conover, Dunn, Nemenyi, and DSCF. |
+| `posthoc_correction` | `str` | `"auto"` | Multiple-testing correction for Dunn/Conover and Fisher LSD paths. |
 | `multiple_comparison` | `str` | `"One-Way"` | Overall comparison mode. |
-| `split_by` | `str` or `None` | `None` | Group by a specific group column instead of full groups. Legacy alias: `factor`. |
+| `split_by` | `str` or `None` | `None` | Group by a specific group column instead of full groups. Alias: `factor`. |
 | `save` | `bool` | `True` | Save figures under `experiment.fig_path`. |
 | `save_normality` | `bool` | `True` | Save normality check outputs when applicable. |
-| `auto_style` | `bool` | `True` | Automatically vary bar styles when groups share colors. |
+| `auto_style` | `bool` or `None` | `None` | Automatically vary bar styles when groups share colors. `None` uses the active PyFLASH style default. |
+| `point_fill`, `point_edge`, `point_size`, `point_linewidth` | style value or `None` | `None` | Point overlay style overrides. `None` uses the active PyFLASH style defaults. |
 | `legend` | `bool` | `False` | Add a legend. |
-| `dry_run` | `bool` | `False` | Compute statistics but skip figure creation and saving. |
-| `group_list` | `groupList` or `None` | `None` | Optional group metadata when passing a raw DataFrame. Legacy alias: `conditions`. |
-| `group_col` | `str` | `"Condition"` | Group column used when passing a raw DataFrame. Legacy alias: `condition_col`. |
-| `group_cols` | list-like or `None` | `None` | Group columns used to infer crossed groups from a raw DataFrame. Legacy alias: `factor_cols`. |
-| `subject_col` | `str` | `"AnimalName"` | Subject/sample/animal ID column used when passing a raw DataFrame. Legacy alias: `animal_col`. |
+| `dry_run` | `bool` | `False` | Compute a statistics table but skip figure creation and saving. Its two-group test selection is not identical to the normal plotting annotation path when `force_nonparametric=True`. |
+| `conditions` | `groupList` or `None` | `None` | Optional group metadata when passing a raw DataFrame. Aliases: `group_list`, `groups`. |
+| `condition_col` | `str` | `"Condition"` | Group column used when passing a raw DataFrame. Alias: `group_col`. |
+| `factor_cols` | list-like or `None` | `None` | Group columns used to infer crossed groups from a raw DataFrame. Alias: `group_cols`. |
+| `animal_col` | `str` | `"AnimalName"` | Subject/sample/animal ID column used when passing a raw DataFrame. Alias: `subject_col`. |
 | `dataframe_kwargs` | `dict` or `None` | `None` | Advanced `from_dataframe` options such as colors, labels, ordering, and output paths. |
+
+## Parameter Options
+
+`posthoc`, `posthoc_correction`, `multiple_comparison`,
+`force_nonparametric`, and `ns` use the shared statistics option vocabulary.
+See [Statistics options](../parameters/statistics-options.md) for accepted
+values and behavior.
 
 ## Returns
 
 | Return value | Type | Meaning |
 |---|---|---|
-| result | function-dependent | Normal plotting mode follows the package plotting wrapper convention. |
+| result | `dict[str, list]` | Normal plotting mode returns the shared runner output, commonly including lists for `condition`, `mean`, and `n`. |
 | result | `dict` | Queue mode returns a dictionary keyed by filter or ROI value. |
-| stats | `pandas.DataFrame` | With `dry_run=True`, returns computed statistics without creating figures. |
+| stats | `pandas.DataFrame` | With `dry_run=True`, returns computed statistics without creating figures. In the dry-run path, `force_nonparametric=True` makes two-group rows use the Mann-Whitney U label, while normal plot annotations still use the t-test branch when both groups have enough observations. |
 
 ## Saved Outputs
 
 When `save=True`, the function saves one figure per selected column under the
 input object's figure folder. It uses PyFLASH's standard plot subfolder naming,
-including marker, split, filter, and ROI suffixes when relevant.
+with factor and row-filter context encoded into filename suffixes. When several
+ROI bases are queued, the ROI base is prepended as a top-level folder.
 
 When `save_normality=True`, normality-check outputs may also be saved.
+
+When `save=True` and interactive HTML export is enabled in configuration, an
+optional `interactive_bars.html` can also be written in the bars output folder.
 
 ## Examples
 
@@ -179,10 +209,13 @@ print(stats.head())
   selection.
 - `filter_by` filters rows before plotting. For example, `{"Time":
   "WeekEight"}` limits the plot to rows where the `Time` column is `WeekEight`.
-- `auto_style=True` is important for crossed designs where groups may share a
-  color but need distinct fills or hatches.
+- `auto_style=None` uses the active style default. Automatic styling is useful
+  for crossed designs where groups may share a color but need distinct fills or
+  hatches.
 - `dry_run=True` is useful for checking tests and p-values before spending time
-  rendering figures.
+  rendering figures. Treat it as a dry-run summary table; for two groups with
+  `force_nonparametric=True`, its test label can differ from the normal
+  annotation path.
 
 ## See Also
 

@@ -10,6 +10,25 @@ relationships within each condition, factor level, or pooled group.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_matrices(
+    exp,
+    filtered_columns=[
+        "Marker1_Count",
+        "Marker2_Count",
+        "Marker3_Count",
+        "Marker1_IntDenMean",
+        "Marker2_IntDenMean",
+        "Marker3_IntDenMean",
+    ],
+    save=True,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_matrices example figure](../gallery/images/plot_matrices.svg)
 
 *All-vs-all Pearson correlation matrix of the six marker metrics (group A). Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -34,14 +53,14 @@ plot_matrices(experiment, filtered_columns=None, data_cols=None, by='conditions'
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `experiment` | `Batch`, experiment-like object, or `DataFrame` | required | Data source containing a subject-level summary table. |
-| `data_cols` | list-like or `None` | `None` | Exact numeric columns for the matrix. `filtered_columns` remains supported for older code. |
-| `data_col_contains`, `data_col_regex`, `data_col_exclude` | string/list filters | `None`, `None`, `None` | Discover columns by substring, regular expression, and exclusion token. |
-| `by` / `split_by` | string | `'conditions'` | Panel by conditions, by `"all"`, or by a factor-style column. |
+| `data_cols` | list-like or `None` | `None` | Exact numeric columns for the matrix. Alias: `filtered_columns`. |
+| `data_col_contains`, `data_col_regex`, `data_col_exclude` | string/list filters | `None`, `None`, `None` | Discover columns by substring, regular expression, and exclusion token. Aliases: `column_strings`, `regex_string`, `exclude`. |
+| `split_by` | string | `'conditions'` | Panel by conditions or by a factor-style column. Alias: `by`. |
 | `factor` | string or `None` | `None` | Explicit factor column for factor-level panels. |
-| `correlation` | string | `'pearsonr'` | Accepted values: Pearson, Spearman, Kendall, or aliases `p`, `s`, `k`. |
-| `first_columns` / `leading_data_cols` | list-like or `None` | `None` | Pin selected columns at the start of the matrix before sorting the rest. |
+| `correlation` | string | `'pearsonr'` | Correlation method. |
+| `first_columns` | list-like or `None` | `None` | Pin selected columns at the start of the matrix before sorting the rest. Alias: `leading_data_cols`. |
 | `marker` | string or `None` | `None` | Read a marker-level table instead of `summary`. |
-| `filter_by` / `specificity` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. Alias: `specificity`. |
 | `roi` | string, list, or `None` | `None` | Select one ROI summary or run an ROI queue. |
 | `share_columns_across_panels` | bool | `True` | Keep only columns valid in every panel so panels are comparable. |
 | `triangle` | `None`, `'full'`, `'lower'`, `'upper'` | `None` | Mask one side of the matrix for compact display. |
@@ -49,14 +68,33 @@ plot_matrices(experiment, filtered_columns=None, data_cols=None, by='conditions'
 | `show_values` | bool | `False` | Write formatted numeric coefficients inside visible cells. |
 | `value_format` | string or callable | `'.2f'` | Format for `show_values`. |
 | `save` | bool | `True` | Write SVG figures to disk. |
-| `group_col`, `group_cols`, `subject_col` | strings/list or `None` | `None` | DataFrame-adapter aliases for group, crossed-group, and subject columns. |
+| `group_col`, `group_cols`, `subject_col` | strings/list or `None` | `None` | Raw DataFrame adapter group, crossed-group, and subject columns. |
+
+## Parameter Options
+
+### `correlation` options
+
+| Option | Behavior |
+|---|---|
+| `'pearsonr'` (default) | Pearson linear correlation. Alias: `'p'`. |
+| `'spearmanr'` | Spearman rank correlation. Alias: `'s'`. |
+| `'kendalltau'` | Kendall rank correlation. Alias: `'k'`. |
+
+### `triangle` options
+
+| Option | Behavior |
+|---|---|
+| `None` (default) | Draw the configured full matrix view. |
+| `'full'` | Draw the full matrix. |
+| `'lower'` | Mask the upper triangle. |
+| `'upper'` | Mask the lower triangle. |
 
 ## Returns
 
 | Return value | Type | Meaning |
 |---|---|---|
-| `result` | `dict` | Plot-run output keyed by condition, factor level, `"Combined"`, ROI, or filter-queue item depending on the call. Leaf results contain `heatmap` and `correlations`. |
-| `result[panel]["correlations"]` | `dict` | Pair names such as `"GFAP_Count vs Iba1_Count"` mapped to `(p_value, coefficient)`. |
+| `result` | `dict` | Accumulated plot-run output. Ordinary panel runs contain `heatmap` and `correlations` lists, one entry per rendered panel. ROI or filter queues return nested dictionaries. |
+| `result["correlations"][i]` | `dict` | Pair names such as `"GFAP_Count vs Iba1_Count"` mapped to `(p_value, coefficient)` for panel `i`. |
 
 ## Saved Outputs
 
@@ -102,8 +140,8 @@ result = plot_matrices(
 Inspect a coefficient:
 
 ```python
-control = result.get("Control") or next(iter(result.values()))
-p_value, r_value = control["correlations"]["GFAP_Count vs Iba1_Count"]
+first_panel = result["correlations"][0]
+p_value, r_value = first_panel["GFAP_Count vs Iba1_Count"]
 print(r_value, p_value)
 ```
 

@@ -65,7 +65,7 @@ Each CSV needs a subject column. If the subject column is not named
 | `condition_list`, `conditions`, `factor`, `factorDict` | Group metadata attached by `Batch.processData()` or `set_condition_list()`. `conditions` is the legacy/internal attribute name. |
 | `filePath` | Folder containing the CSV files. |
 | `source_root` | Same as `filePath` for mini experiments. |
-| Output paths | Inherited from `Experiment` and set under the mini experiment folder or batch output folder depending on workflow. |
+| Output paths | Inherited from `Experiment` and derived from `source_root`, which is the mini experiment folder. A containing `Batch` also has its own batch-level output paths. |
 
 ## Common Methods
 

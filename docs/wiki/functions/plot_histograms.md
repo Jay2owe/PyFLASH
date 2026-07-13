@@ -11,6 +11,14 @@ the data to subject-level summaries.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_histograms(exp, marker="Marker1", x_attr="Volume", combine=True, save=True)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_histograms example figure](../gallery/images/plot_histograms.svg)
 
 *`Marker1` volume distribution, groups A/B/C overlaid. Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -62,25 +70,42 @@ plot_histograms(
 | `experiment` | `Batch` or `Experiment` | required | Data source containing marker tables. |
 | `marker` | `str` or list-like | required | Marker table key. Tolerant matching accepts exact keys, case-insensitive keys, or one unambiguous prefix. List-like values queue plots. |
 | `x_attr` | `str` or list-like | required | Attribute to plot. May be a full marker-table column or a marker suffix such as `"Volume"`. List-like values queue plots. |
-| `by` | `str` | `"conditions"` | Iteration level. Common value: `"conditions"`. |
+| `by` | `str` | `"conditions"` | Iteration level. |
 | `factor` | `str` or `None` | `None` | Group by factor values instead of conditions. |
 | `bins` | `int` or sequence | `30` | Number of bins, unless `bin_edges` or `binwidth` supplies a more specific bin definition. |
 | `binwidth` | number or `None` | `None` | Fixed bin width passed to Seaborn. |
 | `kde` | `bool` | `False` | Overlay a kernel density estimate. |
 | `alpha` | number | `0.5` | Bar transparency. |
-| `stat` | `str` | `"count"` | Histogram statistic. Common values are `"count"`, `"frequency"`, `"probability"`, `"percent"`, and `"density"`. |
-| `merge` | `bool` | `False` | Backward-compatible alias for `combine`. |
-| `combine` | `bool` | `False` | Overlay all groups in one combined figure instead of saving one figure per group. |
+| `stat` | `str` | `"count"` | Histogram statistic. |
+| `combine` | `bool` | `False` | Overlay all groups in one combined figure instead of saving one figure per group. Alias: `merge`. |
 | `invert_x` | `bool` | `False` | Reverse the x-axis. |
 | `ymax` | number or `None` | `None` | Manual y-axis upper limit. Must be finite and greater than zero when supplied. |
 | `save` | `bool` | `True` | Save SVG figures under the input object's figure folder. |
-| `filter_by` | dict, tuple, queue, or `None` | `None` | Preferred row filter applied before plotting. A queue returns a dictionary keyed by filter. Legacy alias: `specificity`. |
+| `filter_by` | dict, tuple, queue, or `None` | `None` | Row filter applied before plotting. A queue returns a dictionary keyed by filter. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | ROI-base selector. Multiple ROI bases run queue mode. |
 | `bin_range` | `(min, max)` or `None` | `None` | Explicit histogram range. |
 | `bin_edges` | sequence or `None` | `None` | Exact bin edges. Overrides automatic bin computation. |
 | `share_bins` | `bool` | `False` | Use one shared set of bin edges across separate group figures. `combine=True` always shares bins. |
 | `xmin`, `xmax` | number or `None` | `None` | Convenience aliases for lower/upper values in `bin_range`. |
 | `share_axes` | `bool` | `True` | Use registered axis limits when available and no explicit range is supplied. |
+
+## Parameter Options
+
+### `by` options
+
+| Option | Behavior |
+|---|---|
+| `"conditions"` (default) | Iterate over resolved conditions/groups. |
+
+### `stat` options
+
+| Option | Behavior |
+|---|---|
+| `"count"` (default) | Plot raw counts per bin. |
+| `"frequency"` | Plot frequency per bin. |
+| `"probability"` | Plot probability per bin. |
+| `"percent"` | Plot percent per bin. |
+| `"density"` | Plot density per bin. |
 
 ## Returns
 
@@ -94,9 +119,10 @@ figure handle. Use saved SVG files for the rendered plots.
 
 ## Saved Outputs
 
-When `save=True`, figures are written below `experiment.fig_path` in a
-`Histograms` subfolder, with marker, factor, row-filter, and ROI suffixes when
-relevant.
+When `save=True`, figures are written below `experiment.fig_path` under
+`<marker>/Histograms/`, for example `GFAP/Histograms`. Factor and row-filter
+contexts are encoded into filename suffixes. When several ROI bases are queued,
+the ROI base is prepended as a top-level folder.
 
 Common filenames are:
 
@@ -105,8 +131,10 @@ Common filenames are:
 <x column> Histogram (Combined).svg
 ```
 
-If Altair is installed and interactive HTML export is enabled, an optional
-`interactive_histogram.html` can also be written in the histogram output folder.
+If Altair is installed and interactive HTML export is enabled, PyFLASH attempts
+to write an optional `interactive_histogram.html` in the histogram output folder.
+This HTML export is controlled by the interactive-export configuration, not just
+by the `save` flag.
 
 ## Examples
 

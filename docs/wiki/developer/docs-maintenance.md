@@ -25,9 +25,13 @@ and the **generated skill reference** under `.claude/skills/pyflash/reference/`
    changes to the wiki [README](../README.md) and the folder's own
    `README.md`. Keep the developer index [README](README.md) accurate when
    adding/removing a developer page.
-5. **Link-check.** Every relative markdown link must resolve to a file that
+5. **Refresh gallery snippets when example figures change.** The curated render
+   calls live in `../examples/gallery_examples.py`. Run
+   `python docs/wiki/examples/update_gallery_snippets.py` after changing them so
+   each `plot_*.md` page shows the exact call above the rendered example figure.
+6. **Link-check.** Every relative markdown link must resolve to a file that
    exists under `docs/wiki`. Verify each target on disk before finishing.
-6. **Run focused tests** if source behavior changed — see
+7. **Run focused tests** if source behavior changed — see
    [Testing Map](testing-map.md).
 
 ## The Generated Skill Reference

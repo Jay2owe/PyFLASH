@@ -53,28 +53,74 @@ run_linear_model_pipeline(
 
 ## Parameters
 
-| Parameter | Meaning |
+| Parameter | Type | Default | Meaning |
+|---|---|---:|---|
+| `batch` | `Batch` or batch-like object | required | Data source with a non-empty `.summary` table and, when saving without `output_dir`, a usable `data_path`. |
+| `dependent_variables` | list-like | required | Outcome columns to model. |
+| `predictors` | list-like | required | Predictor/covariate columns or supported formula terms. |
+| `categorical` | `"auto"`, list-like, `False`, or `None` | `"auto"` | Categorical predictor handling. |
+| `reference_levels` | mapping or `None` | `None` | Reference category levels, for example `{"Diagnosis": "Control"}`. |
+| `interactions` | list-like or `None` | `None` | Interaction terms as tuples such as `("Diagnosis", "Sex")` or formula strings. |
+| `medication_columns` | list-like or `None` | `None` | Free-text medication columns that are converted to model flags. |
+| `medication_mode` | `str` | `"any"` | Medication flag mode. |
+| `medication_min_count` | `int` | `2` | Minimum token count before a medication-specific flag is added. |
+| `specificity` | mapping, tuple, list, or `None` | `None` | Legacy/internal row filter for this compatibility wrapper. A filter queue returns one result per filter. Prefer [`linear_model`](linear_model.md) with `filter_by` for new analyses. |
+| `exclude` | object or `None` | `None` | Exclusion rules applied before modelling. |
+| `cov_type` | `str` or `None` | `None` | Statsmodels covariance estimator type, such as `"HC3"`. `None` uses ordinary standard errors. |
+| `cov_kwds` | mapping or `None` | `None` | Extra keyword options for the selected statsmodels covariance estimator. |
+| `alpha` | `float` | `0.05` | Confidence/significance cutoff for model summaries. |
+| `fdr_method` | `str` | `"fdr_bh"` | Multiple-testing correction method for coefficient p-values. |
+| `fdr_family` | `str` | `"all"` | Coefficient correction family. |
+| `save` | `bool` | `True` | Write the legacy modelling tables and manifest. |
+| `output_dir` | Path-like or `None` | `None` | Base directory for saved output. `None` uses `batch.data_path`; the run is placed under `Modelling/Linear Models/<run_label>`. |
+| `run_label` | `str` | `"linear_models"` | Run folder label. |
+| `if_exists` | `str` | `"version"` | Collision policy. This wrapper does not support `"skip"`. |
+| `return_fits` | `bool` | `False` | Include fitted statsmodels objects in the return dictionary. These are not saved to disk. |
+| `verbose` | `bool` | `True` | Print progress messages. |
+
+## Parameter Options
+
+### `categorical` options
+
+| Option | Behavior |
 |---|---|
-| `dependent_variables` | Outcome columns to model. |
-| `predictors` | Predictor/covariate columns. |
-| `categorical` | Categorical predictors. Use `auto` to infer text/bool columns, a list of names, or `False`/empty to force numeric treatment. |
-| `reference_levels` | Reference category levels, for example `{"Diagnosis": "Control"}`. |
-| `interactions` | Interaction terms as tuples such as `("Diagnosis", "Sex")` or formula strings. |
-| `medication_columns` | Free-text medication columns that are converted to model flags. |
-| `medication_mode` | Medication flag mode: `any`, `tokens`, or `both`. |
-| `medication_min_count` | Minimum token count before a medication-specific flag is added. |
-| `specificity` | Legacy/internal row filter for this compatibility wrapper. A filter queue returns one result per filter. Prefer [`linear_model`](linear_model.md) with `filter_by` for new analyses. |
-| `exclude` | Exclusion rules applied before modelling. |
-| `cov_type`, `cov_kwds` | Statsmodels covariance estimator options such as `HC3`. If omitted, ordinary standard errors are used. |
-| `alpha` | Confidence/significance cutoff for model summaries. |
-| `fdr_method` | Multiple-testing correction method for coefficient p-values, for example `fdr_bh`. |
-| `fdr_family` | Coefficient correction family: `all`, `dependent_variable`, or `none`. |
-| `save` | If true, write the legacy modelling tables and manifest. |
-| `output_dir` | Base directory for saved output. If omitted, PyFLASH uses `batch.data_path`. The run is placed under `Modelling/Linear Models/<run_label>`. |
-| `run_label` | Run folder label. Defaults to `linear_models`. |
-| `if_exists` | Collision policy: `version`, `overwrite`, or `error`. This wrapper does not support `skip`. |
-| `return_fits` | Include fitted statsmodels objects in the return dictionary. These are not saved to disk. |
-| `verbose` | Print progress messages. |
+| `"auto"` (default) | Infer text and boolean predictors as categorical. |
+| List-like | Treat the named terms as categorical. |
+| `False` / empty | Force numeric treatment. |
+
+### `medication_mode` options
+
+| Option | Behavior |
+|---|---|
+| `"any"` (default) | Creates a flag for any listed medication. |
+| `"tokens"` | Creates medication-specific token flags. |
+| `"both"` | Creates both the any-medication flag and token-specific flags. |
+
+### `fdr_method` options
+
+| Option | Behavior |
+|---|---|
+| `"fdr_bh"` (default) | Benjamini-Hochberg FDR correction. |
+| `"fdr_by"` | Benjamini-Yekutieli FDR correction. |
+| `"holm"` | Holm family-wise correction. |
+| `"bonferroni"` | Bonferroni family-wise correction. |
+| `"sidak"` | Sidak family-wise correction. |
+
+### `fdr_family` options
+
+| Option | Behavior |
+|---|---|
+| `"all"` (default) | Correct coefficient p-values as one family. |
+| `"dependent_variable"` | Correct within each dependent variable. |
+| `"none"` | Do not apply coefficient FDR correction. |
+
+### `if_exists` options
+
+| Option | Behavior |
+|---|---|
+| `"version"` (default) | Keep the old run and write to the next free suffix such as `_v2`. |
+| `"overwrite"` | Clear the existing generated run folder, then recompute. |
+| `"error"` | Raise if the run folder already exists. |
 
 ## Returns
 
@@ -110,7 +156,7 @@ With `save=True`, files are written below:
 | `linear_model_coefficients.csv` | Coefficient table. |
 | `linear_model_summaries.csv` | Model-level summaries. |
 | `linear_model_metadata.csv` | Formulas, resolved terms, and fit metadata. |
-| `manifest.json` | Legacy run summary and table paths. |
+| `manifest.json` | Legacy run settings and model metadata. |
 
 This wrapper does not write adjusted-mean tables, figures, `_runs_index.csv`, or
 `! Overview Montage.png`.

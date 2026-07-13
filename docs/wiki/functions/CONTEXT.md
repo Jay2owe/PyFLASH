@@ -30,7 +30,7 @@ Follow [Documentation standard](../documentation-standard.md):
 Every page must state:
 
 - expected input object type;
-- important parameters and accepted values;
+- important parameters and separate option behavior;
 - Python return value;
 - files and folders saved when `save=True`;
 - at least one minimal example;

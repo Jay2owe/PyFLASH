@@ -18,9 +18,10 @@
 - Excluded values are analysis-missing by design. Cells holding an `EXCLUDED_`
   sentinel (auto outliers or manual exclusions) and `NOT_INCLUDED_IN_EXPERIMENT`
   are treated as missing by every numeric path, so they reduce group `n`.
-- Normality drives test choice. Normality is only assessed with at least three
-  pooled values (D'Agostino-Pearson needs eight); if the data look non-normal, or
-  any group has a single value, PyFLASH uses the non-parametric path.
+- Normality diagnostics are descriptive for some two-group plot annotations in
+  the current shared comparison engine. The common two-group branch still uses
+  its independent-test path when both groups have more than one valid value;
+  multi-group and pipeline paths can use different routing.
 - A multiple-testing correction was applied, so annotations show corrected
   q-values rather than raw p-values.
 - A descriptive plot was used for an inferential question. `plot_superplot`,
@@ -40,10 +41,9 @@ print(batch.summary[["GFAP_Count"]].describe())
 ```
 
 If a group looks short, check for excluded cells and confirm your row filters
-did not remove more than intended. To force a distribution-free test regardless
-of the normality decision, pass `force_nonparametric=True` where the function
-exposes it. For definitive inferential results, run the `group_comparison`
-pipeline and read its saved CSV tables rather than trusting figure annotations.
+did not remove more than intended. If you need a specific inferential route,
+prefer the `group_comparison` pipeline or inspect the saved statistics CSVs
+rather than relying on figure annotations alone.
 
 ## Check
 

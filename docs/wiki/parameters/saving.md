@@ -28,17 +28,47 @@ tables, and a manifest.
 
 ## Accepted Values
 
-| Parameter | Accepted values | Behavior |
-|---|---|---|
-| `save` | `True` or `False`. | Enables or suppresses file writes. Functions may still return figures, tables, or manifests when `save=False`. |
-| `save_path` | Folder path string or path-like object. | Overrides the destination folder for functions that support direct figure saving. |
-| `save_name` | Filename stem. | Overrides the generated figure/table name where supported. |
-| `output_dir` | Folder path. | Used by modelling helpers and some legacy workflows to place generated tables and figures. |
-| `run_label` | Folder-safe label string or `None`. | Names a pipeline or modelling run folder. `None` lets supported pipelines derive a deterministic label from settings. |
-| `if_exists` | `"overwrite"`, `"version"`, `"error"`, or `"skip"` for analysis pipelines. | Controls collisions with existing pipeline run folders. Legacy linear-model table output supports `"overwrite"`, `"version"`, and `"error"`. |
-| `write_manifest` | `True` or `False`. | Pipeline option controlling `manifest.json` and run-index writes. |
-| `dpi` | Integer. | Controls raster resolution or figure creation in functions that expose it. Shared SVG saving keeps text editable and saves with PyFLASH's figure-save settings. |
-| `resume` | `True` or `False`. | `iterative_model_sweep` can resume a matching partial checkpoint when `save=True`. |
+| Parameter | Meaning |
+|---|---|
+| `save` | Controls whether a function writes files for the current call. |
+| `save_path` | Overrides the destination folder for functions that support direct figure saving. |
+| `save_name` | Overrides the generated figure or table filename stem where supported. |
+| `output_dir` | Places generated tables and figures for modelling helpers and some legacy workflows. |
+| `run_label` | Names a pipeline or modelling run folder. `None` lets supported pipelines derive a deterministic label from settings. |
+| `if_exists` | Controls collisions with existing pipeline run folders. |
+| `write_manifest` | Controls whether saved pipelines write `manifest.json` and run-index records. |
+| `dpi` | Controls raster resolution or figure creation in functions that expose it. Shared SVG saving keeps text editable. |
+| `resume` | Controls whether `iterative_model_sweep` reuses a matching partial checkpoint when saving. |
+
+### `save` options
+
+| Option | Behavior |
+|---|---|
+| `True` | Write supported figures, tables, manifests, or run folders. |
+| `False` | Suppress writes for the current call. Functions may still compute and return figures, tables, or manifests. |
+
+### `if_exists` options
+
+| Option | Behavior |
+|---|---|
+| `"overwrite"` | Clear the existing generated run folder, then recompute. |
+| `"version"` | Keep the old run and write to the next free suffix such as `_v2`. |
+| `"error"` | Raise if the run folder already exists. |
+| `"skip"` | Reuse the cached manifest when available instead of recomputing. Supported by the shared pipeline path, not every legacy output path. |
+
+### `write_manifest` options
+
+| Option | Behavior |
+|---|---|
+| `True` | Write `manifest.json` and update the run index when saving. |
+| `False` | Write supported outputs without manifest bookkeeping. |
+
+### `resume` options
+
+| Option | Behavior |
+|---|---|
+| `True` | Resume a matching partial checkpoint when `save=True` and compatible metadata exists. |
+| `False` | Start a fresh run even if a checkpoint exists. |
 
 ## Examples
 
@@ -89,15 +119,6 @@ under:
 ```text
 Python Figures/<Pipeline Name>/<run_label>/
 ```
-
-The shared pipeline `if_exists` policies are:
-
-| Policy | Behavior |
-|---|---|
-| `"overwrite"` | Clear the existing generated run folder, then recompute. |
-| `"version"` | Keep the old run and write to the next free suffix such as `_v2`. |
-| `"error"` | Raise if the run folder already exists. |
-| `"skip"` | Reuse the cached manifest when available instead of recomputing. |
 
 Pipeline filter queues use one shared run folder for all queue items.
 Files inside the folder are tagged by filter value so the queue produces one

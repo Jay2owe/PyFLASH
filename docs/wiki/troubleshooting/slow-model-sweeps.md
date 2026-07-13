@@ -20,8 +20,9 @@
   on larger datasets.
 - Permutation testing (`permutations > 0`) repeats the whole scoring pass many
   times.
-- Checkpointing was effectively off (`save=False`, or `checkpoint_every <= 0`),
-  so nothing could be resumed.
+- Resume needs saved partial results from a compatible prior run. `save=False`
+  leaves no run folder to resume; `checkpoint_every` controls how often interim
+  partial rows are flushed during a long run.
 
 ## Fix
 
@@ -55,10 +56,11 @@ Windows.
 
 ## Check
 
-`resume=True` only rejoins a checkpoint when `save=True` and `checkpoint_every`
-is above zero; partial results are written into the same run folder as the final
-outputs. After narrowing the model space, re-run the shortlist with `"compact"`
-or `"full"` and `permutations > 0` for a confirmatory pass.
+`resume=True` only rejoins an existing compatible partial file when `save=True`.
+`checkpoint_every` controls interim checkpoint frequency; a completed or
+interrupted saved run may still leave partial files in the same run folder as
+the final outputs. After narrowing the model space, re-run the shortlist with
+`"compact"` or `"full"` and `permutations > 0` for a confirmatory pass.
 
 ## Related Pages
 

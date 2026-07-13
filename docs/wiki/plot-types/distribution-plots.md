@@ -63,11 +63,14 @@ The distribution functions return dictionaries from the shared plotting runner.
 Those dictionaries are useful for checking which groups were processed and how
 many rows contributed. They do not return long-lived figure handles.
 
-When `save=True`, figures are written under subfolders such as `Histograms`,
-`Ridgelines`, and `ECDFs`, with marker, factor, row-filter, and ROI suffixes
-added where relevant. `plot_histograms` can also write an optional interactive
-HTML histogram when Altair is installed and interactive export is enabled in
-configuration.
+When `save=True`, single-marker distribution figures are written below
+`experiment.fig_path` as `<marker>/<plot type>/...`, for example
+`GFAP/Histograms`, `GFAP/Ridgelines`, or `GFAP/ECDFs`. Factor and row-filter
+contexts are encoded into filename suffixes. When several ROI bases are queued,
+the ROI base is prepended as a top-level folder. `plot_histograms` can also
+attempt an optional interactive HTML histogram when Altair is installed and
+interactive export is enabled in configuration; that HTML branch is controlled
+by the interactive export setting rather than only by `save`.
 
 The registry names `histograms`, `ridgeline`, and `ecdf` are describe-layer
 exempt: they are descriptive visualisations and do not emit structured

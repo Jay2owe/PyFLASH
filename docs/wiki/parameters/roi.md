@@ -29,16 +29,19 @@ Use [`filter_by`](specificity.md) for row-level filters such as `Region`, `ROI`,
 
 ## Accepted Values
 
-| Value | Meaning |
+| Option | Behavior |
 |---|---|
 | `None` | Use the function's default ROI behavior. Many standalone summary plots queue over all ROI bases in `experiment.summaries`; pipelines and exclusion helpers usually resolve only the first available ROI base. If no summaries are available, PyFLASH falls back to `"SCN"`. |
 | String | Use one ROI base, for example `roi="SCN"`. |
 | Iterable of strings | Queue over several ROI bases, for example `roi=["SCN", "CTX"]`, in functions that support ROI queues. |
 
-The ROI base must match a key in `experiment.summaries` for functions that read
-ROI-specific summary tables. Raw DataFrame inputs created through the adapter
-usually have one default ROI base, `"SCN"`, unless the caller supplies a
-different `roi_base` or `summaries`.
+For functions that read ROI-specific summary tables, the useful ROI base is a
+key in `experiment.summaries`. The shared resolver currently accepts any string
+as an ROI name; some summary helpers fall back to `experiment.summary` when that
+string is not present in `experiment.summaries`. Check available keys before
+assuming a mistyped ROI will raise an error. Raw DataFrame inputs created
+through the adapter usually have one default ROI base, `"SCN"`, unless the
+caller supplies a different `roi_base` or `summaries`.
 
 ## Examples
 
@@ -93,8 +96,10 @@ bases do not overwrite each other.
 
 ## Common Errors
 
-- Passing `roi="SCN1"` when the ROI base key is `"SCN"`. Row-level region names
-  such as `SCN1` belong in `filter_by={"Region": "SCN1"}` if that column exists.
+- Passing `roi="SCN1"` when the ROI base key is `"SCN"`. Current helpers may
+  accept the string and fall back to the default summary instead of raising.
+  Row-level region names such as `SCN1` belong in
+  `filter_by={"Region": "SCN1"}` if that column exists.
 - Expecting `roi` to filter marker-level image ROIs. Image-specific functions
   may use parameters such as `roi_filter`; check the function page.
 - Passing a list of ROI bases to a helper that only handles one base.

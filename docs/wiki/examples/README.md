@@ -47,11 +47,23 @@ exp = ex.experiment                # DataFrameExperiment (summary + .data["Marke
 python docs/wiki/examples/render_gallery.py <tmp-dir> --save
 ```
 
-Without `--save` it runs a diagnostic pass (reports what each plot emits, writes
-nothing). Set `QC_DIR=<dir>` to also dump PNG previews. It taps
+`render_gallery.py` clears `<tmp-dir>` before rendering, so use a disposable
+folder.
+
+Without `--save` it runs a diagnostic pass (reports what each plot emits and
+may write temporary files below the supplied output directory, but does not
+update `../gallery/images/`). Set `QC_DIR=<dir>` to also dump PNG previews. It taps
 `PyFLASH.utils.save_fig` to capture each figure, picks one representative per
 plot, and handles the Sankey (plotly) and `plot_locations` (needs an
 image-pixel canvas) specially.
+
+The render calls live in `gallery_examples.py`. The function pages show those
+same calls above each example figure. After changing a gallery example, refresh
+the visible snippets with:
+
+```bash
+python docs/wiki/examples/update_gallery_snippets.py
+```
 
 ## Coverage notes
 

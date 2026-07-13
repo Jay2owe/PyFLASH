@@ -50,11 +50,10 @@ Common keyword arguments in `**kwargs` include `save`, `show`, `verbose`,
 |---|---|---:|---|
 | `source` | `Batch` or `Experiment` | required | Object containing image metadata and representative selections. |
 | `markers` | `str`, list-like, or `None` | `None` | Representative marker set to plot. |
-| `subject_filter` | `str`, list-like, or `None` | `None` | Preferred subject filter. |
-| `animal_filter` | `str`, list-like, or `None` | `None` | Legacy alias for `subject_filter`. |
+| `subject_filter` | `str`, list-like, or `None` | `None` | Subject filter. Alias: `animal_filter`. |
 | `fast_loading` | `bool` | `False` | Use lower-resolution loading when possible. |
 | `preview_max_dim` | `int` or `None` | `None` | Downsample previews to this longest-side pixel size. |
-| `image_backend` | `str` | `"auto"` | Image reader. Accepted values: `"auto"`, `"tifffile"`, `"cv2"`, `"imageio"`, `"pil"`. |
+| `image_backend` | `str` | `"auto"` | Image reader. |
 | `image_workers` | `int`, `"auto"`, or `None` | `None` | Parallel image-loading workers. |
 | `image_adjustments` | `dict` or `None` | `None` | Per-marker brightness/contrast settings. |
 | `edit_mode` | `bool` | `False` | Open the image-adjustment editor for selected representative images. |
@@ -65,8 +64,20 @@ Common keyword arguments in `**kwargs` include `save`, `show`, `verbose`,
 | `show` | `bool` | `True` | Keep the figure open. Passed through `**kwargs`. |
 | `merge` | `bool` | `False` | Include merged marker panels. Passed through `**kwargs`. |
 | `block_by` | `str` | `"Condition"` | Group representative blocks by condition or another column. |
-| `stack_by` | `str` or `None` | `None` | Legacy route to `block_by`. |
+| `stack_by` | `str` or `None` | `None` | Alias route to `block_by`. |
 | `block_layout` | `str` | `"horizontal"` | Layout mode for representative blocks. |
+
+## Parameter Options
+
+### `image_backend` options
+
+| Option | Behavior |
+|---|---|
+| `"auto"` (default) | Let PyFLASH choose an available image reader. |
+| `"tifffile"` | Read images with tifffile. |
+| `"cv2"` | Read images with OpenCV. |
+| `"imageio"` | Read images with imageio. |
+| `"pil"` | Read images with Pillow. |
 
 ## Returns
 
@@ -89,12 +100,13 @@ With `save=True`, the function writes:
 
 - a representative figure named `representative_images.svg`, or
   `representative_images_by_<block>.svg` when grouped by another block;
+- the same figure stem with `_merged` appended when `merge=True`;
 - `representative_image.csv`, with selection metadata and copied-image names;
 - copied image files for the selected marker/condition/animal/ROI rows.
 
 The export folder is under `source.representative_path`, then source or
 experiment name, then the marker set. If `subject_filter` is set, a filtered
-subfolder is added. Legacy alias: `animal_filter`.
+subfolder is added. Alias: `animal_filter`.
 
 ## Examples
 

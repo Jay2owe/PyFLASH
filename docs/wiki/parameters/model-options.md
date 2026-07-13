@@ -23,18 +23,74 @@ in the modelling function pages and statistics pages.
 
 ### Classifier Sweep Options
 
-| Parameter | Accepted values | Behavior |
+| Parameter | Meaning | Aliases |
 |---|---|---|
-| `model_preset` | `"ultra_compact"`, `"compact"`, or `"full"`. | Chooses the classifier grid size. Larger grids test more hyperparameters and take longer. |
-| `model_families` | `None` or a list of built-in family names. | Whitelists classifier families. `None` includes all families available for the preset. |
-| `cv` | `"stratified"`, `"stratified5"`, `"stratifiedN"` such as `"stratified2"`, or `"loo"` / `"leave_one_out"` / `"leave-one-out"`. | Chooses cross-validation. Stratified folds are capped by the smallest class count and require at least two samples per class. |
-| `scoring` | Common output metric columns such as `"balanced_accuracy"`, `"macro_f1"`, `"accuracy"`, `"macro_ovr_auc"`, or `"log_loss"`; `"loss"` normalizes to `"log_loss"`. | Sorts the ranked model table. Unknown names do not create a new metric; use a metric column produced by the sweep. |
-| `search_strategy` | `"exhaustive"` or `"beam"`. | Exhaustive scores every valid subset. Beam keeps the best prior subsets at each depth. |
-| `beam_width` | Positive integer. | Number of subsets carried forward per level when `search_strategy="beam"`. |
-| `n_jobs` | Integer; `1` serial, `-1` all cores through joblib where available. | Parallelizes subset scoring. |
-| `parallel_backend` | `"threads"` or `"processes"` / `"process"` / `"loky"`. | Threads share cached numeric matrices; processes can help some large sweeps but cost more startup time. |
-| `random_state` | Integer. | Seeds shuffled stratified CV and stochastic classifiers. |
-| `resume` | `True` or `False`. | Resumes a matching partial checkpoint when `save=True`. |
+| `model_preset` | Chooses the classifier grid size. | None. |
+| `model_families` | Whitelists classifier families. `None` includes all families available for the preset. | None. |
+| `cv` | Chooses cross-validation. | None. |
+| `scoring` | Sorts the ranked model table by an output metric column. | `"loss"` normalizes to `"log_loss"`. |
+| `search_strategy` | Chooses how feature subsets are searched. | None. |
+| `beam_width` | Number of subsets carried forward per level when using beam search. | None. |
+| `n_jobs` | Controls joblib parallelism where available. | None. |
+| `parallel_backend` | Chooses the joblib backend for parallel scoring. | `"process"` and `"loky"` normalize to the process backend. |
+| `random_state` | Seeds shuffled stratified CV and stochastic classifiers. | None. |
+| `resume` | Controls whether a matching partial checkpoint is reused when `save=True`. | None. |
+
+#### `model_preset` options
+
+| Option | Behavior |
+|---|---|
+| `"ultra_compact"` (default) | Runs the smallest built-in grid for quick screens and examples. |
+| `"compact"` | Tests a broader grid while keeping runtime moderate. |
+| `"full"` | Tests the largest built-in grid and takes longer. |
+
+#### `cv` options
+
+| Option | Behavior |
+|---|---|
+| `"stratified"` | Uses stratified folds with the default fold count for the workflow. |
+| `"stratified5"` (default) | Uses up to five stratified folds, capped by the smallest class count. |
+| `"stratifiedN"` | Uses `N` stratified folds, for example `"stratified2"` for two folds. |
+| `"loo"` | Uses leave-one-out cross-validation. Aliases: `"leave_one_out"`, `"leave-one-out"`. |
+
+#### `scoring` options
+
+| Option | Behavior |
+|---|---|
+| `"balanced_accuracy"` | Sorts by balanced accuracy. |
+| `"macro_f1"` | Sorts by macro-averaged F1 score. |
+| `"accuracy"` | Sorts by raw accuracy. |
+| `"macro_ovr_auc"` | Sorts by macro one-vs-rest AUC when that metric is produced. |
+| `"log_loss"` | Sorts by log loss. Alias: `"loss"`. |
+
+#### `search_strategy` options
+
+| Option | Behavior |
+|---|---|
+| `"exhaustive"` (default) | Scores every valid feature subset. |
+| `"beam"` | Carries only the best prior subsets at each depth. |
+
+#### `n_jobs` options
+
+| Option | Behavior |
+|---|---|
+| `1` | Runs subset scoring serially. |
+| `-1` | Uses all available cores through joblib where available. |
+| Positive integer | Uses that many workers. |
+
+#### `parallel_backend` options
+
+| Option | Behavior |
+|---|---|
+| `"threads"` (default) | Shares cached numeric matrices and has lower startup overhead. |
+| `"processes"` | Uses separate processes, which can help some large sweeps but costs more startup time. Aliases: `"process"`, `"loky"`. |
+
+#### `resume` options
+
+| Option | Behavior |
+|---|---|
+| `True` | Resumes a matching partial checkpoint when `save=True` and metadata matches. |
+| `False` | Starts a fresh sweep. |
 
 Built-in classifier family names:
 
@@ -55,16 +111,23 @@ PyFLASH raises a `ValueError`.
 
 ### Linear Model Options
 
-| Parameter | Accepted values | Behavior |
+| Parameter | Meaning | Aliases |
 |---|---|---|
-| `dependent_variables` / `data_cols` / `outcomes` | List of outcome columns. | Variables to model. |
-| `predictors` | List of predictor columns or formula terms, depending on the function. | Explanatory variables. |
-| `categorical` | `"auto"` or iterable of categorical predictor names. | Controls categorical encoding in linear-model formulas. |
-| `reference_levels` | Mapping from categorical predictor to reference level. | Sets reference categories. |
-| `interactions` | Iterable of interaction specs. | Adds interaction terms to linear models. |
-| `alpha` | Float. | Significance threshold for FDR and coefficient plots. |
-| `fdr_method` | Multiple-testing method such as `"fdr_bh"` or `"holm"`. | Adjusts coefficient p-values. |
-| `cov_type` / `cov_kwds` | Statsmodels covariance options. | Advanced linear-model covariance settings. |
+| `data_cols` | Outcome variables to model. | `dependent_variables`, `outcomes`. |
+| `predictors` | Explanatory variables or formula terms, depending on the function. | None. |
+| `categorical` | Controls categorical encoding in linear-model formulas. | None. |
+| `reference_levels` | Sets reference categories for categorical predictors. | None. |
+| `interactions` | Adds interaction terms to linear models. | None. |
+| `alpha` | Significance threshold for FDR and coefficient plots. | None. |
+| `fdr_method` | Chooses the multiple-testing correction method for coefficient p-values. | See [Statistics options](statistics-options.md). |
+| `cov_type` | Statsmodels covariance estimator type. | `cov_kwds` supplies covariance keyword arguments rather than the estimator name. |
+
+#### `categorical` options
+
+| Option | Behavior |
+|---|---|
+| `"auto"` (default in supported workflows) | Lets PyFLASH infer categorical predictors. |
+| Iterable of names | Treats only the listed predictors as categorical. |
 
 ## Examples
 

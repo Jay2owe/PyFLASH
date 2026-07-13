@@ -11,6 +11,14 @@ Registry name: `combo_pies`.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_combo_pies(exp, marker="Marker1", family="comboany", save=True)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_combo_pies example figure](../gallery/images/plot_combo_pies.svg)
 
 *`Marker1` colocalisation-combo composition (group C). Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -42,7 +50,7 @@ plot_combo_pies(
     include_n=None,
     bottom_ticks=False,
     bottom_tick_labels=False,
-    auto_style=True,
+    auto_style=None,
     style_cycle=None,
 )
 ```
@@ -68,20 +76,27 @@ plot_combo_pies(
 | `start_angle` | number | `90` | Pie starting angle. |
 | `line_width` | number | `1.0` | Wedge or stacked-bar edge width. Must be non-negative. |
 | `save` | `bool` | `True` | Save figures under `experiment.fig_path`. |
-| `filter_by` | dict, tuple, list, or `None` | `None` | Preferred row filter. Lists run queue mode. Legacy alias: `specificity`. |
+| `filter_by` | dict, tuple, list, or `None` | `None` | Row filter. Lists run queue mode. Alias: `specificity`. |
 | `roi` | `str`, list-like, or `None` | `None` | ROI-base selector. Multiple ROI bases run queue mode. |
-| `plot_format` | `str` | `"pie"` | Accepted values: `"pie"` or `"bar"`. |
-| `show_counts` | `bool` or `None` | `None` | Show raw counts in labels. |
+| `plot_format` | `str` | `"pie"` | Plot layout. |
+| `show_counts` | `bool` or `None` | `None` | Show raw counts in labels. Alias: `as_counts`. |
 | `show_pct` | `bool` or `None` | `None` | Show percentages in labels. |
 | `labels` | `dict` or `None` | `None` | Map combo signatures to display labels. |
 | `order` | list-like or `None` | `None` | Category order for slices or stacks. |
 | `include_none` | `bool` | `True` | Keep explicit `None` combo category when present. |
 | `collapse_markers` | `str`, list-like, or `None` | `None` | Ignore selected partner markers and re-aggregate signatures before plotting. |
-| `include_N` | `bool` | `False` | Add unique `AnimalName` count to labels. |
-| `as_counts` | `bool` or `None` | `None` | Legacy value-label alias. |
-| `include_n` | `bool` or `None` | `None` | Legacy alias for `include_N`. |
+| `include_N` | `bool` | `False` | Add unique `AnimalName` count to labels. Alias: `include_n`. |
 | `bottom_ticks`, `bottom_tick_labels` | `bool` | `False` | Tick visibility in stacked-bar mode. |
-| `auto_style`, `style_cycle` | style controls | `True`, `None` | Apply hatch/fill styles for groups sharing colours. |
+| `auto_style`, `style_cycle` | style controls | `None`, `None` | Apply hatch/fill styles for groups sharing colours. `None` uses the active style default. |
+
+## Parameter Options
+
+### `plot_format` options
+
+| Option | Behavior |
+|---|---|
+| `"pie"` (default) | Draw one pie chart per group. |
+| `"bar"` | Draw one combined stacked bar chart across groups. |
 
 ## Returns
 

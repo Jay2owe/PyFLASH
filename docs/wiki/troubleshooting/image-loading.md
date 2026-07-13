@@ -23,8 +23,8 @@
   in the image table.
 - The project moved and `ImagePath` values no longer point at existing files
   (see [Moved pickles](moved-pickles.md)).
-- The selected `image_backend` cannot read a file, or full-resolution loading of
-  many large images is simply slow.
+- The selected `image_backend` cannot read a file, or full-resolution plotting
+  of many large images is simply slow.
 
 ## Fix
 
@@ -39,16 +39,17 @@ plot_images(batch, markers=["DAPI"], save=False, fast_loading=True,
             preview_max_dim=1024)
 ```
 
-`fast_loading=True` and a `preview_max_dim` cap downscale images while loading,
-which is the main lever for slow import or plotting; `image_workers` can load
-tiles in parallel. Supported extensions are `.png`, `.jpg`, `.jpeg`, `.tif`,
-`.tiff`, `.bmp`.
+During plotting, `fast_loading=True` and a `preview_max_dim` cap downscale
+images while loading, and `image_workers` can load tiles in parallel. Import
+itself builds the image metadata table; if import is slow, first check folder
+layout and file counts rather than these plotting options. Supported extensions
+are `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`, `.bmp`.
 
 If a tile shows `Could not load image`, pick an explicit backend with
-`image_backend` (accepted values `"auto"`, `"tifffile"`, `"cv2"`, `"imageio"`,
-`"pil"`). `"tifffile"` is not installed by the base package, so
-`pip install tifffile` if you need it; otherwise confirm the file opens outside
-PyFLASH.
+`image_backend`. See the [`plot_images` reference](../functions/plot_images.md)
+on the image plotting page. `"tifffile"` is not installed by the base package,
+so `pip install tifffile` if you need it; otherwise confirm the file opens
+outside PyFLASH.
 
 For representative panels, select representative images first (or fill the
 `representative_images` table) before calling `plot_representative_images`.

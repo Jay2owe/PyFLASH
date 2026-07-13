@@ -27,18 +27,47 @@ columns such as `Diagnosis`, `Sex`, or `Time`.
 
 ## Accepted Values
 
-| Parameter | Accepted values | Behavior |
+| Parameter | Meaning | Aliases |
 |---|---|---|
-| `groups` / `group_list` | `groupList` / legacy `conditionList`. | Preferred public names for group order, labels, colors, styles, factors, and planned comparisons. |
-| `conditions` | `conditionList` / `groupList`. | Legacy/internal alias for `groups` or `group_list`. |
-| `group_col` | Column name. | Preferred public column used while wrapping raw DataFrames. Legacy alias: `condition_col`. |
-| `group_cols` | List of column names. | Preferred public crossed-group columns. Legacy alias: `factor_cols`. |
-| `by` | Common values include `"all"` and `"conditions"`. | Chooses pooled vs group-panelled analysis in functions that support it. |
-| `factor` | Summary-table column or condition factor name. | Panels by levels of a specific factor. |
-| `split_by` | `"Condition"`, `"conditions"`, `"all"`, or a column name; `data_overview` also accepts a list. | Public grouping alias. Values such as `"groups"` or `"condition"` normalize to condition grouping; other values usually become `factor`. |
-| `split_mode` | `"cross"` or `"parallel"` in `data_overview`. | Controls multi-key `split_by` behavior. |
-| `comparisons` | Strings such as `"1-2"` or function-specific explicit pairs. | One-based group-index comparisons in the current group order. |
-| `multiple_comparison` | Usually `"One-Way"` or `"Two-Way"`. | Used by the shared statistics engine for multi-group bars. |
+| `groups` | Group order, labels, colors, styles, factors, and planned comparisons. | `group_list`; legacy `conditions` when it means a group list. |
+| `group_col` | Column used while wrapping raw DataFrames into a primary PyFLASH group. | `condition_col`. |
+| `group_cols` | Columns used while wrapping raw DataFrames into crossed groups. | `factor_cols`. |
+| `by` | Chooses the broad grouping mode in functions that support pooled and group-panelled analysis. | None. |
+| `factor` | Panels or compares by levels of a summary-table column or condition factor. | Some functions route `split_by=<column>` to `factor`. |
+| `split_by` | Public grouping selector used by function pages and plot specs. | `factor` for column/factor splits; `by` for `"all"` or condition grouping in many functions. |
+| `split_mode` | Controls how multi-key `split_by` values are expanded. | None. |
+| `comparisons` | One-based group-index comparisons in the current group order. | Function-specific explicit pair forms may also be accepted. |
+| `multiple_comparison` | Selects the shared multi-group statistics path for bar annotations. | None. |
+
+### `by` options
+
+| Option | Behavior |
+|---|---|
+| `"conditions"` | Analyze or panel by the resolved group list. |
+| `"all"` | Pool rows into one analysis where the function supports pooled mode. |
+
+### `split_by` options
+
+| Option | Behavior |
+|---|---|
+| `"Condition"` | Use resolved PyFLASH groups. Aliases: `"conditions"`, `"groups"`. |
+| `"all"` | Request pooled analysis in functions that map `split_by` to `by`. |
+| Column or factor name | Use the levels of that column or condition factor. |
+| List of names | In `data_overview`, split by several columns or factors. |
+
+### `split_mode` options
+
+| Option | Behavior |
+|---|---|
+| `"cross"` (default in `data_overview`) | Analyze populated combinations of all requested split keys. |
+| `"parallel"` | Analyze each requested split key independently. |
+
+### `multiple_comparison` options
+
+| Option | Behavior |
+|---|---|
+| `"One-Way"` | Uses the one-way ANOVA path when the parametric multi-group path is allowed. |
+| `"Two-Way"` | Uses the two-way ANOVA path in the shared bar-statistics engine. |
 
 ## Examples
 

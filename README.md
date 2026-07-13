@@ -34,9 +34,9 @@ For local notebook testing, start Jupyter from this repository and run `pip inst
 ```python
 from PyFLASH import *
 from PyFLASH.plotting import plot_mean_bars, plot_matrices, plot_location
-from PyFLASH.utils import rc_params, get_columns
+from PyFLASH.utils import get_columns
 
-rc_params()
+set_pyflash_style()
 
 # Define experimental conditions (fluent builder)
 conditions = (
@@ -74,18 +74,26 @@ save_state(batch, "my_batch.pkl")
 
 ## Plot styling
 
-Use `rc_params()` for Matplotlib-level style such as fonts, tick widths, spines,
-and editable SVG text. Use the PyFLASH style layer for shared PyFLASH plot
-semantics such as condition hatch cycles, scatter marker defaults, matrix
-colormaps, and overview status colours:
+Use `set_pyflash_style()` as the single front door for plot styling. It applies
+Matplotlib-level style such as fonts, tick widths, spines, titles, labels, and
+legends, plus PyFLASH semantics such as condition hatch cycles, scatter marker
+defaults, significance stars, matrix label orientation, colormaps, and overview
+status colours:
 
 ```python
 from PyFLASH import set_pyflash_style, pyflash_style_context
 
 set_pyflash_style(
+    point_size=9,
+    title_size=20,
+    labelsize=22,
+    despine=True,
+    legend_frame=False,
+    significance_thresholds={0.0001: "****", 0.001: "***", 0.01: "**", 0.05: "*"},
     bar_point_fill="group",
     bar_point_edge="none",
     scatter_3d_edge="group",
+    matrix_x_tick_rotation=60,
 )
 
 with pyflash_style_context(matrix_cmap="viridis"):

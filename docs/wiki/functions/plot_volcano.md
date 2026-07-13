@@ -10,6 +10,26 @@ change versus the control group, and the Y axis is `-log10(p-value)`.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_volcano(
+    exp,
+    filtered_columns=[
+        "Marker1_Count",
+        "Marker2_Count",
+        "Marker3_Count",
+        "Marker1_IntDenMean",
+        "Marker2_IntDenMean",
+        "Marker3_IntDenMean",
+    ],
+    control="A",
+    save=True,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_volcano example figure](../gallery/images/plot_volcano.svg)
 
 *Group C vs control A: signed % change vs −log10 p across markers. Rendered from the [synthetic example dataset](../examples/README.md).*
@@ -34,25 +54,38 @@ plot_volcano(experiment, filtered_columns=None, data_cols=None, by='conditions',
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `experiment` | `Batch`, experiment-like object, or `DataFrame` | required | Data source containing a summary table. |
-| `data_cols` / `filtered_columns` | list-like or `None` | `None` | Numeric columns to screen. |
-| `data_col_contains`, `data_col_regex`, `data_col_exclude` | string/list filters | `None`, `None`, `None` | Discover screened columns. |
-| `by` / `split_by` | string | `'conditions'` | Group by conditions or by a factor-style column. |
+| `data_cols` | list-like or `None` | `None` | Numeric columns to screen. Alias: `filtered_columns`. |
+| `data_col_contains`, `data_col_regex`, `data_col_exclude` | string/list filters | `None`, `None`, `None` | Discover screened columns. Aliases: `column_strings`, `regex_string`, `exclude`. |
+| `split_by` | string | `'conditions'` | Group by conditions or by a factor-style column. Alias: `by`. |
 | `factor` | string or `None` | `None` | Explicit factor column for group-vs-control panels. |
 | `control` | string or `None` | `None` | Reference group. If omitted, PyFLASH uses the first available group. |
 | `force_nonparametric` | bool | `False` | Force Mann-Whitney U instead of the normality-selected two-group path. |
 | `p_threshold` | float | `0.05` | Horizontal significance threshold. Must be between 0 and 1. |
-| `label_points` | string or `None` | `'significant'` | Accepted values include `'significant'`, `'non-significant'`, `'both'`, and `'none'`. |
-| `filter_by` / `specificity` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. |
+| `label_points` | string or `None` | `'significant'` | Controls which points get labels. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. Alias: `specificity`. |
 | `roi` | string, list, or `None` | `None` | Select one ROI summary or run an ROI queue. |
 | `save` | bool | `True` | Write SVG figures to disk. |
 | `group_col`, `group_cols`, `subject_col` | strings/list or `None` | `None` | DataFrame-adapter grouping and subject columns. |
+
+## Parameter Options
+
+### `label_points` options
+
+| Option | Behavior |
+|---|---|
+| `'significant'` (default) | Label significant points only. |
+| `'non-significant'` | Label non-significant points only. |
+| `'both'` | Label all points. |
+| `None` | Use the default, `'significant'`. |
+| `'none'` or `'off'` | Do not label points. |
 
 ## Returns
 
 | Return value | Type | Meaning |
 |---|---|---|
-| `result` | `dict` | Plot-run output keyed by group, factor level, ROI, or filter item depending on the call. |
-| leaf `result` | `dict` | Contains `group` and `n_points`, the number of plotted comparable columns. |
+| `result` | `dict` | Plot-run accumulator with list-valued fields. Ordinary calls include `group` and `n_points` lists. Queue modes may wrap this accumulator in outer ROI or filter contexts. |
+| `result["group"]` | `list[str]` | Group names processed by the plot loop. This can include the control group with `n_points=0`; saved volcano SVGs are only written for non-control comparisons. |
+| `result["n_points"]` | `list[int]` | Number of plotted comparable columns for each group. |
 
 The function does not return the full per-column volcano table. Use the plot or
 run a group-comparison pipeline when you need saved per-marker statistics.
@@ -106,8 +139,8 @@ plots = plot_volcano(
 Inspect plotted point counts:
 
 ```python
-for group, payload in plots.items():
-    print(group, payload["n_points"])
+for group, n_points in zip(plots["group"], plots["n_points"]):
+    print(group, n_points)
 ```
 
 ## Notes

@@ -1,8 +1,8 @@
 # Troubleshooting
 
 Use these pages when PyFLASH imports, loads data, builds groups, saves plots,
-or runs statistics in a way you did not expect. Each page starts with practical
-fixes, then lists symptoms, likely causes, checks, and related reference pages.
+or runs statistics in a way you did not expect. Each page gives practical fixes
+alongside symptoms, likely causes, checks, and related reference pages.
 
 ## Fast Checks
 

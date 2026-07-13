@@ -39,7 +39,9 @@ What this option controls.
 Functions or plot families that use this option.
 
 ## Accepted Values
-Tables or examples of valid values.
+Reusable parameter meanings and controlled vocabularies. Prefer one row per
+public concept, list aliases inside the preferred row, and mark defaults with
+`(default)`.
 
 ## Examples
 Short examples showing common and edge-case usage.

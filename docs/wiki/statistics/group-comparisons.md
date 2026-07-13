@@ -14,9 +14,10 @@ columns, and saved figures.
   helper when drawing significance annotations and writing statistics tables.
 - [group_comparison](../functions/group_comparison.md) runs planned comparisons
   across markers and can use `auto`, `mixed`, or `bootstrap` engines.
-- [plot_group_matrix](../functions/plot_group_matrix.md) and
-  [plot_effect_forest](../functions/plot_effect_forest.md) display group-effect
-  summaries after comparison results have been computed.
+- [plot_group_matrix](../functions/plot_group_matrix.md) displays group-effect
+  summaries from comparison-style outputs.
+- [plot_effect_forest](../functions/plot_effect_forest.md) can compute and
+  display descriptive Hedges g summaries directly from grouped data.
 - Structured report records can summarize the selected test, group
   descriptives, p-values, pairwise rows, and effect-size text.
 

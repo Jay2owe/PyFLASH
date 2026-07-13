@@ -9,15 +9,20 @@ It tests feature subsets, tries several classifier families, ranks the results
 by a scoring metric, saves result tables and figures, and returns the best
 fitted estimator.
 
+Registry name: `iterative_model_sweep`.
+
 ## Signature
 
 ```python
 iterative_model_sweep(
-    data,
-    target,
+    batch_or_df=None,
+    target=None,
+    possible_predictors=None,
     data_cols=None,
     predictors=None,
     candidate_predictors=None,
+    column_strings=None,
+    regex_string=None,
     data_col_contains=None,
     data_col_regex=None,
     data_col_exclude=None,
@@ -51,8 +56,12 @@ iterative_model_sweep(
     parallel_batch_size=256,
     verbose=True,
     return_details=True,
+    data=None,
 )
 ```
+
+Common public arguments are shown. `batch_or_df` is the current source argument
+for the input table/object; `data` remains as a trailing compatibility alias.
 
 ## Input Object Types
 
@@ -67,27 +76,25 @@ iterative_model_sweep(
 
 | Parameter | Type | Default | Meaning |
 |---|---|---:|---|
-| `data` | `Batch` or `pandas.DataFrame` | required | Source data. Legacy positional name: `batch_or_df`. |
-| `target` | `str` | required | Categorical column to predict. |
-| `data_cols` | list-like or `None` | `None` | Exact candidate predictor columns. Legacy alias: `possible_predictors`. |
-| `predictors` | list-like or `None` | `None` | Alias for candidate predictor columns. |
-| `candidate_predictors` | list-like or `None` | `None` | Alias for candidate predictor columns. |
-| `data_col_contains` | list-like, `str`, or `None` | `None` | Include predictors whose names contain these strings. Legacy alias: `column_strings`. |
-| `data_col_regex` | `str` or list-like | `None` | Include predictors matching regex patterns. Legacy alias: `regex_string`. |
-| `data_col_exclude` | `str` or list-like | `None` | Exclude predictors by name text. Legacy alias: `predictor_exclude`. |
-| `predictor_exclude` | `str` or list-like | `""` | Legacy alias for `data_col_exclude`. |
+| `batch_or_df` | `Batch` or `pandas.DataFrame` | `None` | Source data. This is the current source name for the first positional argument. |
+| `data` | `Batch` or `pandas.DataFrame` | `None` | Compatibility alias for `batch_or_df`; use one or the other. |
+| `target` | `str` or `None` | `None` | Categorical column to predict. A real target column is required before the sweep can run. |
+| `data_cols` | list-like or `None` | `None` | Exact candidate predictor columns. Aliases: `possible_predictors`, `predictors`, `candidate_predictors`. |
+| `data_col_contains` | list-like, `str`, or `None` | `None` | Include predictors whose names contain these strings. Alias: `column_strings`. |
+| `data_col_regex` | `str` or list-like | `None` | Include predictors matching regex patterns. Alias: `regex_string`. |
+| `data_col_exclude` | `str` or list-like | `None` | Exclude predictors by name text. Alias: `predictor_exclude`, whose legacy default is `""`. |
 | `excluded_predictors` | list-like or `None` | `None` | Explicit predictor names to remove. |
 | `max_features` | `int` | `2` | Maximum feature subset size to test. |
 | `repeat_features` | `bool` | `False` | Allow repeated base features in a subset. |
-| `model_preset` | `str` | `"ultra_compact"` | Classifier grid size. Accepted values: `"ultra_compact"`, `"compact"`, `"full"`. |
+| `model_preset` | `str` | `"ultra_compact"` | Classifier grid size. |
 | `model_families` | list-like or `None` | `None` | Restrict the run to selected classifier families. |
 | `class_order` | list-like or `None` | `None` | Explicit class order. Useful for ordered labels such as Control, MCI, AD. |
-| `cv` | `str` | `"stratified5"` | Cross-validation scheme. Accepted values: `"stratified5"`, `"stratifiedN"`, or `"loo"`. |
+| `cv` | `str` | `"stratified5"` | Cross-validation scheme. |
 | `scoring` | `str` | `"balanced_accuracy"` | Ranking metric. `log_loss` is treated as lower-is-better. |
-| `filter_by` | dict, tuple, list, or `None` | `None` | Optional row filter such as `{"Time": "WeekEight"}`. Legacy alias: `specificity`. A list runs queue mode. |
+| `filter_by` | dict, tuple, list, or `None` | `None` | Optional row filter such as `{"Time": "WeekEight"}`. A list runs queue mode. Alias: `specificity`. |
 | `exclude` | rule spec or `None` | `None` | Row exclusion rules applied before modelling. |
-| `normalize_method` | `str` | `"zscore"` | Numeric scaling. Accepted values include `"zscore"`, `"minmax"`, and `"none"`. |
-| `search_strategy` | `str` | `"exhaustive"` | `"exhaustive"` tests every subset; `"beam"` carries forward only top subsets. |
+| `normalize_method` | `str` | `"zscore"` | Numeric scaling. |
+| `search_strategy` | `str` | `"exhaustive"` | Feature-subset search strategy. |
 | `beam_width` | `int` | `100` | Number of subsets kept per level in beam search. |
 | `save` | `bool` | `True` | Save tables, metadata, and figures. |
 | `output_dir` | Path-like or `None` | `None` | Override output folder. |
@@ -100,8 +107,48 @@ iterative_model_sweep(
 | `random_state` | `int` | `20260708` | Seed for reproducible splits and stochastic models. |
 | `fast_numeric` | `bool` | `True` | Use faster numeric matrix path when possible. |
 | `n_jobs` | `int` | `1` | Parallel scoring workers. Use `-1` for all cores. |
-| `parallel_backend` | `str` | `"threads"` | Parallel backend. Accepted values: `"threads"` or `"processes"`. |
+| `parallel_backend` | `str` | `"threads"` | Parallel backend. |
 | `return_details` | `bool` | `True` | Return full result dictionary. |
+
+## Parameter Options
+
+### `model_preset` options
+
+| Option | Behavior |
+|---|---|
+| `"ultra_compact"` (default) | Runs the smallest built-in grid for quick screens and examples. |
+| `"compact"` | Tests a broader grid while keeping runtime moderate. |
+| `"full"` | Tests the largest built-in grid and takes longer. |
+
+### `cv` options
+
+| Option | Behavior |
+|---|---|
+| `"stratified5"` (default) | Uses up to five stratified folds, capped by the smallest class count. |
+| `"stratifiedN"` | Uses `N` stratified folds, for example `"stratified2"` for two folds. |
+| `"loo"` | Uses leave-one-out cross-validation. Aliases: `"leave_one_out"`, `"leave-one-out"`. |
+
+### `normalize_method` options
+
+| Option | Behavior |
+|---|---|
+| `"zscore"` (default) | Standardizes numeric predictors. |
+| `"minmax"` | Scales numeric predictors to a min-max range. |
+| `"none"` | Leaves numeric predictors unscaled. |
+
+### `search_strategy` options
+
+| Option | Behavior |
+|---|---|
+| `"exhaustive"` (default) | Scores every valid feature subset. |
+| `"beam"` | Carries only the best prior subsets at each depth. |
+
+### `parallel_backend` options
+
+| Option | Behavior |
+|---|---|
+| `"threads"` (default) | Shares cached numeric matrices and has lower startup overhead. |
+| `"processes"` | Uses separate processes, which can help some large sweeps but costs more startup time. |
 
 ## Model Families
 
@@ -144,9 +191,31 @@ With `return_details=True`, returns a dictionary.
 | `top_model_predictions` | `pandas.DataFrame` | Cross-validated predictions for the best model. |
 | `output_dir` | `str` or `None` | Saved output folder when `save=True`. |
 
+With `return_details=False`, returns the legacy tuple
+`(model_config, best_features)`, where `model_config` is the winning model
+configuration name and `best_features` is a tuple of selected feature names.
+
 ## Saved Outputs
 
-When `save=True`, the run folder contains:
+When `save=True`, files are written below:
+
+```text
+<output_dir>/
+```
+
+If `output_dir` is not supplied, PyFLASH uses:
+
+```text
+<batch.fig_path>/Modelling/Model Sweep/<run_label>/
+```
+
+For plain DataFrames without a `fig_path`, it falls back to:
+
+```text
+<current working directory>/Modelling/Model Sweep/<run_label>/
+```
+
+The run folder contains:
 
 | File | Meaning |
 |---|---|
@@ -154,10 +223,11 @@ When `save=True`, the run folder contains:
 | `top_iterative_model_sweep_scores.csv` | Top-ranked score rows. |
 | `top_feature_recurrence.csv` | Features that recur among top models. |
 | `top_model_predictions.csv` | Fold-level predictions for the best model. |
-| `top_model_permutation_test.csv` | Optional permutation-test results. |
-| `iterative_model_sweep_scores_partial.csv` | Checkpoint file for long runs. |
-| `iterative_model_sweep_scores_partial.meta.json` | Checkpoint compatibility metadata. |
+| `top_model_permutation_test.csv` | Permutation-test summary for the selected top model. |
+| `iterative_model_sweep_scores_partial.csv` | Partial-score checkpoint written during saved runs so interrupted/resumed runs can recover progress. |
+| `iterative_model_sweep_scores_partial.meta.json` | Checkpoint compatibility metadata written with the partial-score checkpoint. |
 | `manifest.json` | Run settings and key results. |
+| `README.md` | Human-readable run summary and reproducibility notes. |
 | `top_iterative_model_sweep.png` | Summary plot of top models. |
 | `family_by_subset_size_heatmap.png` | Family performance by subset size. |
 | `top_feature_recurrence.png` | Feature recurrence plot. |

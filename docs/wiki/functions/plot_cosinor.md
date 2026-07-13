@@ -10,6 +10,21 @@ Registry name: `cosinor`.
 
 ## Example figure
 
+<!-- gallery-example-code:start -->
+Gallery render call (after `ex = build_example_data(fig_path=TMP)`, `exp = ex.experiment`, and `P = PyFLASH.plotting`):
+
+```python
+P.plot_cosinor(
+    ex.cosinor,
+    column="Response",
+    time_col="ZT",
+    group_col="Condition",
+    period=24,
+    save=False,
+)
+```
+<!-- gallery-example-code:end -->
+
 ![plot_cosinor example figure](../gallery/images/plot_cosinor.svg)
 
 *24 h cosinor fits for three groups with distinct acrophase and amplitude. Rendered from the [synthetic example dataset](../examples/README.md).*

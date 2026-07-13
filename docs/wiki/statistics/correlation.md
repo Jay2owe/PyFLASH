@@ -51,9 +51,10 @@ Pearson correlation measures linear association on the original numeric scale.
 Spearman and Kendall are rank-based and are less tied to linear scale, but they
 still describe monotonic ordering rather than causation.
 
-The `gate` decides whether selection uses raw p-values or q-values. The
-`require` option controls whether both the probability gate and any additional
-condition must pass, or whether either route can select a pair.
+The `gate` decides whether selection uses raw p-values or q-values. When
+multiple correlation methods are listed in `tests`, `require="and"` means every
+method must pass the selected gate, while `require="or"` means any method can
+select a pair.
 
 For grouped matrix differences, PyFLASH uses a Fisher r-to-z probability test
 for Pearson correlations. Spearman and Kendall grouped differences are reported

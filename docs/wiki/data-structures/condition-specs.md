@@ -1,4 +1,4 @@
-# Group Specs
+# Condition Specs
 
 ## Summary
 

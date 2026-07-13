@@ -47,6 +47,10 @@ iterative_best_fit(
 )
 ```
 
+Common public arguments are shown; the full source signature also includes
+verbosity plus raw-DataFrame adapter options such as `condition_col`,
+`animal_col`, `group_col`, `subject_col`, `groups`, and `dataframe_kwargs`.
+
 ## Input Object Types
 
 | Object type | Accepted? | Notes |
@@ -57,29 +61,64 @@ iterative_best_fit(
 
 ## Parameters
 
-| Parameter | Meaning |
+| Parameter | Type | Default | Meaning |
+|---|---|---:|---|
+| `batch` | `Batch`, `Experiment`, `MiniExperiment`, or wrapped `DataFrame` | required | Data source containing a summary table and, when saving, a figure path. |
+| `dependent_variable` | `str` | required | Outcome column to predict. |
+| `repeat_features` | `bool` | `False` | Allow multiple predictors from the same marker/prefix family in one subset. |
+| `max_features` | `int` | `0` | Maximum feature-subset size. `0` lets PyFLASH choose from the candidate set. |
+| `possible_predictors` | list-like or `None` | `None` | Explicit candidate predictor columns. `None` discovers candidates from numeric columns and selector options. |
+| `data_col_contains` | `str`, list-like, or `None` | `None` | Include candidate predictors containing these case-sensitive text fragments. Alias: `column_strings`. |
+| `data_col_regex` | `str`, list-like, or `None` | `None` | Include candidate predictors matching one or more Python regular expressions. Alias: `regex_string`. |
+| `data_col_exclude` | `str`, list-like, or `None` | `""` | Remove candidate predictors containing these text fragments. The empty-string default excludes nothing. Alias: `predictor_exclude`. |
+| `excluded_predictors` | list-like or `None` | `None` | Explicit candidate columns to remove after selection. |
+| `normalize_method` | `str` | `"minmax"` | Predictor normalization. |
+| `hue_column` | `str` or `None` | `"Condition"` | Group/color column for diagnostic plots. Alias: `color_by`. |
+| `palette` | mapping, sequence, or `None` | `None` | Optional colors for diagnostic plot groups. |
+| `filter_by` | mapping, tuple, list, or `None` | `None` | Restrict rows before modelling. A queue returns one result per filter. Alias: `specificity`. |
+| `exclude` | object or `None` | `None` | Exclusion rules applied before modelling. |
+| `cv_group_column` | `str` | `"AnimalName"` | Column used for grouped cross-validation folds, commonly the subject/animal ID. |
+| `cv_backend` | `str` | `"fast"` | Cross-validation backend. |
+| `search_strategy` | `str` | `"exhaustive"` | Feature-subset search strategy. |
+| `beam_width` | `int` | `100` | Number of subsets retained per depth when `search_strategy="beam"`. |
+| `batch_chunk_size` | `int` | `5000` | Chunk size for vectorized/batched scoring. Larger values may be faster but use more memory. |
+| `plot` | `bool` | `True` | Create diagnostic plots. |
+| `plot_insights` | `bool` | `True` | Create feature-addition insight plots. |
+| `top_n_single_predictors` | `int` | `3` | Number of top single predictors highlighted in the insight output. |
+| `save` | `bool` | `True` | Save plots to disk when plotting is enabled. |
+| `dpi` | `int` | `600` | Figure resolution for saved raster elements. |
+| `verbose` | `bool` | `True` | Print progress messages. |
+| `return_details` | `bool` | `False` | Return a detailed result dictionary instead of the legacy `(formula, params)` tuple. |
+| `group_col` | `str` or `None` | `None` | Public alias for `condition_col` when wrapping a raw `DataFrame`. If both are omitted, the adapter uses `condition_col="Condition"`. |
+| `group_cols` | list-like or `None` | `None` | Crossed grouping columns used when wrapping a raw `DataFrame`. Alias: `factor_cols`. |
+| `subject_col` | `str` or `None` | `None` | Public alias for `animal_col` when wrapping a raw `DataFrame`. If both are omitted, the adapter uses `animal_col="AnimalName"`. |
+| `group_list` | `groupList` or `None` | `None` | Optional group metadata for raw `DataFrame` input. Aliases: `groups`, legacy `conditions`. |
+| `dataframe_kwargs` | `dict` or `None` | `None` | Advanced options forwarded to the raw `DataFrame` adapter. |
+
+## Parameter Options
+
+### `normalize_method` options
+
+| Option | Behavior |
 |---|---|
-| `dependent_variable` | Outcome column to predict. |
-| `possible_predictors` | Explicit candidate predictor columns. |
-| `data_col_contains`, `data_col_regex`, `data_col_exclude` | Candidate predictor selection helpers. Legacy aliases are `column_strings`, `regex_string`, and `predictor_exclude`. |
-| `excluded_predictors` | Explicit candidate columns to remove after selection. |
-| `repeat_features` | Allow multiple predictors from the same marker/prefix family in one subset. |
-| `max_features` | Maximum feature-subset size. `0` lets PyFLASH choose from the candidate set. |
-| `normalize_method` | Predictor normalization: `minmax`, `zscore`, or `none`. |
-| `hue_column`, `color_by`, `palette` | Group/color settings for diagnostic plots. `color_by` aliases `hue_column`. |
-| `filter_by`, `specificity` | Restrict rows before modelling. `filter_by` is the preferred public name; `specificity` remains supported for older code. A filter queue returns one result per filter. |
-| `exclude` | Exclusion rules applied before modelling. |
-| `cv_group_column` | Column used for grouped cross-validation folds, commonly `AnimalName`. |
-| `cv_backend` | Cross-validation backend: `fast`, `ultra`, or `statsmodels`. |
-| `search_strategy` | `exhaustive` tests all subsets; `beam` keeps only the best prior subsets at each depth. |
-| `beam_width` | Number of subsets retained per depth when `search_strategy="beam"`. |
-| `batch_chunk_size` | Chunk size for vectorized/batched scoring. |
-| `plot` | Create diagnostic plots. |
-| `plot_insights` | Create feature-addition insight plots. |
-| `top_n_single_predictors` | Number of top single predictors highlighted in the insight output. |
-| `save` | Save plots to disk when plotting is enabled. |
-| `dpi` | Figure resolution for saved raster elements. |
-| `return_details` | Return a detailed result dictionary instead of the legacy `(formula, params)` tuple. |
+| `"minmax"` (default) | Scales predictors to a min-max range. |
+| `"zscore"` | Standardizes predictors. |
+| `"none"` | Leaves predictors unscaled. |
+
+### `cv_backend` options
+
+| Option | Behavior |
+|---|---|
+| `"fast"` (default) | Uses the fast cross-validation backend. |
+| `"ultra"` | Uses the most optimized backend where available. |
+| `"statsmodels"` | Uses statsmodels fitting for cross-validation. |
+
+### `search_strategy` options
+
+| Option | Behavior |
+|---|---|
+| `"exhaustive"` (default) | Scores every valid feature subset. |
+| `"beam"` | Keeps only the best prior subsets at each depth. |
 
 ## Returns
 
@@ -130,7 +169,7 @@ same naming helpers as other modelling plots.
 
 | Output | Meaning |
 |---|---|
-| `Best Iterative Model for <dependent_variable>*.svg/.png` | Main best-fit diagnostic figure. |
+| `Best Iterative Model for <dependent_variable>*.svg` | Main best-fit diagnostic figure. |
 | Per-predictor diagnostic figures | Plots for selected and top predictor relationships when generated. |
 | Feature-addition insight figures | Optional insight figures when `plot_insights=True`. |
 
