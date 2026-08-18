@@ -20,8 +20,10 @@ import os
 import csv
 import time
 import re
+import warnings
 import shutil
 import hashlib
+import functools
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Mapping
 import numpy as np
@@ -29,8 +31,8 @@ import pandas as pd
 import seaborn as sns
 from matplotlib import pyplot as plt
 import matplotlib.patheffects as path_effects
-from matplotlib.colors import to_rgb as mpl_to_rgb
-from matplotlib.ticker import LinearLocator
+from matplotlib.colors import BoundaryNorm, ListedColormap, to_rgb as mpl_to_rgb
+from matplotlib.ticker import FuncFormatter, LinearLocator, MaxNLocator
 
 from PyFLASH.iteration import Context, run
 from PyFLASH.config import Config, apply_matplotlib_fast_path
@@ -58,12 +60,18 @@ from PyFLASH.markers import stainColors
 from PyFLASH.stats import (
     multipleComparisons,
     test_normality,
+    test_equal_variance,
     runITTest,
+    runOWA,
+    runWelchOWA,
+    runKW,
     mwu_multiple_comparisons,
     stats_cache_key,
     get_annotation,
     plot_comparison_lines_from_figdata,
     _annotate_stats_summary,
+    STATS_ANNOTATION_X,
+    STATS_ANNOTATION_Y,
 )
 from PyFLASH.export import convert_name, convert_raw_name, convert_behavior_name
 from PyFLASH.utils import (
@@ -74,6 +82,8 @@ from PyFLASH.utils import (
     iter_specificities, filter_df_by_specificity,
     specificity_path_parts, resolve_column_key, raw_coloc_column_aliases,
     build_subfolder, resolve_roi_bases, is_excluded_mask,
+    active_column_label, column_label_overrides, normalize_column_labels,
+    resolve_column_labels,
 )
 
 # Apply the house aesthetic once on first plotting import so figures made
@@ -285,6 +295,11 @@ def get_display_name(name, minimal=False, compact_per=False):
     # Hide experiment suffixes in display labels only (save names remain unchanged).
     clean_label = re.sub(r"\.exp\d+$", "", raw_label)
 
+    # User `column_labels` override wins over every house rewrite (literal text).
+    override = active_column_label(raw_label, clean_label)
+    if override is not None:
+        return override
+
     # Keep AOE as the short code in plots/axes.
     if clean_label.strip().casefold() == "aoe":
         return "AOE"
@@ -375,6 +390,42 @@ def set_display_name(ax, y_label=None, x_label=None, minimal=False, compact_per=
         ax.set_ylabel(get_display_name(y_label, minimal=minimal, compact_per=compact_per), **kwargs)
     if x_label:
         ax.set_xlabel(get_display_name(x_label, minimal=minimal, compact_per=compact_per), **kwargs)
+
+
+# Column-source kwargs a plot might use to declare its plotted columns, in the
+# order a positional ``column_labels`` list is zipped against.
+_COLUMN_LABEL_SOURCES = ("data_cols", "filtered_columns", "columns",
+                         "column_strings", "data_col_contains",
+                         "column", "marker")
+
+
+def column_label_scope(func):
+    """Decorator: make a plot honour a ``column_labels`` keyword.
+
+    Wraps the whole call in :func:`column_label_overrides` so every
+    ``get_display_name`` inside the plot (legend, axis, annotation, matrix header)
+    renders the user's label. A ``{column: label}`` dict needs no column list; a
+    positional list is zipped against the plot's declared columns (the first of
+    ``data_cols`` / ``filtered_columns`` / ``columns`` / ``column_strings`` /
+    ``data_col_contains`` present). Overrides affect displayed text only — the
+    underlying column identity (palette keys, describe records, saved data) is
+    unchanged. Safe on plots without column labels: a ``None`` value is a no-op.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        labels = kwargs.get("column_labels")
+        if not labels:
+            return func(*args, **kwargs)
+        cols = None
+        if not isinstance(labels, Mapping):
+            for key in _COLUMN_LABEL_SOURCES:
+                val = kwargs.get(key)
+                if val is not None:
+                    cols = list(val) if isinstance(val, (list, tuple)) else [val]
+                    break
+        with column_label_overrides(normalize_column_labels(cols, labels)):
+            return func(*args, **kwargs)
+    return wrapper
 
 
 # ── Interactive HTML export helpers (Altair, optional) ───────────────
@@ -957,6 +1008,16 @@ def _multivariable_heatmap_limits(value_key):
     if value_key in {"r2", "adj_r2", "p", "q"}:
         return 0.0, 1.0
     return None, None
+
+
+def _multivariable_matrix_default_cmap(value_key):
+    if value_key in {"r2", "adj_r2"}:
+        return "Greens"
+    if value_key == "p":
+        return pyflash_style_value("pvalue_cmap", _CORR_PVALUE_CMAP)
+    if value_key == "q":
+        return pyflash_style_value("qvalue_cmap", _CORR_QVALUE_CMAP)
+    return pyflash_style_value("matrix_cmap", "coolwarm")
 
 
 def _compute_multivariable_regression_grid(
@@ -10244,6 +10305,68 @@ def _apply_pie_wedge_style(wedges, style, color):
         wedge.set_edgecolor(color)
 
 
+def _signed_mean_bar_limits(group_values, auto_ymax, registry_range=None,
+                            y_range=None, ymin=None, ymax=None, padding=0.05):
+    """Resolve signed y limits without changing positive-only bar behavior."""
+    try:
+        padding = float(padding)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("y_padding must be a non-negative number.") from exc
+    if not np.isfinite(padding) or padding < 0:
+        raise ValueError("y_padding must be a non-negative number.")
+
+    cleaned = [
+        pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+        for values in (group_values or [])
+    ]
+    cleaned = [values for values in cleaned if len(values) > 0]
+    if not cleaned:
+        return 0.0, 1.0
+
+    all_values = pd.concat(cleaned, ignore_index=True)
+    outward_lows = []
+    for values in cleaned:
+        mean = float(values.mean())
+        sem = float(values.std(ddof=1) / np.sqrt(len(values))) if len(values) > 1 else 0.0
+        outward_lows.append(mean - sem if mean < 0 else mean)
+    data_low = min(float(all_values.min()), min(outward_lows))
+    scale = max(float(auto_ymax) - data_low, abs(data_low), abs(float(auto_ymax)), 1e-12)
+    lower = 0.0 if data_low >= 0 else -float(
+        round_up_to_nearest_5(abs(data_low) + padding * scale)
+    )
+    upper = float(auto_ymax)
+    if upper <= 0:
+        upper = float(round_up_to_nearest_5(
+            max(abs(data_low) * max(padding, 0.05), 1e-12)
+        ))
+        if upper <= 0:
+            upper = 1.0
+
+    if registry_range is not None and registry_range[0] is not None:
+        lower = float(registry_range[0])
+    if y_range is not None:
+        if not isinstance(y_range, (list, tuple)) or len(y_range) != 2:
+            raise ValueError("y_range must be a two-item (minimum, maximum) sequence.")
+        if y_range[0] is not None:
+            lower = float(y_range[0])
+        if y_range[1] is not None:
+            upper = float(y_range[1])
+    if ymin is not None:
+        lower = float(ymin)
+    if ymax is not None:
+        upper = float(ymax)
+
+    if not np.isfinite(lower) or not np.isfinite(upper):
+        raise ValueError("Mean-bar y-axis limits must be finite.")
+    if lower > 0 or upper < 0:
+        raise ValueError(
+            "Mean-bar y-axis limits must include zero because bars are anchored at zero."
+        )
+    if lower >= upper:
+        raise ValueError("Mean-bar y-axis minimum must be smaller than its maximum.")
+    return lower, upper
+
+
 def bar_chart_action(ctx: Context, state: dict,
                      points=True, normalize=False,
                      point_fill=None, point_edge=None,
@@ -10930,7 +11053,7 @@ def regression_action(ctx: Context, state: dict,
     if df.empty:
         set_display_name(ax, y, x, compact_per=True, fontdict={'weight': 'normal'}, size=25)
         sns.despine(trim=False, ax=ax)
-        entry = {'group': group_name, 'p': np.nan, 'r': np.nan}
+        entry = {'group': group_name, 'color': group_color, 'p': np.nan, 'r': np.nan, 'n': 0}
         if combine:
             state['regression_stats_entries'] = state.get('regression_stats_entries', []) + [entry]
         else:
@@ -10942,6 +11065,7 @@ def regression_action(ctx: Context, state: dict,
     coll_count_before = len(ax.collections)
     point_size = pyflash_point_size(kwargs.get("point_size"), backend="area")
     point_alpha = _style_default("regression_point_alpha", kwargs.get("point_alpha"))
+    point_fill = kwargs.get("point_fill")
     point_edge = _style_default("regression_point_edge", kwargs.get("point_edge"))
     point_linewidth = _style_default(
         "regression_point_linewidth", kwargs.get("point_linewidth"))
@@ -10972,7 +11096,11 @@ def regression_action(ctx: Context, state: dict,
     # condition shares a colour with another (e.g. crossed designs in combine).
     _render = _style_render(_resolved_condition_style(
         ctx, state, kwargs.get('auto_style'), kwargs.get('style_cycle')))
-    if not _render["marker_filled"]:
+    if point_fill is not None:
+        resolved_fill = _resolve_bar_point_color(point_fill, color, color)
+        for coll in ax.collections[coll_count_before:]:
+            coll.set_facecolors(resolved_fill)
+    elif not _render["marker_filled"]:
         open_lw = _style_default(
             "regression_open_marker_linewidth", kwargs.get("open_marker_linewidth"))
         for coll in ax.collections[coll_count_before:]:
@@ -11001,7 +11129,13 @@ def regression_action(ctx: Context, state: dict,
         corr = np.nan
         pval = np.nan
 
-    entry = {'group': group_name, 'p': pval, 'r': corr}
+    entry = {
+        'group': group_name,
+        'color': group_color,
+        'p': pval,
+        'r': corr,
+        'n': int(len(df)),
+    }
     if combine:
         state['regression_stats_entries'] = state.get('regression_stats_entries', []) + [entry]
     else:
@@ -11097,6 +11231,31 @@ def _format_side_stats_pvalue(p):
     return f"{p:.4f}".rstrip("0").rstrip(".")
 
 
+def _format_side_stats_value(value, digits=3):
+    """Format non-p statistics for compact removable side summaries."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if not np.isfinite(value):
+        return "n/a"
+    if value != 0 and abs(value) < 10 ** (-(int(digits) + 1)):
+        return f"{value:.2e}"
+    return f"{value:.{int(digits)}g}"
+
+
+def _format_side_stats_ci(row):
+    """Compact CI text from a table row with ``ci_low``/``ci_high`` columns."""
+    try:
+        lo = float(row.get("ci_low", np.nan))
+        hi = float(row.get("ci_high", np.nan))
+    except (TypeError, ValueError, AttributeError):
+        return ""
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        return ""
+    return f" [{_format_side_stats_value(lo)}, {_format_side_stats_value(hi)}]"
+
+
 def _format_regression_rvalue(r):
     try:
         r = float(r)
@@ -11107,29 +11266,385 @@ def _format_regression_rvalue(r):
     return f"{r:.2f}"
 
 
-def _regression_test_display_name(test):
-    return _correlation_display_name(test)
+def _limit_stats_detail_lines(lines, max_items=None):
+    """Return a capped list and a final omitted-count line when needed."""
+    lines = [str(line) for line in (lines or []) if str(line).strip() != ""]
+    if max_items is None:
+        return lines
+    try:
+        max_i = int(max_items)
+    except (TypeError, ValueError):
+        return lines
+    if max_i < 1 or len(lines) <= max_i:
+        return lines
+    omitted = len(lines) - max_i
+    return lines[:max_i] + [f"... {omitted} more"]
 
 
-def _annotate_regression_stats_summary(ax, entries, test, inside=False):
-    """Draw regression stats beside the axes, or inset them when requested."""
-    lines = [f"Test: {_regression_test_display_name(test)}"]
-    for entry in entries or []:
-        label = str(entry.get("group") or "Group")
-        lines.append(
-            f"{label}: r={_format_regression_rvalue(entry.get('r'))}, "
-            f"p={_format_side_stats_pvalue(entry.get('p'))}"
-        )
-
-    x, y, ha = (0.98, 0.98, "right") if inside else (1.02, 1.0, "left")
-    ax.text(
-        x, y, "\n".join(lines),
+def _annotate_stats_detail_text(ax, lines, *, x=None, y=None):
+    """Draw a removable detailed-stats text block to the right of an axis."""
+    lines = [str(line) for line in (lines or []) if str(line).strip() != ""]
+    if ax is None or len(lines) == 0:
+        return None
+    return ax.text(
+        STATS_ANNOTATION_X if x is None else float(x),
+        STATS_ANNOTATION_Y if y is None else float(y),
+        "\n".join(lines),
         transform=ax.transAxes,
-        ha=ha, va="top",
+        ha="left",
+        va="top",
         fontsize=10,
         bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85},
         clip_on=False,
     )
+
+
+def _correlation_detail_rows(correlation_results, *, max_items=None):
+    """Build sorted correlation-detail lines from {pair: (p, r)} mappings."""
+    rows = []
+    for pair_label, values in (correlation_results or {}).items():
+        try:
+            p_value, coefficient = values
+        except Exception:
+            continue
+        try:
+            p_sort = float(p_value)
+        except (TypeError, ValueError):
+            p_sort = np.inf
+        if not np.isfinite(p_sort):
+            p_sort = np.inf
+        rows.append((p_sort, str(pair_label), coefficient, p_value))
+    rows.sort(key=lambda item: (item[0], item[1]))
+    detail = [
+        (
+            f"{label}: r={_format_regression_rvalue(r_val)}, "
+            f"p={_format_side_stats_pvalue(p_val)}"
+        )
+        for _, label, r_val, p_val in rows
+    ]
+    return _limit_stats_detail_lines(detail, max_items=max_items), rows
+
+
+def _annotate_correlation_stats_summary(
+    ax,
+    correlation_results,
+    *,
+    test,
+    alpha=0.05,
+    max_items=None,
+    x=None,
+):
+    """Draw a compact right-side summary for correlation-matrix style plots."""
+    detail, rows = _correlation_detail_rows(
+        correlation_results,
+        max_items=max_items,
+    )
+    if len(rows) == 0:
+        return None
+    try:
+        alpha_f = float(alpha)
+    except (TypeError, ValueError):
+        alpha_f = 0.05
+    n_sig = sum(1 for p_val, *_ in rows if np.isfinite(p_val) and p_val < alpha_f)
+    lines = [
+        f"Test: {_correlation_display_name(test)} correlation",
+        f"Pairs tested: {len(rows)}",
+        f"Significant: {n_sig} (p<{alpha_f:g})",
+    ]
+    if detail:
+        lines.extend(["Top pairs:", *detail])
+    return _annotate_stats_detail_text(ax, lines, x=x)
+
+
+def _annotate_grouped_correlation_stats_summary(
+    ax,
+    panel_results,
+    *,
+    test,
+    alpha=0.05,
+    max_items=None,
+    x=1.23,
+):
+    """Draw one side summary for multi-panel correlation matrix figures."""
+    rows = []
+    for panel_name, payload in (panel_results or {}).items():
+        correlations = payload.get("correlations", {}) if isinstance(payload, Mapping) else {}
+        for pair_label, values in correlations.items():
+            try:
+                p_value, coefficient = values
+            except Exception:
+                continue
+            try:
+                p_sort = float(p_value)
+            except (TypeError, ValueError):
+                p_sort = np.inf
+            if not np.isfinite(p_sort):
+                p_sort = np.inf
+            rows.append((p_sort, str(panel_name), str(pair_label), coefficient, p_value))
+    rows.sort(key=lambda item: (item[0], item[1], item[2]))
+    if len(rows) == 0:
+        return None
+    try:
+        alpha_f = float(alpha)
+    except (TypeError, ValueError):
+        alpha_f = 0.05
+    n_sig = sum(1 for p_val, *_ in rows if np.isfinite(p_val) and p_val < alpha_f)
+    detail = [
+        (
+            f"{panel} | {label}: r={_format_regression_rvalue(r_val)}, "
+            f"p={_format_side_stats_pvalue(p_val)}"
+        )
+        for p_sort, panel, label, r_val, p_val in rows
+    ]
+    lines = [
+        f"Test: {_correlation_display_name(test)} correlation",
+        f"Pairs tested: {len(rows)}",
+        f"Significant: {n_sig} (p<{alpha_f:g})",
+        "Top pairs:",
+        *_limit_stats_detail_lines(detail, max_items=max_items),
+    ]
+    return _annotate_stats_detail_text(ax, lines, x=x)
+
+
+def _annotate_multivariable_regression_stats_summary(
+    ax,
+    panel_outputs,
+    *,
+    value_key="r2",
+    correction="fdr",
+    alpha=0.05,
+    max_items=None,
+    x=1.23,
+):
+    """Draw exact multivariable-regression model details beside a matrix."""
+    rows = []
+    for panel_name, payload in (panel_outputs or {}).items():
+        models = payload.get("models", {}) if isinstance(payload, Mapping) else {}
+        for model_key, model in models.items():
+            if not isinstance(model, Mapping):
+                continue
+            p_value = model.get("p", np.nan)
+            q_value = model.get("q", np.nan)
+            try:
+                sort_value = float(q_value if str(correction).lower() == "fdr" else p_value)
+            except (TypeError, ValueError):
+                sort_value = np.inf
+            if not np.isfinite(sort_value):
+                sort_value = np.inf
+            rows.append((sort_value, str(panel_name), str(model_key), model))
+    rows.sort(key=lambda item: (item[0], item[1], item[2]))
+    if not rows:
+        return None
+
+    try:
+        alpha_f = float(alpha)
+    except (TypeError, ValueError):
+        alpha_f = 0.05
+    use_q = str(correction).lower() == "fdr"
+    sig_field = "q" if use_q else "p"
+    sig_count = 0
+    detail = []
+    value_label = _multivariable_value_label(value_key)
+    for _, panel_name, model_key, model in rows:
+        try:
+            sig_val = float(model.get(sig_field, np.nan))
+        except (TypeError, ValueError):
+            sig_val = np.nan
+        if np.isfinite(sig_val) and sig_val <= alpha_f:
+            sig_count += 1
+        detail.append(
+            f"{panel_name} | {model_key}: n={model.get('n', 'n/a')}, "
+            f"{value_label}={_format_side_stats_value(model.get(value_key), 3)}, "
+            f"p={_format_side_stats_pvalue(model.get('p'))}, "
+            f"q={_format_side_stats_pvalue(model.get('q'))}"
+        )
+
+    lines = [
+        "Test: multivariable OLS",
+        f"Models tested: {len(rows)}",
+        f"Significant: {sig_count} ({sig_field}<{alpha_f:g})",
+        "Top models:",
+        *_limit_stats_detail_lines(detail, max_items=max_items),
+    ]
+    return _annotate_stats_detail_text(ax, lines, x=x)
+
+
+def _annotate_model_result_matrix_stats_summary(
+    ax,
+    records,
+    *,
+    value_col,
+    p_col=None,
+    q_col=None,
+    p_alpha=0.05,
+    q_alpha=0.05,
+    max_items=None,
+    x=1.23,
+):
+    """Draw exact precomputed model-result p/q details beside a matrix."""
+    rows = []
+    for record in records or []:
+        if not isinstance(record, Mapping):
+            continue
+        p_value = record.get("p", np.nan)
+        q_value = record.get("q", np.nan)
+        sort_value = q_value if q_col is not None and pd.notna(q_value) else p_value
+        try:
+            sort_value = float(sort_value)
+        except (TypeError, ValueError):
+            sort_value = np.inf
+        if not np.isfinite(sort_value):
+            sort_value = np.inf
+        rows.append((sort_value, record))
+    rows.sort(key=lambda item: (
+        item[0],
+        str(item[1].get("row_label", item[1].get("row", ""))),
+        str(item[1].get("column_label", "")),
+    ))
+    if not rows:
+        return None
+
+    try:
+        p_alpha_f = float(p_alpha)
+    except (TypeError, ValueError):
+        p_alpha_f = 0.05
+    try:
+        q_alpha_f = float(q_alpha)
+    except (TypeError, ValueError):
+        q_alpha_f = 0.05
+    sig_count = 0
+    detail = []
+    value_label = _model_result_value_label(value_col)
+    for _, record in rows:
+        p_value = record.get("p", np.nan)
+        q_value = record.get("q", np.nan)
+        p_sig = p_col is not None and pd.notna(p_value) and float(p_value) < p_alpha_f
+        q_sig = q_col is not None and pd.notna(q_value) and float(q_value) < q_alpha_f
+        if p_sig or q_sig:
+            sig_count += 1
+        row_label = record.get("row_label", record.get("row", "row"))
+        group = record.get("group")
+        profile = record.get("profile", "profile")
+        group_text = f" [{group}]" if group is not None else ""
+        detail.append(
+            f"{row_label} ~ {profile}{group_text}: "
+            f"{value_label}={_format_side_stats_value(record.get('value'), 3)}, "
+            f"p={_format_side_stats_pvalue(p_value)}, "
+            f"q={_format_side_stats_pvalue(q_value)}"
+        )
+
+    lines = [
+        "Results: precomputed model table",
+        f"Cells tested: {len(rows)}",
+        f"Significant: {sig_count}",
+        "Top cells:",
+        *_limit_stats_detail_lines(detail, max_items=max_items),
+    ]
+    return _annotate_stats_detail_text(ax, lines, x=x)
+
+
+def _regression_test_display_name(test):
+    return _correlation_display_name(test)
+
+
+def _regression_annotation_anchor(ax, n_lines, step):
+    """Pick the axes corner with the fewest scatter points for the stats block.
+
+    The per-condition stats sit on the graph, so they must dodge the data.
+    Every scatter point is projected into axes-fraction space and each corner is
+    scored by how many points fall under the block's footprint; the emptiest
+    corner wins, preferring top-right (the usual gap for a negative fit) on ties.
+    Returns ``(x, ha, y0)`` where lines are drawn downward from ``y0`` with
+    ``va="top"``.
+    """
+    block_h = min(0.85, n_lines * step + 0.02)
+    block_w = 0.55
+    points = []
+    try:
+        inv = ax.transAxes.inverted()
+        for coll in ax.collections:
+            offsets = coll.get_offsets()
+            if offsets is None or len(offsets) == 0:
+                continue
+            frac = inv.transform(ax.transData.transform(np.asarray(offsets)))
+            points.append(frac)
+    except Exception:
+        points = []
+    pts = np.vstack(points) if points else np.empty((0, 2))
+
+    # (vertical, horizontal, x, ha) ordered by tie-break preference.
+    corners = [
+        ("top", "right", 0.98, "right"),
+        ("top", "left", 0.02, "left"),
+        ("bottom", "right", 0.98, "right"),
+        ("bottom", "left", 0.02, "left"),
+    ]
+
+    def _crowding(vzone, hzone):
+        if pts.shape[0] == 0:
+            return 0
+        x0, x1 = (1.0 - block_w, 1.0) if hzone == "right" else (0.0, block_w)
+        y0, y1 = (1.0 - block_h, 1.0) if vzone == "top" else (0.0, block_h)
+        inside = (
+            (pts[:, 0] >= x0) & (pts[:, 0] <= x1)
+            & (pts[:, 1] >= y0) & (pts[:, 1] <= y1)
+        )
+        return int(inside.sum())
+
+    best = min(
+        range(len(corners)),
+        key=lambda i: (_crowding(corners[i][0], corners[i][1]), i),
+    )
+    vzone, hzone, x, ha = corners[best]
+    y0 = 0.97 if vzone == "top" else (0.05 + (n_lines - 1) * step)
+    return x, ha, y0
+
+
+def _annotate_regression_coefficients(ax, entries, test=None):
+    """Draw colour-matched per-group r/significance on-graph.
+
+    Exact p-values, sample sizes, and the test name live in the removable
+    right-side stats block. The on-axis label stays deliberately compact.
+    """
+    entries = list(entries or [])
+    n_lines = len(entries)
+    if n_lines == 0:
+        return
+    step = 0.055
+    x, ha, y0 = _regression_annotation_anchor(ax, n_lines, step)
+    y = y0
+    for entry in entries:
+        label = str(entry.get("group") or "Group")
+        significance = pyflash_significance_annotation(entry.get("p"))
+        suffix = "" if significance == "ns" else f" {significance}"
+        ax.text(
+            x, y,
+            f"{label}: r = {_format_regression_rvalue(entry.get('r'))}{suffix}",
+            transform=ax.transAxes,
+            ha=ha, va="top",
+            fontsize=13, fontweight="bold",
+            color=entry.get("color") or "black",
+            clip_on=False,
+        )
+        y -= step
+
+
+def _annotate_regression_stats_summary(ax, entries, *, test=None, max_items=None):
+    """Draw exact regression statistics in the removable side panel."""
+    entries = list(entries or [])
+    if len(entries) == 0:
+        return None
+    detail = []
+    for entry in entries:
+        label = str(entry.get("group") or "Group")
+        detail.append(
+            f"{label}: n={entry.get('n', 'n/a')}, "
+            f"r={_format_regression_rvalue(entry.get('r'))}, "
+            f"p={_format_side_stats_pvalue(entry.get('p'))}"
+        )
+    lines = [f"Test: {_regression_test_display_name(test)} correlation"]
+    lines.extend(_limit_stats_detail_lines(detail, max_items=max_items))
+    return _annotate_stats_detail_text(ax, lines)
 
 
 def scatter_3d_action(ctx: Context, state: dict,
@@ -11488,6 +12003,8 @@ def matrix_action(ctx: Context, state: dict,
                   show_diagonal=True,
                   show_values=False,
                   value_format=".2f",
+                  show_stats_summary=True,
+                  stats_summary_max_items=10,
                   **kwargs):
     """Plot a correlation matrix for one group/factor."""
     ax = state['ax']
@@ -11601,11 +12118,20 @@ def matrix_action(ctx: Context, state: dict,
     # title/colorbar fonts, minimal tick labels) lives in the shared renderer so
     # plot_matrices and the pipeline matrices look identical.
     _, _, heatmap = _render_value_matrix(
-        corr, ax=ax, fig=fig, cmap=kwargs.get('cmap'), vmin=-1, vmax=1,
+        corr, ax=ax, fig=fig, cmap=kwargs.get('cmap'),
+        palette=kwargs.get('palette'), vmin=-1, vmax=1,
         colorbar_label=coeff_label, title=_title, annotations=annot,
         tick_label_size=tick_label_size, triangle=triangle_mode,
         show_diagonal=show_diagonal, show_values=show_values,
         value_format=value_format)
+    if show_stats_summary:
+        _annotate_correlation_stats_summary(
+            ax,
+            results,
+            test=correlation,
+            max_items=stats_summary_max_items,
+            x=1.18,
+        )
 
     return {'heatmap': heatmap, 'correlations': results}
 
@@ -11673,13 +12199,83 @@ def _matrix_variant_label(triangle='full', show_diagonal=True, show_values=False
     return " ".join(parts)
 
 
+_MATRIX_COLORBAR_WIDTH = 0.024
+_MATRIX_PANEL_COLORBAR_WIDTH = 0.020
+
+
+def _resolve_matrix_cmap(cmap=None, palette=None, default=None):
+    """Resolve heatmap colour input from cmap/palette/style defaults."""
+    if cmap is not None and palette is not None:
+        raise ValueError("Use either cmap or palette for matrix colours, not both.")
+    if palette is not None:
+        try:
+            return sns.color_palette(palette, as_cmap=True)
+        except Exception:
+            return palette
+    if cmap is not None:
+        return cmap
+    if default is not None:
+        return default
+    return pyflash_style_value("matrix_cmap", "coolwarm")
+
+
+def _round_up_to_nearest_tenth(value):
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    if not np.isfinite(value_f):
+        return np.nan
+    return float(np.ceil((value_f - 1e-12) * 10.0) / 10.0)
+
+
+def _positive_matrix_value_limits(values, *, vmin=None, vmax=None,
+                                  min_vmax=0.1, fallback_vmax=1.0):
+    """Resolve 0-based sequential matrix limits from observed positive values."""
+    resolved_vmin = 0.0 if vmin is None else vmin
+    if vmax is not None:
+        return resolved_vmin, vmax
+    finite = pd.to_numeric(pd.Series(np.asarray(values).ravel()), errors="coerce").dropna()
+    finite = finite[np.isfinite(finite)]
+    if finite.empty:
+        return resolved_vmin, fallback_vmax
+    hi = max(float(finite.max()), float(min_vmax))
+    return resolved_vmin, _round_up_to_nearest_tenth(hi)
+
+
+def _matrix_cell_text_color(value, mappable, default_color="black"):
+    """Choose black/white text from the rendered cell colour luminance."""
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        return default_color
+    if not np.isfinite(value_f) or mappable is None:
+        return default_color
+    try:
+        rgba = mappable.cmap(mappable.norm(value_f))
+        r, g, b = rgba[:3]
+        luminance = 0.2126 * float(r) + 0.7152 * float(g) + 0.0722 * float(b)
+        return "white" if luminance < 0.48 else "black"
+    except Exception:
+        return default_color
+
+
+def _matrix_text_color(value, mappable, configured_color):
+    """Use explicit style colours, otherwise auto-contrast black/white."""
+    if configured_color is not None and str(configured_color).lower() not in {"black", "#000000"}:
+        return configured_color
+    return _matrix_cell_text_color(value, mappable, default_color=configured_color or "black")
+
+
 def _render_value_matrix(matrix, *, ax=None, fig=None, cmap=None,
+                         palette=None,
                          vmin=None, vmax=None, colorbar_label=None, title=None,
                          annotations=None, tick_label_size=20, square=True,
                          linewidths=0.5, minimal_labels=True,
                          triangle=None, show_diagonal=True,
                          show_values=False, value_format=".2f",
-                         nan_text=None, show_colorbar=True):
+                         nan_text=None, show_colorbar=True,
+                         colorbar_width=None):
     """Render a value matrix in PyFLASH's house "perfect matrix" style.
 
     One shared renderer for every PyFLASH correlation-family matrix
@@ -11719,7 +12315,7 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap=None,
     """
     if hasattr(matrix, "apply"):
         matrix = matrix.apply(lambda s: pd.to_numeric(s, errors="coerce"))
-    cmap = _style_default("matrix_cmap", cmap)
+    cmap = _resolve_matrix_cmap(cmap=cmap, palette=palette)
     value_color = pyflash_style_value("matrix_value_color", "black")
     annotation_color = pyflash_style_value("matrix_annotation_color", "black")
     nan_text_color = pyflash_style_value("matrix_nan_text_color", "#7A7A7A")
@@ -11750,8 +12346,8 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap=None,
     title_fs = int(max(16, min(34, _fig_scale * 1.7)))
     cbar_label_fs = int(max(14, min(30, _fig_scale * 1.55)))
     cbar_tick_fs = int(max(16, min(26, _fig_scale * 1.25)))
-    star_fs = min(25, max(8, int(220 / n)))
-    value_fs = min(20, max(8, int(180 / n)))
+    star_fs = min(28, max(9, int(300 / n)))
+    value_fs = min(22, max(9, int(240 / n)))
 
     # Square heatmap WITHOUT seaborn's colorbar - seaborn's colorbar spans the
     # full axes height, taller than the (square-shrunk) matrix. Build it manually
@@ -11759,11 +12355,13 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap=None,
     heatmap = sns.heatmap(matrix, annot=False, cmap=cmap, linewidths=linewidths,
                           ax=ax, vmin=vmin, vmax=vmax, square=square,
                           cbar=False, mask=seaborn_mask)
+    mappable = ax.collections[0] if len(ax.collections) > 0 else None
     if show_colorbar:
         try:
             ax.apply_aspect()  # lock the box so get_position() is the matrix
             pos = ax.get_position()
-            cax = fig.add_axes([pos.x1 + 0.014, pos.y0, 0.036, pos.height])
+            cbar_width = _MATRIX_COLORBAR_WIDTH if colorbar_width is None else float(colorbar_width)
+            cax = fig.add_axes([pos.x1 + 0.014, pos.y0, cbar_width, pos.height])
             cbar = fig.colorbar(ax.collections[0], cax=cax)
             cbar.ax.tick_params(labelsize=cbar_tick_fs, width=1.6, length=6)
             try:
@@ -11771,11 +12369,14 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap=None,
             except Exception:
                 pass
             if colorbar_label:
-                # Caption sits just above the colorbar, aligned with it; the gap from
-                # the top tick number is vertical (y > 1).
-                cbar.ax.text(0.0, 1.03, colorbar_label, transform=cbar.ax.transAxes,
-                             ha="left", va="bottom", fontsize=cbar_label_fs,
-                             fontweight="bold")
+                # Caption runs vertically along the colorbar, just outside its
+                # tick numbers. Placing it beside (not above) the bar means it
+                # can never collide with the centred matrix title, regardless of
+                # how narrow the matrix or how long the caption.
+                cbar.set_label(
+                    colorbar_label, rotation=270, labelpad=cbar_label_fs + 6,
+                    fontsize=cbar_label_fs, fontweight="bold",
+                )
         except Exception:
             pass
     else:
@@ -11824,9 +12425,10 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap=None,
                 value_txt = _format_matrix_value(value, value_format)
                 if value_txt:
                     value_y = i + (0.64 if annotation_text else 0.5)
+                    text_color = _matrix_text_color(value, mappable, value_color)
                     ax.text(j + 0.5, value_y, value_txt,
                             ha="center", va="center",
-                            fontsize=value_fs, color=value_color,
+                            fontsize=value_fs, color=text_color,
                             fontweight="bold")
             elif nan_text and not value_is_finite:
                 ax.text(j + 0.5, i + 0.5, str(nan_text),
@@ -11835,9 +12437,10 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap=None,
                         color=nan_text_color, fontweight="bold")
             if annotation_text:
                 star_y = i + (0.27 if bool(show_values) and value_is_finite else 0.6)
+                text_color = _matrix_text_color(value, mappable, annotation_color)
                 ax.text(j + 0.5, star_y, annotation_text,
                         ha="center", va="center",
-                        fontsize=star_fs, color=annotation_color, fontweight="bold")
+                        fontsize=star_fs, color=text_color, fontweight="bold")
 
     labels_x = [get_display_name(c, minimal=minimal_labels) for c in xcols]
     labels_y = [get_display_name(c, minimal=minimal_labels) for c in ycols]
@@ -11849,9 +12452,1906 @@ def _render_value_matrix(matrix, *, ax=None, fig=None, cmap=None,
     return fig, ax, heatmap
 
 
+def _paired_ratio_metric_key(numerator_col, denominator_col, *, log_transform):
+    scale = "log" if log_transform else "raw"
+    return f"{numerator_col}__over__{denominator_col}__{scale}_ratio"
+
+
+def _paired_ratio_display_label(numerator_col, denominator_col, ratio_label=None):
+    if ratio_label is not None and str(ratio_label).strip():
+        return str(ratio_label)
+    numerator = get_display_name(numerator_col, compact_per=True)
+    denominator = get_display_name(denominator_col, compact_per=True)
+    return f"{numerator} / {denominator}"
+
+
+def _paired_ratio_ci_level(ci):
+    try:
+        level = float(ci)
+    except (TypeError, ValueError):
+        level = 0.95
+    if level <= 0 or level >= 1:
+        raise ValueError("ci must be a probability between 0 and 1, e.g. 0.95.")
+    return level
+
+
+def _paired_ratio_clean_scale(value):
+    text = str(value or "holm").strip().casefold().replace("-", "_").replace(" ", "_")
+    if text in {"", "none", "uncorrected", "no_correction", "raw"}:
+        return "none"
+    if text in {"holm", "holm_bonferroni", "holm_bonferroni_correction"}:
+        return "holm"
+    if text in {"bonferroni", "bonf"}:
+        return "bonferroni"
+    if text in {"sidak"}:
+        return "sidak"
+    if text in {"fdr", "fdr_bh", "bh", "benjamini_hochberg"}:
+        return "fdr_bh"
+    if text in {"fdr_by", "by", "benjamini_yekutieli"}:
+        return "fdr_by"
+    raise ValueError(
+        "pairwise_correction must be 'holm', 'bonferroni', 'sidak', "
+        "'fdr_bh', 'fdr_by', 'none', or 'uncorrected'."
+    )
+
+
+def _paired_ratio_adjust_pvalues(pvalues, method):
+    method = _paired_ratio_clean_scale(method)
+    p = np.asarray([np.nan if v is None else float(v) for v in pvalues], dtype=float)
+    adjusted = np.full(len(p), np.nan, dtype=float)
+    finite = np.where(np.isfinite(p))[0]
+    if finite.size == 0:
+        return adjusted.tolist()
+    if method == "none":
+        adjusted[finite] = p[finite]
+        return adjusted.tolist()
+    if method == "bonferroni":
+        adjusted[finite] = np.minimum(1.0, p[finite] * len(finite))
+        return adjusted.tolist()
+    if method == "sidak":
+        adjusted[finite] = 1.0 - np.power(1.0 - p[finite], len(finite))
+        adjusted[finite] = np.minimum(1.0, adjusted[finite])
+        return adjusted.tolist()
+    if method in {"fdr_bh", "fdr_by"}:
+        try:
+            from PyFLASH.stats_extra import adjust_pvalues
+            _, values = adjust_pvalues(p[finite], method=method)
+            adjusted[finite] = values
+            return adjusted.tolist()
+        except Exception:
+            pass
+    ordered = finite[np.argsort(p[finite])]
+    m = len(ordered)
+    previous = 0.0
+    for rank, idx in enumerate(ordered):
+        value = min(1.0, max(previous, float((m - rank) * p[idx])))
+        adjusted[idx] = value
+        previous = value
+    return adjusted.tolist()
+
+
+def _paired_ratio_holm_adjust(pvalues):
+    return _paired_ratio_adjust_pvalues(pvalues, "holm")
+
+
+def _paired_ratio_normalize_test(value):
+    key = str(value or "legacy").strip().casefold().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "": "auto",
+        "default": "auto",
+        "auto": "auto",
+        "legacy": "legacy",
+        "standard": "legacy",
+        "anova": "anova",
+        "one_way": "anova",
+        "one_way_anova": "anova",
+        "welch_anova": "welch_anova",
+        "welchs_anova": "welch_anova",
+        "kruskal": "kruskal",
+        "kruskal_wallis": "kruskal",
+        "kw": "kruskal",
+        "permutation": "permutation",
+        "perm": "permutation",
+        "student": "student_t",
+        "student_t": "student_t",
+        "students_t": "student_t",
+        "welch": "welch_t",
+        "welch_t": "welch_t",
+        "welchs_t": "welch_t",
+        "mann_whitney": "mannwhitney",
+        "mann_whitney_u": "mannwhitney",
+        "mwu": "mannwhitney",
+    }
+    if key in aliases:
+        return aliases[key]
+    raise ValueError(
+        "ratio_test must be 'legacy', 'auto', 'anova', 'welch_anova', 'kruskal', "
+        "'permutation', 'student_t', 'welch_t', or 'mannwhitney'."
+    )
+
+
+def _paired_ratio_normalize_posthoc(value):
+    key = str(value or "welch").strip().casefold().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "": "welch",
+        "default": "welch",
+        "welch": "welch",
+        "welch_t": "welch",
+        "student": "student",
+        "student_t": "student",
+        "mann_whitney": "mannwhitney",
+        "mann_whitney_u": "mannwhitney",
+        "mwu": "mannwhitney",
+        "tukey": "tukey",
+        "tukey_hsd": "tukey",
+        "games_howell": "games_howell",
+        "gh": "games_howell",
+        "tamhane": "tamhane",
+        "tamhane_t2": "tamhane",
+        "dunn": "dunn",
+        "dunns": "dunn",
+        "conover": "conover",
+        "nemenyi": "nemenyi",
+        "dscf": "dscf",
+        "dwass_steel_critchlow_fligner": "dscf",
+        "permutation": "permutation",
+        "perm": "permutation",
+        "auto": "auto",
+    }
+    if key in aliases:
+        return aliases[key]
+    raise ValueError(
+        "posthoc must be 'welch', 'student', 'mannwhitney', 'tukey', "
+        "'games_howell', 'tamhane', 'dunn', 'conover', 'nemenyi', 'dscf', "
+        "'permutation', or 'auto'."
+    )
+
+
+def _paired_ratio_parse_comparison(comp, group_order, group_labels=None):
+    names = [str(g) for g in group_order]
+    labels = group_labels or {}
+    lookup = {}
+    for idx, name in enumerate(names):
+        lookup[name.strip().casefold()] = idx
+        label = str(labels.get(name, name))
+        lookup[label.strip().casefold()] = idx
+
+    if isinstance(comp, str):
+        text = comp.strip()
+        if re.match(r"^\d+\s*-\s*\d+$", text):
+            first, second = [int(part.strip()) - 1 for part in text.split("-", 1)]
+            return f"{first + 1}-{second + 1}", first, second
+        parts = [
+            part.strip()
+            for part in re.split(r"\s*(?:,|:|->| vs | v )\s*", text, flags=re.IGNORECASE)
+            if part.strip()
+        ]
+        if len(parts) == 2:
+            comp = parts
+        else:
+            raise ValueError(
+                f"Could not parse comparison {comp!r}. Use '1-2' or a pair of group names."
+            )
+
+    if not isinstance(comp, (tuple, list)) or len(comp) != 2:
+        raise ValueError(f"Comparison {comp!r} must be '1-2' or a two-item pair.")
+
+    indices = []
+    for item in comp:
+        if isinstance(item, (int, np.integer)):
+            idx = int(item) - 1
+        else:
+            key = str(item).strip().casefold()
+            if key not in lookup:
+                raise ValueError(f"Comparison references unknown group {item!r}.")
+            idx = lookup[key]
+        indices.append(idx)
+    return f"{indices[0] + 1}-{indices[1] + 1}", indices[0], indices[1]
+
+
+def _paired_ratio_resolve_comparisons(comparisons, group_order, group_labels=None, experiment=None, factor=None):
+    if comparisons is None:
+        condition_comparisons = (
+            getattr(getattr(experiment, "condition_list", None), "comparisons", None)
+            if factor is None else None
+        )
+        comparisons = condition_comparisons
+    if comparisons is None:
+        comparisons = [
+            f"{i + 1}-{j + 1}"
+            for i in range(len(group_order))
+            for j in range(i + 1, len(group_order))
+        ]
+    parsed = []
+    for comp in comparisons:
+        token, first, second = _paired_ratio_parse_comparison(
+            comp, group_order, group_labels=group_labels,
+        )
+        if first < 0 or second < 0 or first >= len(group_order) or second >= len(group_order):
+            raise ValueError(f"Comparison {comp!r} is outside the available groups.")
+        if first == second:
+            raise ValueError(f"Comparison {comp!r} compares a group with itself.")
+        parsed.append((token, first, second))
+    return parsed
+
+
+def _paired_ratio_source_columns(
+    experiment,
+    source_df,
+    *,
+    numerator_col=None,
+    denominator_col=None,
+    filtered_columns=None,
+    column_strings=None,
+    regex_string=None,
+    exclude="",
+):
+    if numerator_col is not None or denominator_col is not None:
+        if numerator_col is None or denominator_col is None:
+            raise ValueError("Pass both numerator_col and denominator_col, or pass exactly two data_cols.")
+        numerator = resolve_column_key(source_df, numerator_col)
+        denominator = resolve_column_key(source_df, denominator_col)
+        missing = []
+        if numerator is None:
+            missing.append(str(numerator_col))
+        if denominator is None:
+            missing.append(str(denominator_col))
+        if missing:
+            raise ValueError(f"Paired-ratio source column(s) not found: {', '.join(missing)}")
+        return str(numerator), str(denominator)
+
+    resolved = _resolve_filtered_columns(
+        experiment,
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        source_df=source_df,
+    )
+    if len(resolved) != 2:
+        raise ValueError(
+            "plot_paired_ratio needs exactly two data columns when numerator_col/"
+            "denominator_col are not supplied. With data_cols, the ratio is "
+            "data_cols[1] / data_cols[0]."
+        )
+    denominator, numerator = resolved[0], resolved[1]
+    return str(numerator), str(denominator)
+
+
+def _paired_ratio_subject_table(df, numerator_col, denominator_col, *, log_transform):
+    subject = (
+        df["AnimalName"].astype(str)
+        if "AnimalName" in df.columns else pd.Series(df.index.astype(str), index=df.index)
+    )
+    numerator = _to_numeric_excluding_not_included(df[numerator_col])
+    denominator = _to_numeric_excluding_not_included(df[denominator_col])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        raw_ratio = numerator.astype(float) / denominator.astype(float)
+    raw_ratio = raw_ratio.replace([np.inf, -np.inf], np.nan)
+    raw_ratio = raw_ratio.where(denominator.astype(float) != 0)
+    if log_transform:
+        valid = (
+            (raw_ratio > 0)
+            & (numerator.astype(float) > 0)
+            & (denominator.astype(float) > 0)
+        )
+        analysis = pd.Series(np.nan, index=raw_ratio.index, dtype=float)
+        analysis.loc[valid] = np.log(raw_ratio.loc[valid].astype(float))
+    else:
+        analysis = raw_ratio.astype(float)
+
+    table = pd.DataFrame({
+        "subject": subject,
+        "denominator_value": denominator.astype(float),
+        "numerator_value": numerator.astype(float),
+        "raw_ratio": raw_ratio.astype(float),
+        "analysis_value": analysis.astype(float),
+    })
+    table = table.replace([np.inf, -np.inf], np.nan)
+    table = table.dropna(subset=["subject", "denominator_value", "numerator_value", "raw_ratio", "analysis_value"])
+    table = table[table["subject"].astype(str).str.strip().ne("")]
+    if table.empty:
+        return table
+    return (
+        table.groupby("subject", sort=False)
+        .agg(
+            denominator_value=("denominator_value", "mean"),
+            numerator_value=("numerator_value", "mean"),
+            raw_ratio=("raw_ratio", "mean"),
+            analysis_value=("analysis_value", "mean"),
+        )
+        .reset_index()
+    )
+
+
+def _paired_ratio_t_interval(values, *, ci):
+    values = pd.to_numeric(pd.Series(values), errors="coerce").dropna().astype(float)
+    n = int(len(values))
+    if n == 0:
+        return np.nan, np.nan, np.nan
+    mean = float(values.mean())
+    if n < 2:
+        return mean, mean, mean
+    sd = float(values.std(ddof=1))
+    if not np.isfinite(sd):
+        return mean, np.nan, np.nan
+    sem = sd / np.sqrt(n)
+    if sem == 0:
+        return mean, mean, mean
+    from scipy import stats as sp_stats
+
+    alpha = 1.0 - _paired_ratio_ci_level(ci)
+    crit = float(sp_stats.t.ppf(1.0 - alpha / 2.0, n - 1))
+    return mean, mean - crit * sem, mean + crit * sem
+
+
+def _paired_ratio_group_summary(plot_values, analysis_values, *, log_transform, ci):
+    values = analysis_values if log_transform else plot_values
+    mean, low, high = _paired_ratio_t_interval(values, ci=ci)
+    if log_transform:
+        return {
+            "n": int(pd.to_numeric(pd.Series(analysis_values), errors="coerce").dropna().shape[0]),
+            "mean": float(np.exp(mean)) if np.isfinite(mean) else np.nan,
+            "ci_low": float(np.exp(low)) if np.isfinite(low) else np.nan,
+            "ci_high": float(np.exp(high)) if np.isfinite(high) else np.nan,
+            "analysis_mean": mean,
+            "analysis_ci_low": low,
+            "analysis_ci_high": high,
+        }
+    return {
+        "n": int(pd.to_numeric(pd.Series(plot_values), errors="coerce").dropna().shape[0]),
+        "mean": mean,
+        "ci_low": low,
+        "ci_high": high,
+        "analysis_mean": mean,
+        "analysis_ci_low": low,
+        "analysis_ci_high": high,
+    }
+
+
+def _paired_ratio_peak_summary(values, *, log_transform, ci):
+    """Summarise endpoint values for the paired trajectory plot."""
+    values = pd.to_numeric(pd.Series(values), errors="coerce").dropna().astype(float)
+    if log_transform:
+        values = values[values > 0]
+        if values.empty:
+            return {
+                "n": 0,
+                "mean": np.nan,
+                "ci_low": np.nan,
+                "ci_high": np.nan,
+                "analysis_mean": np.nan,
+                "analysis_ci_low": np.nan,
+                "analysis_ci_high": np.nan,
+            }
+        log_values = np.log(values)
+        mean, low, high = _paired_ratio_t_interval(log_values, ci=ci)
+        return {
+            "n": int(len(log_values)),
+            "mean": float(np.exp(mean)) if np.isfinite(mean) else np.nan,
+            "ci_low": float(np.exp(low)) if np.isfinite(low) else np.nan,
+            "ci_high": float(np.exp(high)) if np.isfinite(high) else np.nan,
+            "analysis_mean": mean,
+            "analysis_ci_low": low,
+            "analysis_ci_high": high,
+        }
+    mean, low, high = _paired_ratio_t_interval(values, ci=ci)
+    return {
+        "n": int(len(values)),
+        "mean": mean,
+        "ci_low": low,
+        "ci_high": high,
+        "analysis_mean": mean,
+        "analysis_ci_low": low,
+        "analysis_ci_high": high,
+    }
+
+
+def _paired_ratio_welch(a, b, *, ci):
+    a = pd.to_numeric(pd.Series(a), errors="coerce").dropna().astype(float)
+    b = pd.to_numeric(pd.Series(b), errors="coerce").dropna().astype(float)
+    if len(a) == 0 or len(b) == 0:
+        return np.nan, np.nan, np.nan, np.nan, np.nan
+    diff = float(b.mean() - a.mean())
+    if len(a) < 2 or len(b) < 2:
+        return diff, np.nan, np.nan, np.nan, np.nan
+
+    from scipy import stats as sp_stats
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        test = sp_stats.ttest_ind(a, b, equal_var=False, nan_policy="omit")
+    pvalue = float(getattr(test, "pvalue", np.nan))
+    statistic = float(getattr(test, "statistic", np.nan))
+    va = float(a.var(ddof=1))
+    vb = float(b.var(ddof=1))
+    na = float(len(a))
+    nb = float(len(b))
+    se2 = va / na + vb / nb
+    if not np.isfinite(se2) or se2 <= 0:
+        return diff, diff, diff, statistic, pvalue
+    denom = ((va / na) ** 2 / (na - 1.0)) + ((vb / nb) ** 2 / (nb - 1.0))
+    df = (se2 ** 2 / denom) if denom > 0 else np.inf
+    alpha = 1.0 - _paired_ratio_ci_level(ci)
+    crit = float(sp_stats.t.ppf(1.0 - alpha / 2.0, df)) if np.isfinite(df) else 1.959963984540054
+    se = float(np.sqrt(se2))
+    return diff, diff - crit * se, diff + crit * se, statistic, pvalue
+
+
+def _paired_ratio_pairwise_student(a, b):
+    from scipy import stats as sp_stats
+
+    a = pd.to_numeric(pd.Series(a), errors="coerce").dropna().astype(float)
+    b = pd.to_numeric(pd.Series(b), errors="coerce").dropna().astype(float)
+    if len(a) < 2 or len(b) < 2:
+        return np.nan, np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        test = sp_stats.ttest_ind(a, b, equal_var=True, nan_policy="omit")
+    return float(getattr(test, "statistic", np.nan)), float(getattr(test, "pvalue", np.nan))
+
+
+def _paired_ratio_pairwise_mannwhitney(a, b):
+    from scipy import stats as sp_stats
+
+    a = pd.to_numeric(pd.Series(a), errors="coerce").dropna().astype(float)
+    b = pd.to_numeric(pd.Series(b), errors="coerce").dropna().astype(float)
+    if len(a) == 0 or len(b) == 0:
+        return np.nan, np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        test = sp_stats.mannwhitneyu(a, b, alternative="two-sided")
+    return float(getattr(test, "statistic", np.nan)), float(getattr(test, "pvalue", np.nan))
+
+
+def _paired_ratio_permutation_p(groups, *, n_permutations=9999, random_state=None):
+    arrays = [
+        pd.to_numeric(pd.Series(g), errors="coerce").dropna().astype(float).to_numpy()
+        for g in groups
+    ]
+    arrays = [a for a in arrays if len(a) > 0]
+    if len(arrays) < 2:
+        return np.nan, np.nan
+    labels = np.concatenate([[i] * len(a) for i, a in enumerate(arrays)])
+    values = np.concatenate(arrays)
+    if len(values) == 0:
+        return np.nan, np.nan
+
+    def statistic(vals, labs):
+        grand = float(np.mean(vals))
+        ss = 0.0
+        for i in range(len(arrays)):
+            part = vals[labs == i]
+            if len(part) > 0:
+                ss += len(part) * (float(np.mean(part)) - grand) ** 2
+        return ss
+
+    observed = statistic(values, labels)
+    rng = np.random.default_rng(random_state)
+    n_perm = max(1, int(n_permutations))
+    hits = 0
+    for _ in range(n_perm):
+        shuffled = rng.permutation(labels)
+        if statistic(values, shuffled) >= observed:
+            hits += 1
+    return float(observed), float((hits + 1) / (n_perm + 1))
+
+
+def _paired_ratio_pairwise_permutation(a, b, *, n_permutations=9999, random_state=None):
+    a = pd.to_numeric(pd.Series(a), errors="coerce").dropna().astype(float).to_numpy()
+    b = pd.to_numeric(pd.Series(b), errors="coerce").dropna().astype(float).to_numpy()
+    if len(a) == 0 or len(b) == 0:
+        return np.nan, np.nan
+    values = np.concatenate([a, b])
+    labels = np.concatenate([np.zeros(len(a), dtype=int), np.ones(len(b), dtype=int)])
+    observed = abs(float(np.mean(b) - np.mean(a)))
+    rng = np.random.default_rng(random_state)
+    n_perm = max(1, int(n_permutations))
+    hits = 0
+    for _ in range(n_perm):
+        shuffled = rng.permutation(labels)
+        diff = abs(float(np.mean(values[shuffled == 1]) - np.mean(values[shuffled == 0])))
+        if diff >= observed:
+            hits += 1
+    statistic = float(np.mean(b) - np.mean(a))
+    return statistic, float((hits + 1) / (n_perm + 1))
+
+
+def _paired_ratio_posthoc_pvalues(groups, comparisons, method, correction, *, n_permutations, random_state):
+    method = _paired_ratio_normalize_posthoc(method)
+    if method in {"dunn", "conover", "nemenyi", "dscf"}:
+        posthoc_label = {
+            "dunn": "Dunn",
+            "conover": "Conover",
+            "nemenyi": "Nemenyi",
+            "dscf": "DSCF",
+        }[method]
+        pvalues, _, _, results_dict, used = runKW(
+            groups,
+            comparisons,
+            {},
+            posthoc=posthoc_label,
+            posthoc_correction=correction,
+        )
+        raw_key = f"{posthoc_label}-Uncorrected"
+        raw_values = results_dict.get(raw_key, [None, pvalues])[1]
+        return list(raw_values), list(pvalues), used, str(used).split(" ", 1)[-1] if " " in str(used) else str(used)
+    if method == "tukey":
+        pvalues, _, _, _rd, used = runOWA(groups, comparisons, {}, posthoc="Tukey")
+        return list(pvalues), list(pvalues), used, "tukey"
+    if method in {"games_howell", "tamhane"}:
+        posthoc_label = "Games-Howell" if method == "games_howell" else "Tamhane T2"
+        pvalues, _, _, _rd, used = runWelchOWA(groups, comparisons, {}, posthoc=posthoc_label)
+        return list(pvalues), list(pvalues), used, method
+
+    raw_pvalues = []
+    for i, comp in enumerate(comparisons):
+        first, second = [int(part) - 1 for part in comp.split("-")]
+        a = groups[first]
+        b = groups[second]
+        if method == "student":
+            _, pvalue = _paired_ratio_pairwise_student(a, b)
+        elif method == "mannwhitney":
+            _, pvalue = _paired_ratio_pairwise_mannwhitney(a, b)
+        elif method == "permutation":
+            seed = None if random_state is None else int(random_state) + i + 1
+            _, pvalue = _paired_ratio_pairwise_permutation(
+                a, b, n_permutations=n_permutations, random_state=seed,
+            )
+        else:
+            _, _, _, _, pvalue = _paired_ratio_welch(a, b, ci=0.95)
+        raw_pvalues.append(pvalue)
+    adjusted = _paired_ratio_adjust_pvalues(raw_pvalues, correction)
+    label = {
+        "student": "Student t-test",
+        "mannwhitney": "Mann-Whitney U",
+        "permutation": "Permutation",
+        "welch": "Welch t-test",
+        "auto": "Welch t-test",
+    }.get(method, "Welch t-test")
+    return raw_pvalues, adjusted, label, correction
+
+
+def _paired_ratio_compute_stats(
+    state,
+    *,
+    comparisons=None,
+    pairwise_correction="holm",
+    ratio_test="legacy",
+    posthoc="welch",
+    variance_test="brown-forsythe",
+    variance_alpha=0.05,
+    n_permutations=9999,
+    random_state=None,
+    alpha=0.05,
+    ci=0.95,
+    log_transform=True,
+    metric_label=None,
+    experiment=None,
+    factor=None,
+):
+    group_order = [str(g) for g in state.get("group_order", [])]
+    label_map = state.get("group_label_map", {})
+    raw_by_index = state.get("ratio_raw_by_index", {})
+    analysis_by_index = state.get("ratio_analysis_by_index", {})
+
+    valid = []
+    for idx, group_key in enumerate(group_order):
+        analysis = pd.to_numeric(
+            pd.Series(analysis_by_index.get(idx, [])), errors="coerce"
+        ).dropna().astype(float)
+        raw = pd.to_numeric(
+            pd.Series(raw_by_index.get(idx, [])), errors="coerce"
+        ).dropna().astype(float)
+        if len(analysis) > 0 and len(raw) > 0:
+            valid.append((idx, group_key, str(label_map.get(group_key, group_key)), raw, analysis))
+
+    summary_rows = []
+    for idx, group_key, label, raw, analysis in valid:
+        summary = _paired_ratio_group_summary(
+            raw, analysis, log_transform=log_transform, ci=ci,
+        )
+        summary_rows.append({
+            "group": label,
+            "group_key": group_key,
+            "index": int(idx) + 1,
+            **summary,
+        })
+    summary_table = pd.DataFrame(summary_rows)
+
+    overall_stat = np.nan
+    overall_p = np.nan
+    test_name = "Not tested"
+    selected_test = _paired_ratio_normalize_test(ratio_test)
+    valid_analysis = [entry[4] for entry in valid]
+    normal = None
+    equal_variance = None
+    variance_info = None
+    if len(valid) == 2:
+        normal, _, _ = test_normality(valid_analysis, make_plot=False)
+        variance_info = test_equal_variance(
+            valid_analysis,
+            {},
+            method=variance_test,
+            alpha=variance_alpha,
+        )
+        equal_variance = variance_info.get("equal_var")
+        if selected_test in {"anova", "welch_anova", "kruskal"}:
+            raise ValueError(f"ratio_test={ratio_test!r} needs at least three groups.")
+        if selected_test == "mannwhitney" or (selected_test == "auto" and not normal):
+            overall_stat, overall_p = _paired_ratio_pairwise_mannwhitney(valid[0][4], valid[1][4])
+            test_name = "Mann-Whitney U"
+        elif selected_test == "student_t" or (selected_test == "auto" and equal_variance is True):
+            overall_stat, overall_p = _paired_ratio_pairwise_student(valid[0][4], valid[1][4])
+            test_name = "Student t-test"
+        else:
+            _, _, _, overall_stat, overall_p = _paired_ratio_welch(valid[0][4], valid[1][4], ci=ci)
+            test_name = "Welch t-test"
+    elif len(valid) > 2:
+        from scipy import stats as sp_stats
+
+        normal, _, _ = test_normality(valid_analysis, make_plot=False)
+        variance_info = test_equal_variance(
+            valid_analysis,
+            {},
+            method=variance_test,
+            alpha=variance_alpha,
+        )
+        equal_variance = variance_info.get("equal_var")
+        if selected_test in {"student_t", "welch_t", "mannwhitney"}:
+            raise ValueError(f"ratio_test={ratio_test!r} supports exactly two groups.")
+        if selected_test == "permutation":
+            overall_stat, overall_p = _paired_ratio_permutation_p(
+                valid_analysis,
+                n_permutations=n_permutations,
+                random_state=random_state,
+            )
+            test_name = "Permutation omnibus"
+        elif selected_test == "kruskal" or (selected_test == "auto" and not normal):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                test = sp_stats.kruskal(*valid_analysis)
+            overall_stat = float(getattr(test, "statistic", np.nan))
+            overall_p = float(getattr(test, "pvalue", np.nan))
+            test_name = "Kruskal-Wallis"
+        elif selected_test == "welch_anova" or (selected_test == "auto" and equal_variance is False):
+            _p, _a, overall, _rd, _ph = runWelchOWA(valid_analysis, [], {}, posthoc="Tamhane T2")
+            overall_stat, overall_p = overall
+            test_name = "Welch ANOVA"
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                test = sp_stats.f_oneway(*valid_analysis)
+            overall_stat = float(getattr(test, "statistic", np.nan))
+            overall_p = float(getattr(test, "pvalue", np.nan))
+            test_name = "One-way ANOVA"
+    if log_transform and test_name != "Not tested":
+        test_name = f"{test_name} on log ratios"
+    elif test_name != "Not tested":
+        test_name = f"{test_name} on raw ratios"
+
+    valid_group_keys = [entry[1] for entry in valid]
+    valid_labels = {entry[1]: entry[2] for entry in valid}
+    parsed = _paired_ratio_resolve_comparisons(
+        comparisons,
+        valid_group_keys,
+        group_labels=valid_labels,
+        experiment=experiment,
+        factor=factor,
+    ) if len(valid) >= 2 else []
+
+    posthoc_method = _paired_ratio_normalize_posthoc(posthoc)
+    if posthoc_method == "auto":
+        if "Kruskal-Wallis" in test_name:
+            posthoc_method = "dunn"
+        elif "Welch ANOVA" in test_name:
+            posthoc_method = "tamhane"
+        elif "One-way ANOVA" in test_name:
+            posthoc_method = "tukey"
+        elif "Mann-Whitney" in test_name:
+            posthoc_method = "mannwhitney"
+        elif "Student" in test_name:
+            posthoc_method = "student"
+        elif "Permutation" in test_name:
+            posthoc_method = "permutation"
+        else:
+            posthoc_method = "welch"
+    token_list = [token for token, _, _ in parsed]
+    group_values_for_posthoc = [entry[4] for entry in valid]
+    raw_pvalues, adjusted_pvalues, posthoc_label, correction_label = (
+        _paired_ratio_posthoc_pvalues(
+            group_values_for_posthoc,
+            token_list,
+            posthoc_method,
+            _paired_ratio_clean_scale(pairwise_correction),
+            n_permutations=n_permutations,
+            random_state=random_state,
+        )
+        if token_list else ([], [], str(posthoc_method), _paired_ratio_clean_scale(pairwise_correction))
+    )
+
+    pairwise_rows = []
+    for token, first, second in parsed:
+        if first < 0 or second < 0 or first >= len(valid) or second >= len(valid):
+            continue
+        a = valid[first]
+        b = valid[second]
+        diff, low, high, statistic, pvalue = _paired_ratio_welch(a[4], b[4], ci=ci)
+        if log_transform:
+            effect = float(np.exp(diff)) if np.isfinite(diff) else np.nan
+            ci_low = float(np.exp(low)) if np.isfinite(low) else np.nan
+            ci_high = float(np.exp(high)) if np.isfinite(high) else np.nan
+            effect_label = "ratio_of_ratios"
+        else:
+            effect = diff
+            ci_low = low
+            ci_high = high
+            effect_label = "difference"
+        p_idx = len(pairwise_rows)
+        raw_p = raw_pvalues[p_idx] if p_idx < len(raw_pvalues) else pvalue
+        adj_p = adjusted_pvalues[p_idx] if p_idx < len(adjusted_pvalues) else raw_p
+        pairwise_rows.append({
+            "comparison": token,
+            "group_a": a[2],
+            "group_b": b[2],
+            "direction": f"{b[2]} vs {a[2]}",
+            "effect": effect,
+            "effect_label": effect_label,
+            "ci_low": ci_low,
+            "ci_high": ci_high,
+            "statistic": statistic,
+            "p_raw": raw_p,
+            "p_adj": adj_p,
+            "p_correction": correction_label,
+            "posthoc": posthoc_label,
+            "significant": bool(np.isfinite(adj_p) and adj_p < float(alpha)),
+        })
+
+    pairwise_table = pd.DataFrame(pairwise_rows)
+    return {
+        "test_name": test_name,
+        "overall_statistic": overall_stat,
+        "overall_p": overall_p,
+        "normal": normal,
+        "variance": variance_info,
+        "posthoc": posthoc_label if parsed else None,
+        "pairwise": pairwise_table,
+        "summary": summary_table,
+        "metric": metric_label,
+        "scale": "log_ratio" if log_transform else "raw_ratio",
+        "valid": valid,
+    }
+
+
+def _paired_ratio_stats_lines(stats_payload, *, alpha=0.05, max_items=None):
+    if not stats_payload:
+        return []
+    lines = [
+        f"Test: {stats_payload.get('test_name', 'Not tested')}",
+        f"Overall p={_format_side_stats_pvalue(stats_payload.get('overall_p'))}",
+    ]
+    pairwise = stats_payload.get("pairwise")
+    if isinstance(pairwise, pd.DataFrame) and not pairwise.empty:
+        detail = []
+        for row in pairwise.sort_values("p_adj", na_position="last").itertuples(index=False):
+            p_adj = getattr(row, "p_adj", np.nan)
+            stars = get_annotation(p_adj)
+            effect_label = "ratio" if getattr(row, "effect_label", "") == "ratio_of_ratios" else "difference"
+            ci_text = _format_side_stats_ci({
+                "ci_low": getattr(row, "ci_low", np.nan),
+                "ci_high": getattr(row, "ci_high", np.nan),
+            })
+            detail.append(
+                f"{row.direction}: {effect_label}={_format_side_stats_value(row.effect)}"
+                f"{ci_text}, p={_format_side_stats_pvalue(p_adj)} {stars}"
+            )
+        correction = str(pairwise["p_correction"].iloc[0])
+        correction_key = correction.strip().casefold().replace("-", "_").replace(" ", "_")
+        correction_label = {
+            "holm": "Holm",
+            "bonferroni": "Bonferroni",
+            "sidak": "Sidak",
+            "fdr_bh": "FDR-BH",
+            "fdr_by": "FDR-BY",
+            "none": "uncorrected",
+            "uncorrected": "uncorrected",
+            "tukey": "Tukey-adjusted",
+            "tamhane": "Tamhane-adjusted",
+            "games_howell": "Games-Howell-adjusted",
+        }.get(correction_key, correction)
+        posthoc = str(pairwise["posthoc"].iloc[0]) if "posthoc" in pairwise else "Pairwise"
+        if correction_key in {"tukey", "tamhane", "games_howell"}:
+            pairwise_label = posthoc
+        else:
+            pairwise_label = f"{posthoc} + {correction_label}"
+        lines.extend([
+            f"Pairwise: {pairwise_label}",
+            f"Significant: {int(pairwise['significant'].sum())}/{len(pairwise)} (p<{float(alpha):g})",
+            *_limit_stats_detail_lines(detail, max_items=max_items),
+        ])
+    return lines
+
+
+def _paired_ratio_visible_comparison_rows(pairwise, *, alpha=0.05, show_ns=False, max_items=3):
+    """Return pairwise ratio contrasts that should be annotated on the graph."""
+    if not isinstance(pairwise, pd.DataFrame) or pairwise.empty:
+        return pd.DataFrame()
+    table = pairwise.copy()
+    p_col = "p_adj" if "p_adj" in table.columns else "p_raw"
+    if p_col not in table.columns:
+        return pd.DataFrame()
+    table["_plot_p"] = pd.to_numeric(table[p_col], errors="coerce")
+    if not show_ns:
+        table = table[table["_plot_p"] < float(alpha)]
+    table = table.sort_values("_plot_p", na_position="last", kind="mergesort")
+    try:
+        max_i = int(max_items)
+    except (TypeError, ValueError):
+        max_i = None
+    if max_i is not None and max_i > 0:
+        table = table.head(max_i)
+    return table
+
+
+def _paired_ratio_annotate_comparisons(
+    ax,
+    rows,
+    *,
+    group_color_map=None,
+    alpha=0.05,
+):
+    """Draw compact change-contrast brackets spanning the paired endpoints."""
+    if ax is None or not isinstance(rows, pd.DataFrame) or rows.empty:
+        return []
+    try:
+        from matplotlib.transforms import blended_transform_factory
+    except Exception:
+        return []
+
+    transform = blended_transform_factory(ax.transData, ax.transAxes)
+    artists = []
+    x0, x1 = -0.04, 1.04
+    y_start = 0.94
+    y_gap = 0.075
+    height = 0.018
+    color_map = group_color_map or {}
+    for idx, (_, row) in enumerate(rows.iterrows()):
+        p_value = row.get("_plot_p", np.nan)
+        stars = get_annotation(p_value)
+        if not stars or str(stars).strip().lower() == "ns":
+            stars = "ns"
+        direction = str(row.get("direction", "") or "").strip()
+        if not direction:
+            group_a = str(row.get("group_a", "A"))
+            group_b = str(row.get("group_b", "B"))
+            direction = f"{group_b} vs {group_a}"
+        color = "#111111"
+        y = y_start - idx * y_gap
+        line = ax.plot(
+            [x0, x0, x1, x1],
+            [y, y + height, y + height, y],
+            transform=transform,
+            clip_on=False,
+            color=color,
+            linewidth=1.35,
+            solid_capstyle="round",
+            zorder=8,
+        )[0]
+        text = ax.text(
+            (x0 + x1) / 2.0,
+            y + height + 0.005,
+            f"{direction} change {stars}",
+            transform=transform,
+            ha="center",
+            va="bottom",
+            fontsize=9.2,
+            fontweight="bold",
+            color=color,
+            clip_on=False,
+            zorder=8,
+        )
+        artists.extend([line, text])
+    return artists
+
+
+def _paired_ratio_select_pairwise_row(pairwise, primary_comparison=None):
+    if not isinstance(pairwise, pd.DataFrame) or pairwise.empty:
+        return None, pd.DataFrame()
+    table = pairwise.copy()
+    if primary_comparison is not None:
+        if isinstance(primary_comparison, (tuple, list)) and len(primary_comparison) == 2:
+            targets = {
+                f"{primary_comparison[0]} vs {primary_comparison[1]}".strip().casefold(),
+                f"{primary_comparison[1]} vs {primary_comparison[0]}".strip().casefold(),
+            }
+        else:
+            targets = {str(primary_comparison).strip().casefold()}
+        for idx, row in table.iterrows():
+            options = {
+                str(row.get("direction", "")).strip().casefold(),
+                f"{row.get('group_a', '')} vs {row.get('group_b', '')}".strip().casefold(),
+                f"{row.get('group_b', '')} vs {row.get('group_a', '')}".strip().casefold(),
+                str(row.get("comparison", "")).strip().casefold(),
+            }
+            if options & targets:
+                primary = row
+                return primary, table.drop(index=idx)
+    p_col = "p_adj" if "p_adj" in table.columns else "p_raw"
+    order = table.sort_values(p_col, na_position="last")
+    primary = order.iloc[0]
+    return primary, table.drop(index=primary.name)
+
+
+def _paired_ratio_normalize_extra_sections(extra):
+    if extra is None:
+        return []
+
+    def _lines(value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        try:
+            return [str(item) for item in value if str(item).strip()]
+        except TypeError:
+            return [str(value)]
+
+    if isinstance(extra, Mapping):
+        return [(str(title), _lines(lines)) for title, lines in extra.items()]
+    if isinstance(extra, str):
+        return [(None, [extra])]
+    sections = []
+    loose = []
+    try:
+        iterator = iter(extra)
+    except TypeError:
+        return [(None, [str(extra)])]
+    for item in iterator:
+        if isinstance(item, Mapping):
+            sections.extend((str(title), _lines(lines)) for title, lines in item.items())
+        elif isinstance(item, (tuple, list)) and len(item) == 2 and not isinstance(item[0], (int, float)):
+            sections.append((None if item[0] is None else str(item[0]), _lines(item[1])))
+        else:
+            text = str(item)
+            if text.strip():
+                loose.append(text)
+    if loose:
+        sections.insert(0, (None, loose))
+    return [(title, lines) for title, lines in sections if lines]
+
+
+def _paired_ratio_emit_report(stats_payload, *, metric_label):
+    try:
+        import PyFLASH.report as report
+
+        if not report.is_active():
+            return
+        valid = stats_payload.get("valid", [])
+        if len(valid) < 2:
+            return
+        pairwise = stats_payload.get("pairwise")
+        comparisons = pairwise["comparison"].tolist() if isinstance(pairwise, pd.DataFrame) and not pairwise.empty else []
+        pvalues = pairwise["p_adj"].tolist() if isinstance(pairwise, pd.DataFrame) and not pairwise.empty else []
+        effect_strings = []
+        if isinstance(pairwise, pd.DataFrame) and not pairwise.empty:
+            for row in pairwise.itertuples(index=False):
+                effect_strings.append(
+                    f"{row.direction}: {row.effect_label}={_format_side_stats_value(row.effect)} "
+                    f"[{_format_side_stats_value(row.ci_low)}, {_format_side_stats_value(row.ci_high)}], "
+                    f"p_adj={_format_side_stats_pvalue(row.p_adj)}"
+                )
+        report.emit(report.build_comparison_record(
+            metric=metric_label,
+            group_names=[entry[2] for entry in valid],
+            group_values=[entry[3] for entry in valid],
+            test=stats_payload.get("test_name"),
+            post_hoc=stats_payload.get("posthoc") or "paired-ratio pairwise contrasts",
+            overall=(stats_payload.get("overall_statistic"), stats_payload.get("overall_p")),
+            comparisons=comparisons,
+            pairwise_pvalues=pvalues,
+            effect_strings=effect_strings,
+            raw_stats={
+                "scale": stats_payload.get("scale"),
+                "summary": stats_payload.get("summary"),
+                "pairwise": pairwise,
+            },
+            normal=None,
+        ))
+    except Exception:
+        return
+
+
+def paired_ratio_action(
+    ctx: Context,
+    state: dict,
+    *,
+    numerator_col,
+    denominator_col,
+    log_transform=True,
+    show_points=True,
+    show_participant_lines=True,
+    show_ci=True,
+    point_size=None,
+    point_alpha=None,
+    mean_marker_size=None,
+    line_alpha=None,
+    line_width=None,
+    ci=0.95,
+    **kwargs,
+):
+    """Draw one group's paired denominator->numerator peak trajectory."""
+    ax = state["ax"]
+    source_df = ctx.factor_df if ctx.factor_value is not None else ctx.condition_df
+    if source_df is None or source_df.empty:
+        return {"group": ctx.factor_value or ctx.condition, "n": 0}
+
+    table = _paired_ratio_subject_table(
+        source_df,
+        numerator_col,
+        denominator_col,
+        log_transform=bool(log_transform),
+    )
+    group_key = str(ctx.factor_value if ctx.factor_value is not None else ctx.condition)
+    fallback_idx = ctx.factor_index if ctx.factor_value is not None else ctx.condition_index
+    idx = int(state.get("group_index_map", {}).get(group_key, fallback_idx))
+    group_label, group_color = _resolve_group_label_color(ctx)
+    color = state.get("group_color_map", {}).get(group_key, group_color or "black")
+    label = state.get("group_label_map", {}).get(group_key, group_label or group_key)
+    offset = float(state.get("group_offsets", {}).get(idx, 0.0))
+    x0 = float(state.get("denominator_x", 0.0)) + offset
+    x1 = float(state.get("numerator_x", 1.0)) + offset
+
+    if table.empty:
+        state.setdefault("ratio_raw_by_index", {})[idx] = pd.Series(dtype=float)
+        state.setdefault("ratio_analysis_by_index", {})[idx] = pd.Series(dtype=float)
+        state.setdefault("group_key_by_index", {})[idx] = group_key
+        return {"group": label, "n": 0}
+
+    table = table.sort_values("subject")
+    denominator_values = pd.Series(table["denominator_value"].to_numpy(dtype=float), name=group_key)
+    numerator_values = pd.Series(table["numerator_value"].to_numpy(dtype=float), name=group_key)
+    raw_values = pd.Series(table["raw_ratio"].to_numpy(dtype=float), name=group_key)
+    analysis_values = pd.Series(table["analysis_value"].to_numpy(dtype=float), name=group_key)
+
+    if show_points:
+        ax.scatter(
+            np.concatenate([
+                np.full(len(table), x0, dtype=float),
+                np.full(len(table), x1, dtype=float),
+            ]),
+            np.concatenate([
+                denominator_values.to_numpy(dtype=float),
+                numerator_values.to_numpy(dtype=float),
+            ]),
+            s=pyflash_point_size(point_size, backend="area"),
+            facecolors="white",
+            edgecolors=color,
+            linewidths=1.25,
+            alpha=_style_default("scatter_alpha", point_alpha),
+            clip_on=False,
+            zorder=3,
+        )
+    if show_participant_lines:
+        try:
+            alpha_value = float(line_alpha)
+        except (TypeError, ValueError):
+            alpha_value = 0.18
+        try:
+            width_value = float(line_width)
+        except (TypeError, ValueError):
+            width_value = 1.2
+        for row in table.itertuples(index=False):
+            ax.plot(
+                [x0, x1],
+                [float(row.denominator_value), float(row.numerator_value)],
+                color=color,
+                alpha=alpha_value,
+                linewidth=width_value,
+                zorder=1,
+            )
+
+    summary = _paired_ratio_group_summary(
+        raw_values,
+        analysis_values,
+        log_transform=bool(log_transform),
+        ci=ci,
+    )
+    mean = summary["mean"]
+    denominator_summary = _paired_ratio_peak_summary(
+        denominator_values,
+        log_transform=bool(log_transform),
+        ci=ci,
+    )
+    numerator_summary = _paired_ratio_peak_summary(
+        numerator_values,
+        log_transform=bool(log_transform),
+        ci=ci,
+    )
+    peak_rows = state.setdefault("peak_summary_rows", [])
+    peak_rows.extend([
+        {
+            "group": label,
+            "group_key": group_key,
+            "index": int(idx) + 1,
+            "endpoint": "denominator",
+            "source_column": denominator_col,
+            "x": x0,
+            **denominator_summary,
+        },
+        {
+            "group": label,
+            "group_key": group_key,
+            "index": int(idx) + 1,
+            "endpoint": "numerator",
+            "source_column": numerator_col,
+            "x": x1,
+            **numerator_summary,
+        },
+    ])
+    state.setdefault("peak_plot_values", []).extend(
+        denominator_values.dropna().tolist() + numerator_values.dropna().tolist()
+    )
+    state.setdefault("peak_plot_values", []).extend([
+        denominator_summary.get("ci_low", np.nan),
+        denominator_summary.get("ci_high", np.nan),
+        numerator_summary.get("ci_low", np.nan),
+        numerator_summary.get("ci_high", np.nan),
+    ])
+
+    means = np.array([denominator_summary["mean"], numerator_summary["mean"]], dtype=float)
+    lows = np.array([denominator_summary["ci_low"], numerator_summary["ci_low"]], dtype=float)
+    highs = np.array([denominator_summary["ci_high"], numerator_summary["ci_high"]], dtype=float)
+    xs = np.array([x0, x1], dtype=float)
+    finite_means = np.isfinite(means)
+    summary_zorder = 5
+    if finite_means.any():
+        ax.plot(
+            xs[finite_means],
+            means[finite_means],
+            color=color,
+            linewidth=3.0,
+            zorder=summary_zorder,
+        )
+    if show_ci and finite_means.any():
+        valid_ci = finite_means & np.isfinite(lows) & np.isfinite(highs)
+        if valid_ci.any():
+            ax.errorbar(
+                xs[valid_ci],
+                means[valid_ci],
+                yerr=np.vstack([
+                    means[valid_ci] - lows[valid_ci],
+                    highs[valid_ci] - means[valid_ci],
+                ]),
+                fmt="none",
+                color=color,
+                elinewidth=2.4,
+                capsize=6,
+                capthick=2.2,
+                zorder=summary_zorder,
+            )
+    marker_size = pyflash_point_size(
+        11 if mean_marker_size is None else mean_marker_size,
+        backend="area",
+    )
+    if finite_means.any():
+        ax.scatter(
+            xs[finite_means],
+            means[finite_means],
+            s=marker_size,
+            marker="o",
+            facecolors=color,
+            edgecolors=color,
+            linewidths=1.0,
+            zorder=summary_zorder,
+        )
+
+    state.setdefault("ratio_raw_by_index", {})[idx] = raw_values
+    state.setdefault("ratio_analysis_by_index", {})[idx] = analysis_values
+    state.setdefault("group_key_by_index", {})[idx] = group_key
+    state.setdefault("group_label_by_index", {})[idx] = label
+    return {
+        "group": label,
+        "n": int(len(raw_values)),
+        "mean_ratio": float(mean) if np.isfinite(mean) else np.nan,
+    }
+
+
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # ONE-LINER WRAPPERS
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+def plot_paired_ratio(
+    experiment,
+    numerator_col=None,
+    denominator_col=None,
+    filtered_columns=None,
+    data_cols=None,
+    log_transform=True,
+    factor=None,
+    split_by=None,
+    by="conditions",
+    specificity=None,
+    filter_by=None,
+    roi=None,
+    comparisons=None,
+    pairwise_correction="holm",
+    ratio_test="legacy",
+    posthoc="welch",
+    variance_test="brown-forsythe",
+    variance_alpha=0.05,
+    n_permutations=9999,
+    random_state=None,
+    alpha=0.05,
+    ci=0.95,
+    ratio_label=None,
+    title=None,
+    subtitle=None,
+    y_label=None,
+    footer=None,
+    primary_comparison=None,
+    show_sample_lines=True,
+    show_points=True,
+    show_participant_lines=None,
+    show_ci=True,
+    show_reference_line=True,
+    show_comparisons=True,
+    show_legend=True,
+    show_ns=False,
+    comparison_max_items=3,
+    show_stats_summary=True,
+    stats_summary_title=None,
+    stats_summary_extra=None,
+    stats_summary_max_items=8,
+    sample_dot_size=None,
+    sample_line_width=None,
+    point_size=None,
+    point_alpha=None,
+    point_jitter=None,
+    mean_marker_size=None,
+    line_alpha=None,
+    line_width=None,
+    y_range=None,
+    ymin=None,
+    ymax=None,
+    save=True,
+    return_data=False,
+    column_strings=None,
+    regex_string=None,
+    exclude="",
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
+    column_labels=None,
+    conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
+    dataframe_kwargs=None,
+):
+    """Plot paired endpoint trajectories and test their ratio across groups.
+
+    With ``data_cols=[denominator, numerator]`` the ratio is
+    ``numerator / denominator``. By default, the graph uses a log-scaled endpoint
+    axis and statistics use ``log(ratio)``; set ``log_transform=False`` for a
+    linear endpoint axis and raw ratio tests.
+    """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="conditions",
+    )
+    if by != "conditions":
+        raise ValueError("plot_paired_ratio supports split_by='conditions' or split_by=<group column>.")
+
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
+
+    _roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(_roi_bases) > 1:
+        return {
+            _rb: plot_paired_ratio(
+                experiment,
+                numerator_col=numerator_col,
+                denominator_col=denominator_col,
+                filtered_columns=filtered_columns,
+                log_transform=log_transform,
+                factor=factor,
+                by=by,
+                specificity=specificity,
+                roi=_rb,
+                comparisons=comparisons,
+                pairwise_correction=pairwise_correction,
+                ratio_test=ratio_test,
+                posthoc=posthoc,
+                variance_test=variance_test,
+                variance_alpha=variance_alpha,
+                n_permutations=n_permutations,
+                random_state=random_state,
+                alpha=alpha,
+                ci=ci,
+                ratio_label=ratio_label,
+                title=title,
+                subtitle=subtitle,
+                y_label=y_label,
+                footer=footer,
+                primary_comparison=primary_comparison,
+                show_sample_lines=show_sample_lines,
+                show_points=show_points,
+                show_participant_lines=show_participant_lines,
+                show_ci=show_ci,
+                show_reference_line=show_reference_line,
+                show_comparisons=show_comparisons,
+                show_legend=show_legend,
+                show_ns=show_ns,
+                comparison_max_items=comparison_max_items,
+                show_stats_summary=show_stats_summary,
+                stats_summary_title=stats_summary_title,
+                stats_summary_extra=stats_summary_extra,
+                stats_summary_max_items=stats_summary_max_items,
+                sample_dot_size=sample_dot_size,
+                sample_line_width=sample_line_width,
+                point_size=point_size,
+                point_alpha=point_alpha,
+                point_jitter=point_jitter,
+                mean_marker_size=mean_marker_size,
+                line_alpha=line_alpha,
+                line_width=line_width,
+                y_range=y_range,
+                ymin=ymin,
+                ymax=ymax,
+                save=save,
+                return_data=return_data,
+                column_strings=column_strings,
+                regex_string=regex_string,
+                exclude=exclude,
+                column_labels=column_labels,
+            )
+            for _rb in _roi_bases
+        }
+    _roi_base = _roi_bases[0]
+    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+
+    if _is_specificity_queue(specificity):
+        return {
+            spec_tuple: plot_paired_ratio(
+                experiment,
+                numerator_col=numerator_col,
+                denominator_col=denominator_col,
+                filtered_columns=filtered_columns,
+                log_transform=log_transform,
+                factor=factor,
+                by=by,
+                specificity=spec_tuple,
+                roi=_roi_base,
+                comparisons=comparisons,
+                pairwise_correction=pairwise_correction,
+                ratio_test=ratio_test,
+                posthoc=posthoc,
+                variance_test=variance_test,
+                variance_alpha=variance_alpha,
+                n_permutations=n_permutations,
+                random_state=random_state,
+                alpha=alpha,
+                ci=ci,
+                ratio_label=ratio_label,
+                title=title,
+                subtitle=subtitle,
+                y_label=y_label,
+                footer=footer,
+                primary_comparison=primary_comparison,
+                show_sample_lines=show_sample_lines,
+                show_points=show_points,
+                show_participant_lines=show_participant_lines,
+                show_ci=show_ci,
+                show_reference_line=show_reference_line,
+                show_comparisons=show_comparisons,
+                show_legend=show_legend,
+                show_ns=show_ns,
+                comparison_max_items=comparison_max_items,
+                show_stats_summary=show_stats_summary,
+                stats_summary_title=stats_summary_title,
+                stats_summary_extra=stats_summary_extra,
+                stats_summary_max_items=stats_summary_max_items,
+                sample_dot_size=sample_dot_size,
+                sample_line_width=sample_line_width,
+                point_size=point_size,
+                point_alpha=point_alpha,
+                point_jitter=point_jitter,
+                mean_marker_size=mean_marker_size,
+                line_alpha=line_alpha,
+                line_width=line_width,
+                y_range=y_range,
+                ymin=ymin,
+                ymax=ymax,
+                save=save,
+                return_data=return_data,
+                column_strings=column_strings,
+                regex_string=regex_string,
+                exclude=exclude,
+                column_labels=column_labels,
+            )
+            for spec_tuple in _iter_specificities(specificity)
+        }
+
+    source_df = _filtered_summary_for_specificity(experiment, specificity, roi_base=_roi_base)
+    if factor is not None:
+        factor_key = resolve_column_key(source_df, factor)
+        if factor_key is None:
+            raise ValueError(f"Grouping column {factor!r} was not found for plot_paired_ratio.")
+        factor = str(factor_key)
+    numerator_col, denominator_col = _paired_ratio_source_columns(
+        experiment,
+        source_df,
+        numerator_col=numerator_col,
+        denominator_col=denominator_col,
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+    )
+    ci = _paired_ratio_ci_level(ci)
+    _paired_ratio_clean_scale(pairwise_correction)
+    _paired_ratio_normalize_test(ratio_test)
+    _paired_ratio_normalize_posthoc(posthoc)
+    metric_key = _paired_ratio_metric_key(
+        numerator_col,
+        denominator_col,
+        log_transform=bool(log_transform),
+    )
+    label_overrides = normalize_column_labels([denominator_col, numerator_col], column_labels)
+    with column_label_overrides(label_overrides):
+        metric_label = _paired_ratio_display_label(
+            numerator_col,
+            denominator_col,
+            ratio_label=ratio_label,
+        )
+    effective_show_sample_lines = (
+        show_sample_lines if show_participant_lines is None else show_participant_lines
+    )
+    effective_point_size = sample_dot_size if sample_dot_size is not None else (
+        point_size
+        if point_size is not None
+        else pyflash_point_size(None, backend="points") * 0.5
+    )
+    effective_line_width = sample_line_width if sample_line_width is not None else line_width
+
+    payloads = []
+
+    def setup(ctx, state):
+        summary = ctx.summary
+        if factor:
+            factor_values = list(summary[factor].dropna().unique())
+            group_order = []
+            for cond in ctx.experiment.condition_list:
+                match = next((v for v in factor_values if str(v) in str(cond.name)), None)
+                if match is not None and str(match) not in group_order:
+                    group_order.append(str(match))
+            for value in factor_values:
+                if str(value) not in group_order:
+                    group_order.append(str(value))
+            group_color_map = {}
+            group_label_map = {}
+            factor_dict = getattr(ctx.experiment.condition_list, "factorDict", {})
+            if isinstance(factor_dict, dict) and factor in factor_dict:
+                for cond in factor_dict[factor]:
+                    group_name = str(getattr(cond, "name", ""))
+                    if not group_name:
+                        continue
+                    group_color_map[group_name] = getattr(cond, "color", "black")
+                    group_label_map[group_name] = str(getattr(cond, "label", group_name))
+            palette = sns.color_palette(n_colors=max(1, len(group_order)))
+            for i, value in enumerate(group_order):
+                group_color_map.setdefault(value, palette[i])
+                group_label_map.setdefault(value, value)
+        else:
+            present = set(summary["Condition"].dropna().astype(str).tolist())
+            group_order = [
+                str(cond.name) for cond in ctx.experiment.condition_list
+                if str(cond.name) in present
+            ]
+            if len(group_order) == 0:
+                group_order = [str(cond.name) for cond in ctx.experiment.condition_list]
+            group_color_map = {str(cond.name): cond.color for cond in ctx.experiment.condition_list}
+            group_label_map = _condition_label_map(ctx.experiment)
+
+        n_groups = max(1, len(group_order))
+        if n_groups == 1:
+            offsets = np.array([0.0], dtype=float)
+        else:
+            span = min(0.32, max(0.14, 0.055 * n_groups))
+            offsets = np.linspace(-span, span, n_groups)
+        if show_stats_summary or title or subtitle or footer:
+            fig = plt.figure(figsize=(14.22, 8.0), facecolor="white")
+            ax = fig.add_axes([0.075, 0.255, 0.59 if show_stats_summary else 0.84, 0.56])
+            try:
+                from PyFLASH.layout import mark_manual_layout
+                mark_manual_layout(fig)
+            except Exception:
+                pass
+        else:
+            fig, ax = plt.subplots(figsize=(max(6.0, n_groups * 1.2 + 4.2), 5.8))
+        state["fig"] = fig
+        state["ax"] = ax
+        state["group_order"] = group_order
+        state["group_index_map"] = {str(name): idx for idx, name in enumerate(group_order)}
+        state["group_offsets"] = {idx: float(offsets[idx]) for idx in range(len(group_order))}
+        state["denominator_x"] = 0.0
+        state["numerator_x"] = 1.0
+        state["group_color_map"] = group_color_map
+        state["group_label_map"] = {str(k): str(v) for k, v in group_label_map.items()}
+        state["ratio_raw_by_index"] = {}
+        state["ratio_analysis_by_index"] = {}
+        state["peak_summary_rows"] = []
+        state["peak_plot_values"] = []
+        _init_progress_state(state, func_name="plot_paired_ratio", total=1)
+        _progress_start_item(state, metric_label)
+
+    def teardown(ctx, state, results):
+        fig = state["fig"]
+        ax = state["ax"]
+        group_order = state.get("group_order", [])
+        group_label_map = state.get("group_label_map", {})
+        stats_payload = _paired_ratio_compute_stats(
+            state,
+            comparisons=comparisons,
+            pairwise_correction=pairwise_correction,
+            ratio_test=ratio_test,
+            posthoc=posthoc,
+            variance_test=variance_test,
+            variance_alpha=variance_alpha,
+            n_permutations=n_permutations,
+            random_state=random_state,
+            alpha=alpha,
+            ci=ci,
+            log_transform=bool(log_transform),
+            metric_label=metric_label,
+            experiment=experiment,
+            factor=factor,
+        )
+        comparison_rows = _paired_ratio_visible_comparison_rows(
+            stats_payload.get("pairwise"),
+            alpha=alpha,
+            show_ns=bool(show_ns),
+            max_items=comparison_max_items,
+        ) if show_comparisons else pd.DataFrame()
+
+        peak_summary = pd.DataFrame(state.get("peak_summary_rows", []))
+        with column_label_overrides(label_overrides):
+            endpoint_labels = [
+                get_display_name(denominator_col, minimal=True),
+                get_display_name(numerator_col, minimal=True),
+            ]
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(endpoint_labels)
+        ax.set_xlim(-0.38, 1.38)
+        if log_transform:
+            ax.set_yscale("log")
+        default_y_label = "Paired value (log scale)" if log_transform else "Paired value"
+        ax.set_ylabel(
+            str(y_label) if y_label is not None else default_y_label,
+            fontsize=14,
+            labelpad=10,
+        )
+
+        y_values = pd.to_numeric(
+            pd.Series(state.get("peak_plot_values", [])),
+            errors="coerce",
+        ).dropna()
+        y_values = [float(v) for v in y_values if np.isfinite(v)]
+        if y_values:
+            if log_transform:
+                positive = [v for v in y_values if v > 0]
+                if positive:
+                    lower = min(positive) / 1.35
+                    upper = max(positive) * 1.35
+                    if lower <= 0 or not np.isfinite(lower):
+                        lower = min(positive) * 0.5
+                    ax.set_ylim(lower, upper if upper > lower else lower * 2.0)
+            else:
+                lower = min(y_values)
+                upper = max(y_values)
+                span = upper - lower
+                pad = 0.10 * span if span > 0 else 0.1 * max(abs(upper), 1.0)
+                ax.set_ylim(lower - pad, upper + pad)
+        if y_range is not None:
+            if not isinstance(y_range, (list, tuple)) or len(y_range) != 2:
+                raise ValueError("y_range must be a two-item (minimum, maximum) sequence.")
+            ymin_set, ymax_set = y_range
+            current = ax.get_ylim()
+            ax.set_ylim(current[0] if ymin_set is None else float(ymin_set),
+                        current[1] if ymax_set is None else float(ymax_set))
+        if ymin is not None or ymax is not None:
+            current = ax.get_ylim()
+            ax.set_ylim(current[0] if ymin is None else float(ymin),
+                        current[1] if ymax is None else float(ymax))
+        explicit_upper = ymax is not None
+        if y_range is not None and isinstance(y_range, (list, tuple)) and len(y_range) == 2:
+            explicit_upper = explicit_upper or y_range[1] is not None
+        if not comparison_rows.empty and not explicit_upper:
+            lower, upper = ax.get_ylim()
+            if log_transform and lower > 0 and upper > lower:
+                ax.set_ylim(lower, upper * (1.10 + 0.08 * max(0, len(comparison_rows) - 1)))
+            elif upper > lower:
+                span = upper - lower
+                ax.set_ylim(lower, upper + span * (0.12 + 0.06 * max(0, len(comparison_rows) - 1)))
+
+        if log_transform:
+            lower, upper = ax.get_ylim()
+            tick_candidates = [
+                1, 2, 5, 10, 20, 30, 50, 75, 100, 150, 250, 400, 650,
+                1000, 1500, 2500, 4000, 6500, 10000,
+            ]
+            ticks = [tick for tick in tick_candidates if lower <= tick <= upper]
+            if len(ticks) >= 3:
+                ax.set_yticks(ticks)
+                ax.set_yticklabels([
+                    f"{int(tick)}" if float(tick).is_integer() else f"{tick:g}"
+                    for tick in ticks
+                ])
+            else:
+                ax.yaxis.set_major_formatter(
+                    FuncFormatter(lambda y, _pos: _format_side_stats_value(y, digits=3))
+                )
+        else:
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+
+        ax.tick_params(axis="x", labelsize=14, pad=10, length=7)
+        ax.tick_params(axis="y", labelsize=12, length=6)
+        ax.grid(axis="y", which="major", color="#D9D9D9", linewidth=0.8, alpha=0.75)
+        ax.set_axisbelow(True)
+        if not comparison_rows.empty:
+            _paired_ratio_annotate_comparisons(
+                ax,
+                comparison_rows,
+                group_color_map=state.get("group_color_map", {}),
+                alpha=alpha,
+            )
+
+        try:
+            from matplotlib.lines import Line2D
+            handles = []
+            if show_legend:
+                for group_key in group_order:
+                    group_key = str(group_key)
+                    label = group_label_map.get(group_key, group_key)
+                    color = state.get("group_color_map", {}).get(group_key, "black")
+                    handles.append(
+                        Line2D(
+                            [0],
+                            [0],
+                            color=color,
+                            marker="o",
+                            markersize=7,
+                            linewidth=2.8,
+                            label=label,
+                        )
+                    )
+            if handles:
+                ax.legend(
+                    handles=handles,
+                    loc="lower left",
+                    bbox_to_anchor=(0.0, 1.02),
+                    ncol=min(3, len(handles)),
+                    frameon=False,
+                    fontsize=10.5,
+                    handlelength=1.5,
+                    columnspacing=0.9,
+                    borderaxespad=0.0,
+                )
+        except Exception:
+            pass
+
+        scale_label = "log ratio test" if log_transform else "raw ratio test"
+        if title:
+            fig.suptitle(
+                str(title),
+                x=0.055,
+                y=0.975,
+                ha="left",
+                fontsize=22,
+                fontweight="bold",
+                color="#111111",
+            )
+        elif not (show_stats_summary or subtitle or footer):
+            ax.set_title(f"{metric_label} paired endpoints ({scale_label})", fontweight="normal")
+        if subtitle:
+            fig.text(0.055, 0.895, str(subtitle), fontsize=12.5, color="#404040")
+        if footer:
+            if str(footer).strip().casefold() == "auto":
+                footer_lines = [
+                    "Each thin line is one participant; large points are group means +/- 95% CI.",
+                    f"Overall test: {stats_payload.get('test_name', 'group test')}. Pairwise method: {stats_payload.get('posthoc') or posthoc}.",
+                ]
+            elif isinstance(footer, str):
+                footer_lines = [footer]
+            else:
+                try:
+                    footer_lines = [str(line) for line in footer if str(line).strip()]
+                except TypeError:
+                    footer_lines = [str(footer)]
+            footer_y = 0.11
+            for idx, line in enumerate(footer_lines):
+                fig.text(
+                    0.075,
+                    footer_y - idx * 0.038,
+                    line,
+                    fontsize=10.8 if idx == 0 else max(9.6, 10.2 - 0.3 * idx),
+                    color="#4A4A4A" if idx == 0 else "#666666",
+                )
+
+        if show_stats_summary:
+            lines = []
+            if stats_summary_title:
+                lines.append(str(stats_summary_title))
+            if primary_comparison is not None:
+                pairwise = stats_payload.get("pairwise")
+                primary, _remaining = _paired_ratio_select_pairwise_row(
+                    pairwise,
+                    primary_comparison=primary_comparison,
+                )
+                if primary is not None:
+                    primary_effect_label = (
+                        "ratio"
+                        if str(primary.get("effect_label", "")) == "ratio_of_ratios"
+                        else "difference"
+                    )
+                    lines.append(
+                        (
+                            f"Primary {primary.get('direction', primary_comparison)}: "
+                            f"{primary_effect_label}={_format_side_stats_value(primary.get('effect'))}"
+                            f" [{_format_side_stats_value(primary.get('ci_low'))}, "
+                            f"{_format_side_stats_value(primary.get('ci_high'))}], "
+                            f"p={_format_side_stats_pvalue(primary.get('p_adj', primary.get('p_raw')))}"
+                        )
+                    )
+            lines.extend(
+                _paired_ratio_stats_lines(
+                    stats_payload,
+                    alpha=alpha,
+                    max_items=stats_summary_max_items,
+                )
+            )
+            for section_title, section_lines in _paired_ratio_normalize_extra_sections(stats_summary_extra):
+                if section_title:
+                    lines.append(str(section_title))
+                lines.extend(section_lines)
+            _annotate_stats_detail_text(ax, lines, x=1.04, y=0.88)
+        sns.despine(trim=False, ax=ax)
+
+        subfolder, suffix = build_subfolder(
+            plot_type="Paired Ratio",
+            factor=factor,
+            specificity=specificity,
+            aliases=getattr(experiment, "aliases", None),
+            roi_base=_roi_base,
+            multi_roi=_multi_roi,
+        )
+        save_base = f"{_artifact_name(numerator_col)}_over_{_artifact_name(denominator_col)}"
+        save_base = f"{save_base}__{'log' if log_transform else 'raw'}_ratio"
+        figure_path = None
+        if save:
+            figure_path = save_fig(
+                fig,
+                experiment.fig_path,
+                save_base + suffix,
+                subfolder=subfolder,
+                verbose=False,
+                save_bbox="fixed" if (show_stats_summary or title or subtitle or footer) else "tight",
+            )
+        stats_path = None
+        if isinstance(stats_payload.get("pairwise"), pd.DataFrame):
+            data_root = getattr(experiment, "data_path", None) or getattr(experiment, "fig_path", None) or "."
+            stats_dir = os.path.join(data_root, subfolder) if subfolder else data_root
+            os.makedirs(stats_dir, exist_ok=True)
+            stats_path = os.path.join(stats_dir, f"{strip_name(save_base + suffix)}__paired_ratio_stats.csv")
+            with open(stats_path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Paired Ratio Summary"])
+            stats_payload["summary"].to_csv(stats_path, mode="a", index=False)
+            with open(stats_path, "a", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow([])
+                writer.writerow(["Paired Endpoint Summary"])
+            peak_summary.to_csv(stats_path, mode="a", index=False)
+            with open(stats_path, "a", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow([])
+                writer.writerow(["Paired Ratio Pairwise Tests"])
+            stats_payload["pairwise"].to_csv(stats_path, mode="a", index=False)
+
+        _paired_ratio_emit_report(stats_payload, metric_label=metric_label)
+        payloads.append({
+            "figure": fig,
+            "figure_path": figure_path,
+            "stats_path": stats_path,
+            "metric": metric_label,
+            "numerator_col": numerator_col,
+            "denominator_col": denominator_col,
+            "log_transform": bool(log_transform),
+            "summary": stats_payload.get("summary"),
+            "peak_summary": peak_summary,
+            "pairwise": stats_payload.get("pairwise"),
+            "overall": {
+                "test": stats_payload.get("test_name"),
+                "statistic": stats_payload.get("overall_statistic"),
+                "p": stats_payload.get("overall_p"),
+                "posthoc": stats_payload.get("posthoc"),
+                "normal": stats_payload.get("normal"),
+                "variance": stats_payload.get("variance"),
+            },
+        })
+        _progress_finish_item(state, metric_label)
+
+    out = run(
+        experiment,
+        over=["columns", "factors" if factor else "conditions"],
+        action=paired_ratio_action,
+        columns=[metric_key],
+        factor=factor,
+        specificity=specificity,
+        setup=setup,
+        teardown=teardown,
+        column_labels=None,
+        numerator_col=numerator_col,
+        denominator_col=denominator_col,
+        log_transform=bool(log_transform),
+        show_points=show_points,
+        show_participant_lines=bool(effective_show_sample_lines),
+        show_ci=show_ci,
+        point_size=effective_point_size,
+        point_alpha=point_alpha,
+        point_jitter=point_jitter,
+        mean_marker_size=mean_marker_size,
+        line_alpha=line_alpha,
+        line_width=effective_line_width,
+        ci=ci,
+        roi_base=_roi_base,
+    )
+
+    try:
+        import sys
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
+    _log.confirm(f"[plot_paired_ratio] Processed {metric_label}")
+
+    payload = payloads[0] if payloads else {"results": out}
+    if return_data:
+        return payload
+    if not save and payload.get("figure") is not None:
+        return payload["figure"]
+    return out
+
 
 def plot_mean_bars(experiment, filtered_columns=None,
                    data_cols=None,
@@ -11861,14 +14361,20 @@ def plot_mean_bars(experiment, filtered_columns=None,
                    specificity=None, filter_by=None, roi=None, comparisons=None,
                    force_nonparametric=False, ns='ns',
                    posthoc='Conover', posthoc_correction='auto',
+                   stats_test='auto', variance_test='brown-forsythe',
+                   variance_alpha=0.05, auto_welch=True,
+                   covariates=None, categorical_covariates=None,
+                   cov_type='HC3', cov_kwds=None,
                    multiple_comparison='One-Way',
                    bottom_ticks=False, bottom_tick_labels=False,
+                   y_range=None, ymin=None, ymax=None, y_padding=0.05,
                    factor=None, split_by=None, save=True,
                    column_strings=None, regex_string=None, exclude='',
                    data_col_contains=None, data_col_regex=None,
                    data_col_exclude=None,
                    save_normality=True, normality_dpi=96,
                    auto_style=None, style_cycle=None, legend=False,
+                   column_labels=None,
                    dry_run=False,
                    conditions=None, condition_col="Condition",
                    factor_cols=None, animal_col="AnimalName",
@@ -11896,6 +14402,17 @@ def plot_mean_bars(experiment, filtered_columns=None,
     The overlaid points keep the historical white-fill/group-outline look by
     default. Set ``point_fill="group"``, ``point_edge="none"``, and tune
     ``point_size``/``point_linewidth`` for filled condition-coloured dots.
+
+    Bars always remain anchored at zero. Use ``y_range=(min, max)`` or the
+    ``ymin``/``ymax`` shortcuts to control the visible axis; explicit limits
+    must include zero. For signed data the automatic lower limit is rounded to
+    sit just below the lowest point/error tip and a zero reference line is drawn.
+
+    Statistics default to ``stats_test="auto"``: normality is checked, then a
+    Brown-Forsythe equal-variance screen routes normal unequal-variance one-way
+    designs to Welch ANOVA/Tamhane and two-group parametric designs to
+    Student's or Welch's t-test. Pass ``stats_test="linear_model"`` with
+    ``covariates=[...]`` for covariate-adjusted group contrasts.
     """
     filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
         filtered_columns=filtered_columns,
@@ -11951,9 +14468,21 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 ns=ns,
                 posthoc=posthoc,
                 posthoc_correction=posthoc_correction,
+                stats_test=stats_test,
+                variance_test=variance_test,
+                variance_alpha=variance_alpha,
+                auto_welch=auto_welch,
+                covariates=covariates,
+                categorical_covariates=categorical_covariates,
+                cov_type=cov_type,
+                cov_kwds=cov_kwds,
                 multiple_comparison=multiple_comparison,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
+                y_range=y_range,
+                ymin=ymin,
+                ymax=ymax,
+                y_padding=y_padding,
                 factor=factor,
                 save=save,
                 column_strings=column_strings,
@@ -11964,6 +14493,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 auto_style=auto_style,
                 style_cycle=style_cycle,
                 legend=legend,
+                column_labels=column_labels,
                 dry_run=dry_run,
             )
         return _queued
@@ -11990,9 +14520,21 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 ns=ns,
                 posthoc=posthoc,
                 posthoc_correction=posthoc_correction,
+                stats_test=stats_test,
+                variance_test=variance_test,
+                variance_alpha=variance_alpha,
+                auto_welch=auto_welch,
+                covariates=covariates,
+                categorical_covariates=categorical_covariates,
+                cov_type=cov_type,
+                cov_kwds=cov_kwds,
                 multiple_comparison=multiple_comparison,
                 bottom_ticks=bottom_ticks,
                 bottom_tick_labels=bottom_tick_labels,
+                y_range=y_range,
+                ymin=ymin,
+                ymax=ymax,
+                y_padding=y_padding,
                 factor=factor,
                 save=save,
                 column_strings=column_strings,
@@ -12003,6 +14545,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 auto_style=auto_style,
                 style_cycle=style_cycle,
                 legend=legend,
+                column_labels=column_labels,
                 dry_run=dry_run,
             )
         return queued_outputs
@@ -12199,6 +14742,9 @@ def plot_mean_bars(experiment, filtered_columns=None,
 
         all_vals = pd.concat(col_dfs) if len(col_dfs) > 0 else pd.Series(dtype=float)
         registry_range = _lookup_axis_registry(experiment, col)
+        resolved_ymin = None
+        resolved_ymax = None
+        signed_axis = False
         if len(all_vals) > 0:
             per_group_tops = []
             for s in col_dfs:
@@ -12212,16 +14758,37 @@ def plot_mean_bars(experiment, filtered_columns=None,
             if registry_range is not None and registry_range[1] is not None:
                 # Respect the registered upper bound so sibling figures line up
                 # even when individual groups don't hit the ceiling.
-                ymax = float(registry_range[1])
+                auto_ymax = float(registry_range[1])
             else:
-                ymax = round_up_to_nearest_5(top_val)
-            if ymax > 0:
-                if registry_range is not None and registry_range[0] is not None:
-                    ax.set_ylim(bottom=float(registry_range[0]), top=ymax)
+                auto_ymax = round_up_to_nearest_5(top_val)
+
+            signed_axis = bool(float(pd.to_numeric(all_vals, errors='coerce').min()) < 0)
+            custom_limits = signed_axis or any(
+                value is not None for value in (y_range, ymin, ymax)
+            )
+            if custom_limits:
+                resolved_ymin, resolved_ymax = _signed_mean_bar_limits(
+                    col_dfs,
+                    auto_ymax=auto_ymax,
+                    registry_range=registry_range,
+                    y_range=y_range,
+                    ymin=ymin,
+                    ymax=ymax,
+                    padding=y_padding,
+                )
+                ax.set_ylim(bottom=resolved_ymin, top=resolved_ymax)
+                if signed_axis:
+                    ax.axhline(0.0, color="0.35", lw=1.25, zorder=1, clip_on=False)
+                    ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
                 else:
-                    ax.set_ylim(ymax=ymax)
-                # Keep top major tick exactly at ymax so the top-left tick cap
-                # is present consistently across columns.
+                    ax.yaxis.set_major_locator(LinearLocator(numticks=5))
+            elif auto_ymax > 0:
+                resolved_ymax = auto_ymax
+                if registry_range is not None and registry_range[0] is not None:
+                    ax.set_ylim(bottom=float(registry_range[0]), top=auto_ymax)
+                else:
+                    ax.set_ylim(ymax=auto_ymax)
+                # This is the untouched positive-only rendering path.
                 ax.yaxis.set_major_locator(LinearLocator(numticks=5))
 
         marker_name = col.split('_')[0] if '_' in col else col
@@ -12261,6 +14828,8 @@ def plot_mean_bars(experiment, filtered_columns=None,
             else:
                 group_colors = None
             stats_error = None
+            model_group_col = factor if factor else "Condition"
+            model_source_df = ctx.summary
             _sc_key = (
                 stats_cache_key(
                     col,
@@ -12271,6 +14840,13 @@ def plot_mean_bars(experiment, filtered_columns=None,
                         "multiple_comparison": multiple_comparison,
                         "posthoc": posthoc,
                         "posthoc_correction": posthoc_correction,
+                        "stats_test": stats_test,
+                        "variance_test": variance_test,
+                        "variance_alpha": variance_alpha,
+                        "auto_welch": bool(auto_welch),
+                        "covariates": tuple(covariates) if isinstance(covariates, (list, tuple)) else covariates,
+                        "categorical_covariates": tuple(categorical_covariates) if isinstance(categorical_covariates, (list, tuple)) else categorical_covariates,
+                        "cov_type": cov_type,
                     },
                 )
                 if ordered_keys else None
@@ -12288,9 +14864,20 @@ def plot_mean_bars(experiment, filtered_columns=None,
                     force_nonparametric=force_nonparametric,
                     posthoc=posthoc,
                     posthoc_correction=posthoc_correction,
+                    stats_test=stats_test,
+                    variance_test=variance_test,
+                    variance_alpha=variance_alpha,
+                    auto_welch=auto_welch,
+                    model_df=model_source_df,
+                    model_group_col=model_group_col,
+                    model_value_col=col,
+                    covariates=covariates,
+                    categorical_covariates=categorical_covariates,
+                    cov_type=cov_type,
+                    cov_kwds=cov_kwds,
                     multiple_comparison=multiple_comparison,
                     ns=ns,
-                    max_override=ymax if len(all_vals) > 0 else None,
+                    max_override=resolved_ymax if len(all_vals) > 0 else None,
                     group_labels=ordered_keys if len(ordered_keys) > 0 else None,
                     group_positions=group_positions,
                     group_colors=group_colors,
@@ -12326,12 +14913,30 @@ def plot_mean_bars(experiment, filtered_columns=None,
                     writer.writerow([col, spec_str, stats_error])
 
             # Keep top tick aligned with the top of the y-axis.
-            if len(all_vals) > 0 and ymax > 0:
-                ax.set_ylim(ymax=ymax)
-                ax.yaxis.set_major_locator(LinearLocator(numticks=5))
+            if len(all_vals) > 0 and resolved_ymax is not None:
+                if resolved_ymin is not None:
+                    ax.set_ylim(bottom=resolved_ymin, top=resolved_ymax)
+                else:
+                    ax.set_ylim(ymax=resolved_ymax)
+                if signed_axis:
+                    ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+                else:
+                    ax.yaxis.set_major_locator(LinearLocator(numticks=5))
 
         if save:
-            save_fig(fig, experiment.fig_path, _artifact_name(col) + suffix, subfolder=subfolder, verbose=False)
+            # Mean bars deliberately use a compact, group-scaled canvas
+            # (2/3 inch per group). The global fixed export width would stretch
+            # a three-group plot from 2 to 7 inches and make every bar 3.5x
+            # wider. Preserve the authored width while retaining the fixed
+            # 5-inch axes height and the legacy negative-gap spacing.
+            save_fig(
+                fig,
+                experiment.fig_path,
+                _artifact_name(col) + suffix,
+                subfolder=subfolder,
+                verbose=False,
+                save_bbox="tight",
+            )
         saved_columns_log.append(col)
         _progress_finish_item(state, col)
 
@@ -12361,7 +14966,6 @@ def plot_mean_bars(experiment, filtered_columns=None,
 
     # ── Dry-run mode: compute stats without rendering figures ─────────
     if dry_run:
-        from PyFLASH.stats import test_normality as _test_norm
         summary = experiment.summary
         if specificity is not None:
             from PyFLASH.utils import filter_df_by_specificity as _filt
@@ -12387,40 +14991,67 @@ def plot_mean_bars(experiment, filtered_columns=None,
             if len(col_dfs) < 2:
                 rows.append({'Column': col, 'N': int(len(vals)), 'Test': 'N/A', 'PostHoc': 'N/A'})
                 continue
-            normal, _, _ = _test_norm(col_dfs, make_plot=False)
-            if force_nonparametric:
-                normal = False
-            # Determine test without executing (mirrors multipleComparisons logic)
-            if len(col_dfs) == 2:
-                test_name = 'Independent T-Test' if normal else 'Mann-Whitney U'
-            else:
-                if normal:
-                    test_name = 'One-Way ANOVA' if multiple_comparison == 'One-Way' else 'Two-Way ANOVA'
-                else:
-                    test_name = 'Kruskal-Wallis'
-            # Quick p-value
+            comparisons_for_dry = comparisons
             try:
-                if len(col_dfs) == 2:
-                    if normal:
-                        _, p = runITTest(col_dfs[0], col_dfs[1], {}, ns=ns)[:2]
-                        p_val = p[0] if isinstance(p, list) else p
-                    else:
-                        pvals, _, _, _, _ = mwu_multiple_comparisons(col_dfs, ['1-2'], {}, ns=ns)
-                        p_val = pvals[0] if pvals else float('nan')
+                test_name, posthoc_used, _, stats_result = multipleComparisons(
+                    experiment,
+                    col_dfs,
+                    ax=None,
+                    fig=None,
+                    scatter=None,
+                    bar=None,
+                    draw=False,
+                    save_name=None,
+                    comparisons=comparisons_for_dry,
+                    force_nonparametric=force_nonparametric,
+                    posthoc=posthoc,
+                    posthoc_correction=posthoc_correction,
+                    stats_test=stats_test,
+                    variance_test=variance_test,
+                    variance_alpha=variance_alpha,
+                    auto_welch=auto_welch,
+                    model_df=summary,
+                    model_group_col=group_col,
+                    model_value_col=col,
+                    covariates=covariates,
+                    categorical_covariates=categorical_covariates,
+                    cov_type=cov_type,
+                    cov_kwds=cov_kwds,
+                    multiple_comparison=multiple_comparison,
+                    ns=ns,
+                    group_labels=groups,
+                    save_normality=False,
+                )
+                if test_name in {"Student's T-Test", "Welch's T-Test", "Independent T-Test"}:
+                    entry = stats_result.get("Independent T Test")
+                    p_val = entry[1] if entry is not None else float("nan")
+                elif test_name == "Mann-Whitney U":
+                    entry = stats_result.get("Mann-Whitney U")
+                    p_val = entry[1][0] if entry is not None and entry[1] else float("nan")
+                elif test_name == "One-Way ANOVA":
+                    entry = stats_result.get("OWA")
+                    p_val = entry[1] if entry is not None else float("nan")
+                elif test_name == "Welch ANOVA":
+                    entry = stats_result.get("Welch ANOVA")
+                    p_val = entry[1] if entry is not None else float("nan")
+                elif test_name == "Kruskal-Wallis":
+                    entry = stats_result.get("KW")
+                    p_val = entry[1] if entry is not None else float("nan")
+                elif test_name == "Linear Model":
+                    entry = stats_result.get("Linear Model")
+                    p_val = entry[1] if entry is not None else float("nan")
                 else:
-                    from scipy.stats import kruskal, f_oneway as _fow
-                    if normal:
-                        _, p_val = _fow(*col_dfs)
-                    else:
-                        _, p_val = kruskal(*col_dfs)
+                    p_val = float("nan")
             except Exception:
+                test_name = "Error"
+                posthoc_used = "Error"
                 p_val = float('nan')
             rows.append({
                 'Column': col,
                 'N': int(len(vals)),
                 'Groups': len(col_dfs),
-                'Normal': normal,
                 'Test': test_name,
+                'PostHoc': posthoc_used,
                 'p_value': float(p_val) if not isinstance(p_val, list) else float(p_val[0]),
             })
         df_out = pd.DataFrame(rows)
@@ -12434,6 +15065,7 @@ def plot_mean_bars(experiment, filtered_columns=None,
             experiment, over=['columns', inner],
             action=bar_chart_action,
             columns=resolved_columns, factor=factor,
+            column_labels=column_labels,
             specificity=specificity,
             setup=setup, teardown=teardown,
             points=points, normalize=normalize,
@@ -12470,6 +15102,1071 @@ def plot_mean_bars(experiment, filtered_columns=None,
     except Exception:
         pass
     return out
+
+
+def _resolve_baseline_columns(columns):
+    """Normalize the explicit baseline-table field mapping."""
+    if columns is None:
+        raise ValueError(
+            "plot_baseline_characteristics requires an explicit columns mapping "
+            "with age, sex, and sleep_treatment keys."
+        )
+    if isinstance(columns, Mapping):
+        aliases = {
+            "age": "age",
+            "age_column": "age",
+            "sex": "sex",
+            "sex_column": "sex",
+            "sleep": "sleep_treatment",
+            "sleep_treatment": "sleep_treatment",
+            "sleep_treatment_column": "sleep_treatment",
+            "sleeptreatment": "sleep_treatment",
+        }
+        resolved = {}
+        for key, value in columns.items():
+            canonical = aliases.get(str(key).strip().lower().replace("-", "_"))
+            if canonical is None:
+                raise ValueError(
+                    "Unknown baseline field {!r}; supported fields are age, sex, "
+                    "and sleep_treatment.".format(key)
+                )
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Baseline column for {canonical!r} must be a non-empty string.")
+            resolved[canonical] = value.strip()
+    elif isinstance(columns, (list, tuple, np.ndarray, pd.Index)) and not isinstance(columns, str):
+        if len(columns) != 3:
+            raise ValueError(
+                "A baseline columns sequence must contain exactly three entries "
+                "in age, sex, sleep_treatment order."
+            )
+        if not all(isinstance(value, str) and value.strip() for value in columns):
+            raise ValueError("Baseline columns sequence entries must be non-empty strings.")
+        resolved = {
+            "age": columns[0].strip(),
+            "sex": columns[1].strip(),
+            "sleep_treatment": columns[2].strip(),
+        }
+    else:
+        raise TypeError(
+            "columns must be a mapping with age/sex/sleep_treatment keys or "
+            "a three-item sequence in that order."
+        )
+    missing = {"age", "sex", "sleep_treatment"} - set(resolved)
+    if missing:
+        raise ValueError(
+            "Missing baseline field(s): {}. Provide age, sex, and sleep_treatment explicitly."
+            .format(", ".join(sorted(missing)))
+        )
+    return resolved
+
+
+def _baseline_group_order(summary, factor, groups, experiment):
+    """Resolve stable displayed factor levels for a baseline table."""
+    if factor is None:
+        return []
+    if factor not in summary.columns:
+        raise ValueError(f"Baseline factor column {factor!r} was not found in the summary.")
+    observed = list(summary[factor].dropna().unique())
+    observed_by_text = {str(value): value for value in observed}
+    if groups is not None:
+        requested = [str(value) for value in groups]
+        if len(requested) == 0:
+            raise ValueError("groups must contain at least one factor level when provided.")
+        return requested
+
+    ordered = []
+    categorical = summary[factor]
+    if isinstance(categorical.dtype, pd.CategoricalDtype):
+        ordered.extend(
+            [str(value) for value in categorical.cat.categories if str(value) in observed_by_text]
+        )
+    for condition in getattr(experiment, "condition_list", []) or []:
+        condition_name = str(getattr(condition, "name", condition))
+        for value in observed:
+            value_text = str(value)
+            if value_text not in ordered and (
+                value_text == condition_name or value_text in condition_name
+            ):
+                ordered.append(value_text)
+    for value in observed:
+        value_text = str(value)
+        if value_text not in ordered:
+            ordered.append(value_text)
+    return ordered
+
+
+def _baseline_positive_sleep_mask(series, positive_values=None):
+    """Return a robust boolean mask for a participant sleep-treatment field."""
+    if positive_values is None:
+        positive_values = (1, True, "1", "true", "yes", "y", "treated")
+    if isinstance(positive_values, (str, bytes)) or not isinstance(positive_values, (list, tuple, set, np.ndarray, pd.Index)):
+        positive_values = (positive_values,)
+    numeric_positive = set()
+    text_positive = set()
+    for value in positive_values:
+        try:
+            numeric_value = float(value)
+            if np.isfinite(numeric_value):
+                numeric_positive.add(numeric_value)
+        except (TypeError, ValueError):
+            pass
+        text_positive.add(str(value).strip().casefold())
+    numeric = pd.to_numeric(series, errors="coerce")
+    text = series.astype("string").str.strip().str.casefold()
+    return numeric.isin(numeric_positive) | text.isin(text_positive)
+
+
+_SIGNIFICANCE_AUDIT_LABEL_CANDIDATES = (
+    "display_label",
+    "metric_label",
+    "metric",
+    "marker",
+    "column",
+    "outcome",
+    "dependent_variable",
+    "variable",
+    "feature",
+    "measure",
+    "name",
+)
+
+_SIGNIFICANCE_AUDIT_ID_NAMES = {
+    "id",
+    "source",
+    "source_column",
+    "display_label",
+    "metric_label",
+    "metric",
+    "marker",
+    "column",
+    "outcome",
+    "dependent_variable",
+    "variable",
+    "feature",
+    "measure",
+    "name",
+    "category",
+    "group",
+    "contrast",
+    "comparison",
+    "test",
+    "method",
+    "alpha",
+    "n",
+    "count",
+    "n_left",
+    "n_right",
+}
+
+
+def _load_significance_audit_table(experiment=None, audit_table=None, path=None):
+    """Resolve a generic audit table from a DataFrame, CSV path, or experiment."""
+    source = audit_table
+    source_path = path
+    if source is None and source_path is None:
+        if isinstance(experiment, pd.DataFrame):
+            source = experiment
+            experiment = None
+        elif isinstance(experiment, (str, os.PathLike)):
+            source_path = experiment
+            experiment = None
+        elif hasattr(experiment, "summary"):
+            source = experiment.summary
+
+    if source is None and source_path is not None:
+        source_path = os.fspath(source_path)
+        source = pd.read_csv(source_path)
+    elif isinstance(source, (str, os.PathLike)):
+        source_path = os.fspath(source)
+        source = pd.read_csv(source_path)
+
+    if source is None:
+        raise ValueError("Provide audit_table=, path=, a pandas DataFrame, or an experiment with .summary.")
+    if not isinstance(source, pd.DataFrame):
+        source = pd.DataFrame(source)
+    if source.empty:
+        raise ValueError("The significance audit table is empty.")
+    return source.copy(), source_path
+
+
+def _coerce_pvalue_series(series):
+    """Coerce numeric and simple '<0.001' style p-value strings to floats."""
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    text = series.astype("string").str.strip()
+    text = text.str.replace(",", "", regex=False)
+    text = text.str.replace("p=", "", regex=False)
+    text = text.str.replace("P=", "", regex=False)
+    text = text.str.replace("<", "", regex=False)
+    text = text.str.replace(">", "", regex=False)
+    return pd.to_numeric(text, errors="coerce")
+
+
+def _looks_like_pvalue_column(series):
+    values = _coerce_pvalue_series(series).dropna()
+    if len(values) == 0:
+        return False
+    return bool(((values >= 0.0) & (values <= 1.0)).all())
+
+
+def _resolve_significance_audit_columns(df, row_label_col=None, pvalue_cols=None, id_cols=None):
+    """Resolve row-label and p-value columns without baking in a dataset shape."""
+    id_set = set()
+    if id_cols is not None:
+        if isinstance(id_cols, (str, bytes)):
+            id_set.add(str(id_cols))
+        else:
+            id_set.update(str(c) for c in id_cols)
+
+    if row_label_col is not None:
+        if row_label_col not in df.columns:
+            raise ValueError(f"row_label_col {row_label_col!r} was not found in the audit table.")
+        row_label = row_label_col
+    else:
+        lower_map = {str(c).strip().casefold(): c for c in df.columns}
+        row_label = None
+        for candidate in _SIGNIFICANCE_AUDIT_LABEL_CANDIDATES:
+            if candidate.casefold() in lower_map:
+                row_label = lower_map[candidate.casefold()]
+                break
+        if row_label is None:
+            for col in df.columns:
+                if col in id_set:
+                    continue
+                if not _looks_like_pvalue_column(df[col]):
+                    row_label = col
+                    break
+
+    if row_label is not None:
+        id_set.add(str(row_label))
+
+    if pvalue_cols is not None:
+        if isinstance(pvalue_cols, (str, bytes)):
+            requested = [pvalue_cols]
+        else:
+            requested = list(pvalue_cols)
+        missing = [str(c) for c in requested if c not in df.columns]
+        if missing:
+            raise ValueError(f"pvalue_cols not found in the audit table: {', '.join(missing)}")
+        resolved = requested
+    else:
+        resolved = []
+        for col in df.columns:
+            col_text = str(col)
+            col_key = col_text.strip().casefold()
+            if col_text in id_set or col_key in _SIGNIFICANCE_AUDIT_ID_NAMES:
+                continue
+            if _looks_like_pvalue_column(df[col]):
+                resolved.append(col)
+
+    if len(resolved) == 0:
+        raise ValueError(
+            "No p-value columns were resolved. Pass pvalue_cols= explicitly, or "
+            "provide numeric columns whose finite values fall between 0 and 1."
+        )
+    return row_label, resolved
+
+
+def _significance_audit_column_labels(columns, column_labels=None):
+    if column_labels is None:
+        return {col: str(col) for col in columns}
+    if isinstance(column_labels, Mapping):
+        return {col: str(column_labels.get(col, column_labels.get(str(col), col))) for col in columns}
+    labels = list(column_labels)
+    if len(labels) != len(columns):
+        raise ValueError("column_labels must match the number of plotted p-value columns.")
+    return {col: str(label) for col, label in zip(columns, labels)}
+
+
+def _format_significance_audit_p(value, value_format="p"):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(value):
+        return ""
+    if callable(value_format):
+        return str(value_format(value))
+    fmt = str(value_format).strip()
+    if fmt in {"", "p"}:
+        if value < 0.001:
+            return "<0.001"
+        return f"{value:.3f}"
+    try:
+        if "{" in fmt:
+            return fmt.format(value)
+        return format(value, fmt)
+    except Exception:
+        return f"{value:.3f}"
+
+
+def _significance_audit_display_table(df, row_label_col, pvalue_cols, column_labels, value_format):
+    records = []
+    for idx, row in df.iterrows():
+        label = str(row[row_label_col]) if row_label_col is not None else str(idx)
+        record = {"row_label": label}
+        for col in pvalue_cols:
+            p_value = _coerce_pvalue_series(pd.Series([row[col]])).iloc[0]
+            record[col] = p_value
+            record[f"{col}__display"] = _format_significance_audit_p(p_value, value_format)
+            record[f"{col}__label"] = column_labels[col]
+        records.append(record)
+    return records
+
+
+def _emit_significance_audit_records(records, pvalue_cols, column_labels, *, alpha, source_path=None, title=None):
+    try:
+        import PyFLASH.report as report
+        if not report.is_active():
+            return
+        for record in records:
+            metric = record.get("row_label")
+            for col in pvalue_cols:
+                p_value = record.get(col)
+                if p_value is None or not np.isfinite(p_value):
+                    continue
+                report.emit({
+                    "kind": "significance_audit",
+                    "metric": metric,
+                    "profile": column_labels[col],
+                    "column": str(col),
+                    "p": float(p_value),
+                    "alpha": float(alpha),
+                    "significant": bool(float(p_value) < float(alpha)),
+                    "source_path": str(source_path) if source_path else None,
+                    "title": title,
+                })
+    except Exception:
+        return
+
+
+def _significance_audit_table_figure(records, pvalue_cols, column_labels, *,
+                                     alpha=0.05, title="Significance audit",
+                                     subtitle=None, figsize=None):
+    from PyFLASH.layout import mark_manual_layout
+
+    n_rows = len(records)
+    n_cols = len(pvalue_cols)
+    if figsize is None:
+        width = max(8.0, min(18.0, 3.0 + 0.58 * n_cols + 0.10 * max(0, n_cols - 8)))
+        height = max(3.5, min(12.0, 2.35 + 0.34 * max(1, n_rows)))
+        figsize = (width, height)
+    fig = plt.figure(figsize=figsize, facecolor="white")
+    mark_manual_layout(fig)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+
+    left, right = 0.045, 0.965
+    text = "#20242a"
+    muted = "#68707a"
+    rule = "#000000"
+    title_fs = 18
+    subtitle_fs = 11.5
+    header_fs = max(8.0, min(12.5, 150.0 / max(10, n_cols)))
+    body_fs = max(7.0, min(12.0, 145.0 / max(11, n_cols)))
+    label_fs = max(8.5, min(12.0, 0.96 * body_fs + 1.0))
+    foot_fs = 10.5
+
+    ax.text(left, 0.955, title, ha="left", va="top", fontsize=title_fs,
+            fontweight="bold", color=text)
+    if subtitle:
+        ax.text(left, 0.895, subtitle, ha="left", va="top",
+                fontsize=subtitle_fs, color=muted)
+
+    top_rule_y = 0.805
+    header_rule_y = 0.705
+    bottom_rule_y = 0.245
+    ax.plot([left, right], [top_rule_y, top_rule_y], color=rule, lw=2.6, solid_capstyle="butt")
+    ax.plot([left, right], [header_rule_y, header_rule_y], color=rule, lw=1.4, solid_capstyle="butt")
+    ax.plot([left, right], [bottom_rule_y, bottom_rule_y], color=rule, lw=1.4, solid_capstyle="butt")
+
+    label_width = min(0.38, max(0.22, 0.52 - 0.012 * n_cols))
+    value_width = (right - left - label_width) / max(1, n_cols)
+    centers = [left + label_width + value_width * (i + 0.5) for i in range(n_cols)]
+    ax.text(left, 0.755, "Metric", ha="left", va="center",
+            fontsize=12.5, fontweight="bold", color=text)
+    for center, col in zip(centers, pvalue_cols):
+        label = column_labels[col]
+        rotation = 0 if n_cols <= 8 else 35
+        ha = "center" if rotation == 0 else "right"
+        ax.text(center, 0.755, label, ha=ha, va="center",
+                rotation=rotation, rotation_mode="anchor",
+                fontsize=header_fs, fontweight="bold", color=text)
+
+    if n_rows:
+        row_y = np.linspace(0.64, 0.34, n_rows)
+    else:
+        row_y = []
+    for y, record in zip(row_y, records):
+        ax.text(left, y, str(record["row_label"]), ha="left", va="center",
+                fontsize=label_fs, color=text)
+        for center, col in zip(centers, pvalue_cols):
+            p_value = record.get(col)
+            sig = p_value is not None and np.isfinite(p_value) and float(p_value) < float(alpha)
+            ax.text(center, y, record.get(f"{col}__display", ""), ha="center", va="center",
+                    fontsize=body_fs, fontweight="bold" if sig else "normal",
+                    color=text if sig else muted)
+
+    ax.text(left, 0.155, f"Bold values are raw p < {float(alpha):g}.",
+            ha="left", va="top", fontsize=foot_fs, color=muted)
+    return fig
+
+
+def _significance_audit_matrix_figure(records, pvalue_cols, column_labels, *,
+                                      alpha=0.05, title="Significance audit",
+                                      subtitle=None, value_format="p",
+                                      figsize=None):
+    from PyFLASH.layout import mark_manual_layout
+
+    n_rows = len(records)
+    n_cols = len(pvalue_cols)
+    if figsize is None:
+        width = max(7.0, min(18.0, 2.6 + 0.64 * n_cols))
+        height = max(4.2, min(13.0, 2.8 + 0.55 * max(1, n_rows)))
+        figsize = (width, height)
+    fig, ax = plt.subplots(figsize=figsize, facecolor="white")
+    mark_manual_layout(fig)
+    matrix = np.full((n_rows, n_cols), np.nan, dtype=float)
+    for i, record in enumerate(records):
+        for j, col in enumerate(pvalue_cols):
+            value = record.get(col)
+            if value is not None and np.isfinite(value):
+                matrix[i, j] = 1.0 if float(value) < float(alpha) else 0.0
+
+    cmap = ListedColormap(["#eef1f4", "#c84b47"])
+    norm = BoundaryNorm([-0.5, 0.5, 1.5], cmap.N)
+    ax.imshow(matrix, cmap=cmap, norm=norm, aspect="auto")
+    for y in np.arange(-0.5, n_rows, 1):
+        ax.axhline(y, color="white", lw=1.0)
+    for x in np.arange(-0.5, n_cols, 1):
+        ax.axvline(x, color="white", lw=1.0)
+
+    annot_fs = max(7, min(11, int(120 / max(8, n_cols))))
+    for i, record in enumerate(records):
+        for j, col in enumerate(pvalue_cols):
+            p_value = record.get(col)
+            if p_value is None or not np.isfinite(p_value):
+                continue
+            sig = float(p_value) < float(alpha)
+            ax.text(j, i, _format_significance_audit_p(p_value, value_format),
+                    ha="center", va="center", fontsize=annot_fs,
+                    fontweight="bold" if sig else "normal",
+                    color="white" if sig else "#20242a")
+
+    ax.set_xticks(np.arange(n_cols))
+    ax.set_yticks(np.arange(n_rows))
+    ax.set_xticklabels([column_labels[col] for col in pvalue_cols],
+                       rotation=45 if n_cols > 6 else 0,
+                       ha="right" if n_cols > 6 else "center",
+                       rotation_mode="anchor")
+    ax.set_yticklabels([str(r["row_label"]) for r in records])
+    ax.tick_params(axis="both", length=0)
+    ax.set_title(title, pad=22)
+    if subtitle:
+        ax.text(0.5, 1.02, subtitle, transform=ax.transAxes,
+                ha="center", va="bottom", color="#68707a")
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    handles = [
+        plt.Line2D([0], [0], marker="s", color="none", markerfacecolor="#c84b47",
+                   markersize=10, label=f"p < {float(alpha):g}"),
+        plt.Line2D([0], [0], marker="s", color="none", markerfacecolor="#eef1f4",
+                   markersize=10, label="not significant"),
+    ]
+    ax.legend(handles=handles, frameon=False, loc="upper center",
+              bbox_to_anchor=(0.5, -0.16), ncol=2)
+    fig.tight_layout()
+    return fig
+
+
+def plot_significance_audit_table(
+    experiment=None,
+    audit_table=None,
+    path=None,
+    row_label_col=None,
+    pvalue_cols=None,
+    id_cols=None,
+    alpha=0.05,
+    aesthetic="table",
+    title="Significance audit",
+    subtitle=None,
+    column_labels=None,
+    value_format="p",
+    save=True,
+    filename="Significance Audit",
+    specificity=None,
+    filter_by=None,
+    figsize=None,
+):
+    """Render a generic p-value audit table or matrix from precomputed results.
+
+    The function is intentionally dataset-generic: it never assumes a fixed
+    control/model column set. Pass ``pvalue_cols`` for full control, or leave it
+    unset to infer numeric columns whose finite values look like p-values.
+    """
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
+    table, source_path = _load_significance_audit_table(
+        experiment=experiment,
+        audit_table=audit_table,
+        path=path,
+    )
+    if _is_specificity_queue(specificity):
+        queued = {}
+        for spec in _iter_specificities(specificity):
+            queued[spec] = plot_significance_audit_table(
+                experiment=experiment,
+                audit_table=table,
+                row_label_col=row_label_col,
+                pvalue_cols=pvalue_cols,
+                id_cols=id_cols,
+                alpha=alpha,
+                aesthetic=aesthetic,
+                title=title,
+                subtitle=subtitle,
+                column_labels=column_labels,
+                value_format=value_format,
+                save=save,
+                filename=filename,
+                specificity=spec,
+                figsize=figsize,
+            )
+        return queued
+
+    if specificity is not None:
+        table = filter_df_by_specificity(table, specificity)
+        if table.empty:
+            raise ValueError(f"No audit-table rows remain after specificity={specificity!r}.")
+
+    row_label, resolved_pcols = _resolve_significance_audit_columns(
+        table,
+        row_label_col=row_label_col,
+        pvalue_cols=pvalue_cols,
+        id_cols=id_cols,
+    )
+    labels = _significance_audit_column_labels(resolved_pcols, column_labels=column_labels)
+    records = _significance_audit_display_table(
+        table,
+        row_label,
+        resolved_pcols,
+        labels,
+        value_format,
+    )
+    aesthetic_key = str(aesthetic).strip().lower().replace("-", "_")
+    if aesthetic_key not in {"table", "baseline", "baseline_table", "matrix", "heatmap", "map"}:
+        raise ValueError("aesthetic must be 'table' or 'matrix'.")
+
+    _emit_significance_audit_records(
+        records,
+        resolved_pcols,
+        labels,
+        alpha=alpha,
+        source_path=source_path,
+        title=title,
+    )
+
+    if aesthetic_key in {"table", "baseline", "baseline_table"}:
+        fig = _significance_audit_table_figure(
+            records,
+            resolved_pcols,
+            labels,
+            alpha=alpha,
+            title=title,
+            subtitle=subtitle,
+            figsize=figsize,
+        )
+    elif aesthetic_key in {"matrix", "heatmap", "map"}:
+        fig = _significance_audit_matrix_figure(
+            records,
+            resolved_pcols,
+            labels,
+            alpha=alpha,
+            title=title,
+            subtitle=subtitle,
+            value_format=value_format,
+            figsize=figsize,
+        )
+
+    if not save:
+        return fig
+
+    save_root = getattr(experiment, "fig_path", None)
+    if save_root is None:
+        save_root = os.path.dirname(os.fspath(source_path)) if source_path else "."
+    subfolder, suffix = build_subfolder(
+        plot_type="Tables",
+        specificity=specificity,
+        aliases=getattr(experiment, "aliases", None),
+    )
+    path_out = save_fig(
+        fig,
+        save_root,
+        str(filename) + suffix,
+        subfolder=subfolder,
+        verbose=False,
+        save_bbox="tight",
+    )
+    plt.close(fig)
+    return path_out
+
+
+def _resolve_category_column(summary, category):
+    """Case-insensitively resolve a single categorical column name."""
+    if category in summary.columns:
+        return category
+    lut = {str(c).casefold(): c for c in summary.columns}
+    key = str(category).casefold()
+    if key in lut:
+        return lut[key]
+    near = [c for c in summary.columns if key[:4] and key[:4] in str(c).casefold()][:8]
+    raise ValueError(
+        f"category column {category!r} not found in summary. "
+        f"Nearby columns: {', '.join(map(str, near)) or 'none'}"
+    )
+
+
+def _resolve_count_groups(experiment, summary, by, factor):
+    """Return (group_column, ordered group values, {group: display label})."""
+    if factor:
+        if factor not in summary.columns:
+            raise ValueError(f"factor column {factor!r} not found in summary.")
+        series = summary[factor]
+        present = set(series.dropna().tolist())
+        if isinstance(series.dtype, pd.CategoricalDtype):
+            order = [g for g in series.cat.categories if g in present]
+        else:
+            # Order factor levels by first appearance in the condition list
+            # (e.g. Control, MCI, AD), mirroring plot_mean_bars; fall back to
+            # row order for any level not embedded in a condition name.
+            order = []
+            for cond in getattr(experiment, "condition_list", []):
+                match = next((g for g in present if str(g) in str(cond.name)), None)
+                if match is not None and match not in order:
+                    order.append(match)
+            for g in series.dropna().tolist():
+                if g not in order:
+                    order.append(g)
+        return factor, order, {g: str(g) for g in order}
+    present = set(summary["Condition"].dropna().tolist()) if "Condition" in summary.columns else set()
+    order = [c.name for c in getattr(experiment, "condition_list", []) if c.name in present]
+    if not order:
+        order = sorted(present)
+    labels = _condition_label_map(experiment)
+    return "Condition", order, {c: labels.get(str(c), str(c)) for c in order}
+
+
+def _resolve_category_levels(series, category_order):
+    """Order/subset the category levels actually present in the data."""
+    present = set(series.dropna().tolist())
+    if category_order is not None:
+        chosen = [lvl for lvl in category_order if lvl in present]
+        return chosen or list(present)
+    if isinstance(series.dtype, pd.CategoricalDtype):
+        return [lvl for lvl in series.cat.categories if lvl in present]
+    try:
+        return sorted(present)
+    except TypeError:
+        return list(dict.fromkeys(series.dropna().tolist()))
+
+
+def _resolve_category_palette(levels, palette):
+    """Map each category level to a colour (dict override or seaborn palette)."""
+    base = sns.color_palette(
+        palette if isinstance(palette, str) else "Set2", n_colors=max(1, len(levels))
+    )
+    if isinstance(palette, dict):
+        return {lvl: palette.get(lvl, base[i]) for i, lvl in enumerate(levels)}
+    return {lvl: base[i] for i, lvl in enumerate(levels)}
+
+
+@column_label_scope
+def plot_category_counts(experiment, category,
+                         by="conditions", factor=None,
+                         kind="grouped", normalize=False,
+                         category_order=None, category_labels=None,
+                         palette=None, annotate=True, legend=True, column_labels=None,
+                         specificity=None, filter_by=None, roi=None, save=True,
+                         conditions=None, condition_col="Condition",
+                         factor_cols=None, animal_col="AnimalName",
+                         group_list=None, groups=None,
+                         group_col=None, group_cols=None, subject_col=None,
+                         dataframe_kwargs=None):
+    """Grouped or stacked count bars of a categorical metadata column, per group.
+
+    For each group (condition, or level of ``factor``) the number of animals in
+    each level of ``category`` is drawn as a cluster of bars (``kind="grouped"``)
+    or one stacked bar (``kind="stacked"``). Category -> bar colour; group ->
+    x-position. This is the plain frequency companion to the analytic plots —
+    e.g. ``category="meteorological_season", factor="Diagnosis"`` shows how
+    unevenly each diagnosis group is sampled across the year.
+
+    ``normalize=True`` switches raw counts to within-group percentages (each
+    group sums to 100). ``category_order`` orders/subsets the levels;
+    ``category_labels`` maps raw level values to display labels; ``palette`` maps
+    levels to colours (a ``{level: colour}`` dict or a seaborn palette name).
+
+    ``category`` may be a list of columns (one figure each, returned as a dict
+    keyed by column). ``specificity`` and ``roi`` accept the usual single-value
+    and queue forms; a queue returns a dict keyed by the queued value. Counts are
+    a descriptive view (no inferential statistic), so nothing is emitted into the
+    describe layer.
+    """
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by, factor=factor, specificity=specificity,
+        split_by=None, filter_by=filter_by, default_by="conditions",
+    )
+    experiment = coerce_dataframe_input(
+        experiment, conditions=conditions, condition_col=condition_col,
+        factor_cols=factor_cols, animal_col=animal_col, group_list=group_list,
+        groups=groups, group_col=group_col, group_cols=group_cols,
+        subject_col=subject_col, dataframe_kwargs=dataframe_kwargs,
+    )
+
+    # Category-column queue: one figure per column.
+    if isinstance(category, (list, tuple)):
+        return {
+            cat: plot_category_counts(
+                experiment, cat, by=by, factor=factor, kind=kind,
+                normalize=normalize, category_order=category_order,
+                category_labels=category_labels, palette=palette,
+                annotate=annotate, legend=legend, specificity=specificity,
+                roi=roi, save=save,
+            )
+            for cat in category
+        }
+
+    # ROI queue.
+    _roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(_roi_bases) > 1:
+        return {
+            rb: plot_category_counts(
+                experiment, category, by=by, factor=factor, kind=kind,
+                normalize=normalize, category_order=category_order,
+                category_labels=category_labels, palette=palette,
+                annotate=annotate, legend=legend, specificity=specificity,
+                roi=rb, save=save,
+            )
+            for rb in _roi_bases
+        }
+    _roi_base = _roi_bases[0]
+    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+
+    # Specificity queue.
+    if _is_specificity_queue(specificity):
+        return {
+            spec_tuple: plot_category_counts(
+                experiment, category, by=by, factor=factor, kind=kind,
+                normalize=normalize, category_order=category_order,
+                category_labels=category_labels, palette=palette,
+                annotate=annotate, legend=legend, specificity=spec_tuple,
+                roi=_roi_base, save=save,
+            )
+            for spec_tuple in _iter_specificities(specificity)
+        }
+
+    if kind not in ("grouped", "stacked"):
+        raise ValueError("kind must be 'grouped' or 'stacked'.")
+
+    summary = _filtered_summary_for_specificity(experiment, specificity, roi_base=_roi_base)
+    col = _resolve_category_column(summary, category)
+    group_col_name, group_order, group_label_map = _resolve_count_groups(
+        experiment, summary, by, factor,
+    )
+
+    df = summary[[group_col_name, col]].copy()
+    df = df[df[group_col_name].isin(group_order) & df[col].notna()]
+    levels = _resolve_category_levels(df[col], category_order)
+    label_of = {
+        lvl: (category_labels or {}).get(lvl, str(lvl)) for lvl in levels
+    }
+    color_of = _resolve_category_palette(levels, palette)
+
+    counts = (
+        pd.crosstab(df[group_col_name], df[col])
+        .reindex(index=group_order, columns=levels, fill_value=0)
+    )
+    totals = counts.sum(axis=1)
+    values = (
+        counts.div(totals.replace(0, np.nan), axis=0) * 100 if normalize else counts
+    ).fillna(0.0)
+
+    n_groups = len(group_order)
+    n_levels = max(1, len(levels))
+    fig_w = float(np.clip(2.4 + n_groups * n_levels * 0.55, 6.5, 22))
+    fig, ax = plt.subplots(figsize=(fig_w, 6.4))
+    x = np.arange(n_groups)
+    ann_fs = float(np.clip(fig_w * 1.25, 14, 20))
+    halo = [path_effects.withStroke(linewidth=2.4, foreground="white")]
+
+    if kind == "grouped":
+        width = 0.8 / n_levels
+        for k, lvl in enumerate(levels):
+            offs = x + (k - (n_levels - 1) / 2) * width
+            vals = values[lvl].to_numpy(dtype=float)
+            ax.bar(offs, vals, width=width * 0.9, color=color_of[lvl],
+                   label=label_of[lvl], zorder=2)
+            if annotate:
+                for xi, v, raw in zip(offs, vals, counts[lvl].to_numpy()):
+                    if raw > 0:
+                        ax.text(xi, v, f"{v:.0f}%" if normalize else str(int(raw)),
+                                ha="center", va="bottom", fontsize=ann_fs,
+                                fontweight="bold", color="black")
+    else:
+        bottom = np.zeros(n_groups)
+        for lvl in levels:
+            vals = values[lvl].to_numpy(dtype=float)
+            ax.bar(x, vals, bottom=bottom, width=0.68, color=color_of[lvl],
+                   label=label_of[lvl], zorder=2)
+            if annotate:
+                for xi, base, v, raw in zip(x, bottom, vals, counts[lvl].to_numpy()):
+                    if raw > 0:
+                        ax.text(xi, base + v / 2,
+                                f"{v:.0f}%" if normalize else str(int(raw)),
+                                ha="center", va="center", fontsize=ann_fs,
+                                fontweight="bold", color="black", path_effects=halo)
+            bottom += vals
+
+    if not values.size:
+        top = 1.0
+    elif kind == "stacked":
+        top = float(values.sum(axis=1).max())  # tallest stack, not tallest segment
+    else:
+        top = float(values.to_numpy().max())
+    top = top if top > 0 else 1.0
+    headroom = 1.16 if kind == "grouped" else 1.05
+    ax.set_ylim(0, top * headroom + (0.0 if normalize else 0.4))
+    if not normalize:
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [f"{group_label_map.get(g, str(g))}\n(n={int(totals[g])})" for g in group_order]
+    )
+    ax.set_ylabel("Participants (%)" if normalize else "Participants (n)")
+    pretty = get_display_name(col, minimal=True).replace("_", " ").strip()
+    if pretty.islower():
+        pretty = pretty.title()
+    ax.set_title(f"{pretty} by {factor}" if factor else pretty)
+    ax.tick_params(axis="x", length=0)
+    if legend:
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12),
+                  ncol=min(n_levels, 4), frameon=False)
+
+    if save:
+        subfolder, suffix = build_subfolder(
+            plot_type="CategoryCounts", marker=None, factor=factor,
+            specificity=specificity, aliases=getattr(experiment, "aliases", None),
+            roi_base=_roi_base, multi_roi=_multi_roi,
+        )
+        save_name = f"{col} frequency" + ("  pct" if normalize else "")
+        save_fig(fig, experiment.fig_path, save_name + suffix,
+                 subfolder=subfolder, save_bbox="tight")
+    return fig
+
+
+def plot_baseline_characteristics(
+    experiment,
+    columns,
+    factor="Diagnosis",
+    groups=None,
+    specificity=None,
+    filter_by=None,
+    include_all=True,
+    title="Baseline characteristics",
+    figsize=(11.5, 4.6),
+    save=True,
+    roi=None,
+    conditions=None,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    group_list=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
+    dataframe_kwargs=None,
+):
+    """Render a clinical-study baseline table from explicitly named columns.
+
+    ``columns`` must map ``age``, ``sex``, and ``sleep_treatment`` to summary
+    column names, for example ``{"age": "Age", "sex": "Sex",
+    "sleep_treatment": "sleeptreatment"}``. A three-item sequence is accepted
+    in that same order. The table contains one ``All`` column by default and
+    one column per level of ``factor``.
+    """
+    if roi is not None:
+        raise ValueError("plot_baseline_characteristics uses participant-level summary metadata; roi is not applicable.")
+    columns = _resolve_baseline_columns(columns)
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
+    if _is_specificity_queue(specificity):
+        queued = {}
+        for spec_tuple in _iter_specificities(specificity):
+            queued[spec_tuple] = plot_baseline_characteristics(
+                experiment,
+                columns=columns,
+                factor=factor,
+                groups=groups,
+                specificity=spec_tuple,
+                include_all=include_all,
+                title=title,
+                figsize=figsize,
+                save=save,
+                conditions=conditions,
+                condition_col=condition_col,
+                factor_cols=factor_cols,
+                animal_col=animal_col,
+                group_list=group_list,
+                group_col=group_col,
+                group_cols=group_cols,
+                subject_col=subject_col,
+                dataframe_kwargs=dataframe_kwargs,
+            )
+        return queued
+
+    experiment = coerce_dataframe_input(
+        experiment,
+        conditions=conditions,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
+    summary = experiment.summary.copy()
+    if specificity is not None:
+        summary = filter_df_by_specificity(summary, specificity)
+    missing_columns = [name for name in columns.values() if name not in summary.columns]
+    if missing_columns:
+        raise ValueError(
+            "Baseline column(s) not found in the summary: {}. Available columns include: {}"
+            .format(", ".join(missing_columns), ", ".join(map(str, summary.columns[:12])))
+        )
+    group_order = _baseline_group_order(summary, factor, groups, experiment)
+    if len(group_order) == 0 and not include_all:
+        raise ValueError("include_all=False requires at least one observed factor group.")
+    display_columns = (["All"] if include_all else []) + group_order
+
+    def _frame_for_group(group_name):
+        if group_name == "All":
+            return summary
+        return summary[summary[factor].astype(str) == str(group_name)]
+
+    table_rows = []
+    summary_rows = []
+    for group_name in display_columns:
+        frame = _frame_for_group(group_name)
+        n = len(frame)
+        ages = pd.to_numeric(frame[columns["age"]], errors="coerce").dropna().to_numpy(dtype=float)
+        female_n = int(frame[columns["sex"]].astype("string").str.strip().str.casefold().eq("female").sum())
+        male_n = int(frame[columns["sex"]].astype("string").str.strip().str.casefold().eq("male").sum())
+        treated_n = int(_baseline_positive_sleep_mask(frame[columns["sleep_treatment"]]).sum())
+        age_mean = float(np.mean(ages)) if len(ages) else np.nan
+        age_sem = float(np.std(ages, ddof=1) / np.sqrt(len(ages))) if len(ages) > 1 else np.nan
+        summary_rows.append(
+            {
+                "group": group_name,
+                "n": n,
+                "age_mean": age_mean,
+                "age_sem": age_sem,
+                "female_n": female_n,
+                "female_pct": 100.0 * female_n / n if n else np.nan,
+                "male_n": male_n,
+                "male_pct": 100.0 * male_n / n if n else np.nan,
+                "sleep_treatment_n": treated_n,
+                "sleep_treatment_pct": 100.0 * treated_n / n if n else np.nan,
+            }
+        )
+    summary_table = pd.DataFrame(summary_rows).set_index("group")
+
+    def _fmt_number(value, digits=1):
+        return "NA" if not np.isfinite(value) else f"{value:.{digits}f}"
+
+    def _fmt_count_pct(count, pct):
+        return f"{int(count)} (NA)" if not np.isfinite(pct) else f"{int(count)} ({pct:.1f}%)"
+
+    row_specs = [
+        ("Participants, n", lambda row: str(int(row["n"]))),
+        ("Age, years", lambda row: f"{_fmt_number(row['age_mean'])} +/- {_fmt_number(row['age_sem'])}"),
+        ("Female, n (%)", lambda row: _fmt_count_pct(row["female_n"], row["female_pct"])),
+        ("Male, n (%)", lambda row: _fmt_count_pct(row["male_n"], row["male_pct"])),
+        ("Sleep treatment, n (%)", lambda row: _fmt_count_pct(row["sleep_treatment_n"], row["sleep_treatment_pct"])),
+    ]
+
+    fig = plt.figure(figsize=figsize, facecolor="white")
+    from PyFLASH.layout import mark_manual_layout
+    mark_manual_layout(fig)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+    width, height = float(figsize[0]), float(figsize[1])
+    scale = max(0.75, min(1.5, width / 10.0))
+    title_fs = 18.0 * scale
+    header_fs = 12.5 * scale
+    body_fs = 12.0 * scale
+    foot_fs = 10.5 * scale
+    left, right = 0.045, 0.965
+    label_width = 0.39
+    value_width = (right - left - label_width) / max(1, len(display_columns))
+    centers = [left + label_width + value_width * (i + 0.5) for i in range(len(display_columns))]
+    ax.text(left, 0.955, title, ha="left", va="top", fontsize=title_fs, fontweight="bold", color="black")
+    ax.plot([left, right], [0.825, 0.825], color="black", lw=2.6, solid_capstyle="butt")
+    ax.text(left, 0.775, "Characteristic", ha="left", va="center", fontsize=header_fs, fontweight="bold", color="black")
+    for center, group_name in zip(centers, display_columns):
+        group_n = int(summary_table.loc[group_name, "n"])
+        ax.text(
+            center, 0.775, f"{group_name}\n(N = {group_n})",
+            ha="center", va="center", fontsize=header_fs, fontweight="bold", color="black", linespacing=1.15,
+        )
+    ax.plot([left, right], [0.715, 0.715], color="black", lw=1.4, solid_capstyle="butt")
+    row_y = np.linspace(0.65, 0.31, len(row_specs))
+    for y, (label, formatter) in zip(row_y, row_specs):
+        ax.text(left, y, label, ha="left", va="center", fontsize=body_fs, color="black")
+        for center, group_name in zip(centers, display_columns):
+            ax.text(center, y, formatter(summary_table.loc[group_name]), ha="center", va="center", fontsize=body_fs, color="black")
+    ax.plot([left, right], [0.255, 0.255], color="black", lw=1.4, solid_capstyle="butt")
+    ax.text(
+        left, 0.17,
+        "Values are mean +/- SEM unless otherwise indicated; categorical values are n (%).",
+        ha="left", va="top", fontsize=foot_fs, color="#68707A",
+    )
+    ax.text(
+        left, 0.115,
+        f"Columns: age={columns['age']}; sex={columns['sex']}; sleep treatment={columns['sleep_treatment']}.",
+        ha="left", va="top", fontsize=foot_fs, color="#68707A",
+    )
+
+    subfolder, suffix = build_subfolder(
+        plot_type="Tables",
+        factor=factor,
+        specificity=specificity,
+        aliases=getattr(experiment, "aliases", None),
+    )
+    if save:
+        path = save_fig(
+            fig,
+            experiment.fig_path,
+            "Baseline Characteristics" + suffix,
+            subfolder=subfolder,
+            verbose=False,
+            save_bbox="tight",
+        )
+        plt.close(fig)
+        return path
+    return fig
 
 
 def plot_condition_key(experiment, save=True, save_path=None,
@@ -12980,9 +16677,12 @@ def plot_regressions(experiment, x, y,
                      x_range=None, y_range=None,
                      xmin=None, xmax=None, ymin=None, ymax=None,
                      clip_fit_line=True, share_axes=True, margin=0.1,
+                     square=True,
                      auto_style=None, style_cycle=None,
-                     point_size=None, point_alpha=None, point_edge=None,
+                     point_size=None, point_alpha=None, point_fill=None, point_edge=None,
                      point_linewidth=None, line_width=None,
+                     show_stats_summary=True, stats_summary_max_items=12,
+                     column_labels=None,
                      conditions=None, condition_col="Condition",
                      factor_cols=None, animal_col="AnimalName",
                      group_list=None, groups=None,
@@ -13000,6 +16700,18 @@ def plot_regressions(experiment, x, y,
     Set ``marginal_hist=True`` to add a 20-bin x histogram above the scatter
     and a 20-bin y histogram to its right. In combined plots, each group's
     distributions are overlaid using the same colours as its scatter points.
+
+    ``point_fill`` controls the scatter face independently of the automatic
+    condition style. Use ``point_fill="group"`` for filled group-coloured
+    markers or ``point_fill="none"`` for hollow markers.
+
+    Each rendered group gets a colour-matched coefficient/significance line
+    inside the axes. The test name and exact per-group p-values remain in a
+    separate metadata block outside the axes.
+
+    ``square=True`` keeps the physical x- and y-axis lengths equal while
+    preserving their independent data scales. Set it to ``False`` to use the
+    figure's unconstrained axes shape.
 
     Shared axis scales
     ------------------
@@ -13061,11 +16773,14 @@ def plot_regressions(experiment, x, y,
                 marginal_hist=marginal_hist,
                 x_range=x_range, y_range=y_range,
                 clip_fit_line=clip_fit_line, share_axes=share_axes,
-                margin=margin,
+                margin=margin, square=square,
                 auto_style=auto_style, style_cycle=style_cycle,
                 point_size=point_size, point_alpha=point_alpha,
+                point_fill=point_fill,
                 point_edge=point_edge, point_linewidth=point_linewidth,
                 line_width=line_width,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -13147,12 +16862,16 @@ def plot_regressions(experiment, x, y,
                     clip_fit_line=clip_fit_line,
                     share_axes=share_axes,
                     margin=margin,
+                    square=square,
                     auto_style=auto_style, style_cycle=style_cycle,
                     point_size=point_size,
                     point_alpha=point_alpha,
+                    point_fill=point_fill,
                     point_edge=point_edge,
                     point_linewidth=point_linewidth,
                     line_width=line_width,
+                    show_stats_summary=show_stats_summary,
+                    stats_summary_max_items=stats_summary_max_items,
                 )
         return queued_outputs
 
@@ -13167,11 +16886,14 @@ def plot_regressions(experiment, x, y,
                 marginal_hist=marginal_hist,
                 x_range=x_range, y_range=y_range,
                 clip_fit_line=clip_fit_line, share_axes=share_axes,
-                margin=margin,
+                margin=margin, square=square,
                 auto_style=auto_style, style_cycle=style_cycle,
                 point_size=point_size, point_alpha=point_alpha,
+                point_fill=point_fill,
                 point_edge=point_edge, point_linewidth=point_linewidth,
                 line_width=line_width,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
             )
         return queued_outputs
 
@@ -13220,6 +16942,9 @@ def plot_regressions(experiment, x, y,
             state['ax'] = ax
             state['regression_stats_entries'] = []
 
+        if square and state.get('ax') is not None:
+            state['ax'].set_box_aspect(1)
+
     # Margin applies to each spine independently whenever the corresponding
     # bound wasn't pinned by the caller or the axis-limit registry.
     # Normalized axes ([0, 1] / (min, max) / Z-score) benefit from the same
@@ -13251,12 +16976,15 @@ def plot_regressions(experiment, x, y,
                 pad_x_low=pad_x_low, pad_x_high=pad_x_high,
                 pad_y_low=pad_y_low, pad_y_high=pad_y_high,
             )
-            _annotate_regression_stats_summary(
-                ax,
-                state.get('regression_stats_entries', []),
-                test=test,
-                inside=marginal_hist,
-            )
+            _annotate_regression_coefficients(
+                ax, state.get('regression_stats_entries', []), test=test)
+            if show_stats_summary:
+                _annotate_regression_stats_summary(
+                    ax,
+                    state.get('regression_stats_entries', []),
+                    test=test,
+                    max_items=stats_summary_max_items,
+                )
             subfolder, suffix = build_subfolder(
                 plot_type='Regressions',
                 factor=factor, specificity=specificity,
@@ -13264,8 +16992,12 @@ def plot_regressions(experiment, x, y,
                 roi_base=_roi_base, multi_roi=_multi_roi,
             )
             if save:
+                # Regressions are authored square; keep that canvas instead of
+                # the fixed landscape download size (which stretches the plot
+                # box and strands the stats block in a wide right margin).
                 save_fig(fig, experiment.fig_path,
-                         f'{x} vs {y} (Combined) {test_label}' + suffix, subfolder=subfolder)
+                         f'{x} vs {y} (Combined) {test_label}' + suffix,
+                         subfolder=subfolder, save_bbox="tight")
             plt.close(fig)
             return
 
@@ -13277,12 +17009,15 @@ def plot_regressions(experiment, x, y,
             pad_x_low=pad_x_low, pad_x_high=pad_x_high,
             pad_y_low=pad_y_low, pad_y_high=pad_y_high,
         )
-        _annotate_regression_stats_summary(
-            state['ax'],
-            state.get('regression_stats_entries', []),
-            test=test,
-            inside=marginal_hist,
-        )
+        _annotate_regression_coefficients(
+            state['ax'], state.get('regression_stats_entries', []), test=test)
+        if show_stats_summary:
+            _annotate_regression_stats_summary(
+                state['ax'],
+                state.get('regression_stats_entries', []),
+                test=test,
+                max_items=stats_summary_max_items,
+            )
         subfolder, suffix = build_subfolder(
             plot_type='Regressions',
             factor=factor, specificity=specificity,
@@ -13290,13 +17025,17 @@ def plot_regressions(experiment, x, y,
             roi_base=_roi_base, multi_roi=_multi_roi,
         )
         if save:
+            # See combined branch: authored-square canvas, not the fixed
+            # landscape download size.
             save_fig(fig, experiment.fig_path,
-                     f'{x} vs {y} ({name}) {test_label}' + suffix, subfolder=subfolder)
+                     f'{x} vs {y} ({name}) {test_label}' + suffix,
+                     subfolder=subfolder, save_bbox="tight")
         plt.close(fig)
 
     return run(
         experiment, over=level, action=regression_action,
         factor=factor, specificity=specificity,
+        column_labels=column_labels,
         setup=setup, teardown=teardown,
         x=x, y=y, normalize_x=normalize_x, normalize_y=normalize_y, test=test,
         combine=combine, marginal_hist=marginal_hist,
@@ -13304,6 +17043,7 @@ def plot_regressions(experiment, x, y,
         clip_fit_line=clip_fit_line,
         auto_style=auto_style, style_cycle=style_cycle,
         point_size=point_size, point_alpha=point_alpha,
+        point_fill=point_fill,
         point_edge=point_edge, point_linewidth=point_linewidth,
         line_width=line_width,
         roi_base=_roi_base,
@@ -13320,7 +17060,8 @@ def plot_scatter_3d(experiment, x, y, z,
                     point_size=None, size_by=None, size_factor=1.0, alpha=None,
                     elevation=None, azimuth=None,
                     figsize=(10, 8), share_axes=True,
-                    point_edge=None, point_linewidth=None):
+                    point_edge=None, point_linewidth=None,
+                    column_labels=None):
     """
     3D scatter plot: one figure per group/factor, or a combined overlay.
     Supports queued x/y/z inputs:
@@ -13519,6 +17260,7 @@ def plot_scatter_3d(experiment, x, y, z,
     return run(
         experiment, over=level, action=scatter_3d_action,
         factor=factor, specificity=specificity,
+        column_labels=column_labels,
         setup=setup, teardown=teardown,
         x=x, y=y, z=z,
         combine=combine,
@@ -13537,7 +17279,8 @@ def plot_histograms(experiment, marker, x_attr,
                     merge=False, combine=False, invert_x=False, ymax=None, save=True,
                     specificity=None, filter_by=None, roi=None,
                     bin_range=None, bin_edges=None, share_bins=False,
-                    xmin=None, xmax=None, share_axes=True):
+                    xmin=None, xmax=None, share_axes=True,
+                    column_labels=None):
     """
     Histogram: one figure per group/factor, or a combined overlay.
     Supports queued marker/x_attr inputs:
@@ -13745,6 +17488,7 @@ def plot_histograms(experiment, marker, x_attr,
     result = run(
         experiment, over=level, action=histogram_action,
         factor=factor, specificity=specificity,
+        column_labels=column_labels,
         setup=setup, teardown=teardown,
         marker=marker_key, x=x, bins=bins, binwidth=binwidth,
         bin_range=bin_range_norm, bins_spec=bins_spec, ymax=ymax,
@@ -13773,7 +17517,7 @@ def plot_histograms(experiment, marker, x_attr,
 def plot_ridgeline(experiment, marker, x_attr,
                    by='conditions', factor=None,
                    ridge_height=0.85, alpha=0.55,
-                   line_width=1.5, bw_adjust=1.0,
+                   line_width=1.5, bw_adjust=1.0, column_labels=None,
                    save=True, specificity=None, filter_by=None, roi=None,
                    bottom_ticks=True, bottom_tick_labels=True,
                    x_range=None, xmin=None, xmax=None, share_axes=True):
@@ -13994,6 +17738,7 @@ def plot_ridgeline(experiment, marker, x_attr,
     return run(
         experiment, over=level, action=ridgeline_action,
         factor=factor, specificity=specificity,
+        column_labels=column_labels,
         setup=setup, teardown=teardown,
         marker=marker_key,
         x=x,
@@ -14063,7 +17808,7 @@ def ecdf_action(ctx: Context, state: dict,
 def plot_ecdf(experiment, marker, x_attr,
               by='conditions', factor=None,
               line_width=2.0, alpha=1.0,
-              stat='proportion', complementary=False,
+              stat='proportion', complementary=False, column_labels=None,
               save=True, specificity=None, filter_by=None, roi=None,
               bottom_ticks=True, bottom_tick_labels=True,
               x_range=None, xmin=None, xmax=None, share_axes=True):
@@ -14219,6 +17964,7 @@ def plot_ecdf(experiment, marker, x_attr,
     return run(
         experiment, over=level, action=ecdf_action,
         factor=factor, specificity=specificity,
+        column_labels=column_labels,
         setup=setup, teardown=teardown,
         marker=marker_key,
         x=x,
@@ -14231,10 +17977,50 @@ def plot_ecdf(experiment, marker, x_attr,
     )
 
 
+def _annotate_volcano_stats_summary(ax, dfp, *, group_name, control_name,
+                                    p_threshold=0.05, max_items=None):
+    """Draw exact volcano p-value/effect details in the removable side panel."""
+    if dfp is None or len(dfp) == 0:
+        return None
+    table = pd.DataFrame(dfp).copy()
+    table["_p_sort"] = pd.to_numeric(table.get("p"), errors="coerce")
+    table = table.sort_values("_p_sort", kind="mergesort")
+    try:
+        p_thr = float(p_threshold)
+    except (TypeError, ValueError):
+        p_thr = 0.05
+    n_sig = int(pd.Series(table.get("significant", False)).fillna(False).astype(bool).sum())
+    tests = [
+        str(v) for v in table.get("test", pd.Series(dtype=object)).dropna().unique()
+        if str(v).strip() != ""
+    ]
+    test_line = tests[0] if len(tests) == 1 else f"{len(tests)} tests"
+    detail = []
+    for row in table.itertuples(index=False):
+        label = get_display_name(getattr(row, "column", ""), minimal=True)
+        p_value = getattr(row, "p", np.nan)
+        change = getattr(row, "x_pct", np.nan)
+        test_name = getattr(row, "test", "")
+        detail.append(
+            f"{label}: change={_format_side_stats_value(change, 3)}%, "
+            f"p={_format_side_stats_pvalue(p_value)}, {test_name}"
+        )
+    lines = [
+        f"Test: {test_line}",
+        f"Comparison: {group_name} vs {control_name}",
+        f"Threshold: p<{p_thr:g}",
+        f"Significant: {n_sig}/{len(table)}",
+        "Top columns:",
+        *_limit_stats_detail_lines(detail, max_items=max_items),
+    ]
+    return _annotate_stats_detail_text(ax, lines)
+
+
 def volcano_action(ctx: Context, state: dict,
                    volcano_columns=None, control=None,
                    factor=None, force_nonparametric=False,
                    p_threshold=0.05, label_points='significant',
+                   show_stats_summary=True, stats_summary_max_items=10,
                    **kwargs):
     """Plot one volcano panel for current group vs control across selected columns."""
     ax = _resolve_action_axis(state, 0)
@@ -14453,6 +18239,15 @@ def volcano_action(ctx: Context, state: dict,
     ax.set_ylabel("-log10(p-value)")
     ax.set_title(f"{group_name} vs {control_name}", fontsize=14, weight="bold")
     sns.despine(trim=False, ax=ax)
+    if show_stats_summary:
+        _annotate_volcano_stats_summary(
+            ax,
+            dfp,
+            group_name=group_name,
+            control_name=control_name,
+            p_threshold=p_thr,
+            max_items=stats_summary_max_items,
+        )
 
     state["volcano_skip_save"] = False
     state["volcano_points"] = int(len(dfp))
@@ -14467,6 +18262,9 @@ def plot_volcano(experiment, filtered_columns=None,
                  force_nonparametric=False,
                  p_threshold=0.05,
                  label_points='significant',
+                 show_stats_summary=True,
+                 stats_summary_max_items=10,
+                 column_labels=None,
                  save=True,
                  column_strings=None, regex_string=None, exclude='',
                  data_col_contains=None, data_col_regex=None,
@@ -14533,6 +18331,8 @@ def plot_volcano(experiment, filtered_columns=None,
                 force_nonparametric=force_nonparametric,
                 p_threshold=p_threshold,
                 label_points=label_points,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
                 save=save,
                 column_strings=column_strings, regex_string=regex_string, exclude=exclude,
             )
@@ -14554,6 +18354,8 @@ def plot_volcano(experiment, filtered_columns=None,
                 force_nonparametric=force_nonparametric,
                 p_threshold=p_threshold,
                 label_points=label_points,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
                 save=save,
                 column_strings=column_strings,
                 regex_string=regex_string,
@@ -14650,12 +18452,15 @@ def plot_volcano(experiment, filtered_columns=None,
     result = run(
         experiment, over=level, action=volcano_action,
         factor=factor, specificity=specificity,
+        column_labels=column_labels,
         setup=setup, teardown=teardown,
         volcano_columns=resolved_columns,
         control=control_name,
         force_nonparametric=force_nonparametric,
         p_threshold=p_threshold,
         label_points=label_points,
+        show_stats_summary=show_stats_summary,
+        stats_summary_max_items=stats_summary_max_items,
         roi_base=_roi_base,
     )
     if _volcano_shared_fig_ref.get("fig") is not None:
@@ -14687,6 +18492,7 @@ def plot_radar(experiment, filtered_columns=None,
                share_columns_across_panels=True,
                fill=True, alpha=0.20, line_width=2.0, point_size=None,
                tick_label_size=10, label_wrap=18,
+               column_labels=None,
                include_N=False,
                show_animal_xs=True, animal_x_marker="x", animal_x_size=38,
                animal_x_alpha=0.75, animal_x_color=None,
@@ -15008,6 +18814,7 @@ def plot_radar(experiment, filtered_columns=None,
         action=radar_action,
         factor=factor,
         specificity=specificity,
+        column_labels=column_labels,
         setup=setup,
         teardown=teardown,
         filtered_columns=resolved_columns,
@@ -15041,6 +18848,7 @@ def plot_radar(experiment, filtered_columns=None,
 def plot_pie_charts(experiment, marker, x_attr,
                     by='conditions', factor=None,
                     threshold=None,
+                    column_labels=None,
                     start_angle=90, line_width=1.0,
                     save=True, specificity=None, filter_by=None, roi=None,
                     plot_format='pie', show_counts=None, show_pct=None,
@@ -15380,6 +19188,7 @@ def plot_pie_charts(experiment, marker, x_attr,
     return run(
         experiment, over=level, action=pie_chart_action,
         factor=factor, specificity=specificity,
+        column_labels=column_labels,
         setup=setup, teardown=teardown,
         marker=marker_key, x=x,
         threshold=th_vals,
@@ -15398,7 +19207,7 @@ def plot_pie_charts(experiment, marker, x_attr,
 
 
 def plot_combo_pies(experiment, marker,
-                    family='comboany',
+                    family='comboany', column_labels=None,
                     by='conditions', factor=None,
                     start_angle=90, line_width=1.0,
                     save=True, specificity=None, filter_by=None, roi=None,
@@ -15745,6 +19554,7 @@ def plot_combo_pies(experiment, marker,
     return run(
         experiment, over=level, action=combo_pie_action,
         factor=factor, specificity=specificity,
+        column_labels=column_labels,
         setup=setup, teardown=teardown,
         marker=marker_key,
         family=family_key,
@@ -15769,7 +19579,7 @@ def plot_matrices(experiment, filtered_columns=None,
                   by='conditions', factor=None, split_by=None,
                   correlation='pearsonr',
                   first_columns=None, tick_label_size=20,
-                  leading_data_cols=None,
+                  leading_data_cols=None, column_labels=None,
                   marker=None, specificity=None, filter_by=None, roi=None,
                   save=True,
                   column_strings=None, regex_string=None, exclude='',
@@ -15779,6 +19589,9 @@ def plot_matrices(experiment, filtered_columns=None,
                   share_columns_across_panels=True,
                   triangle=None, show_diagonal=True,
                   show_values=False, value_format=".2f",
+                  show_stats_summary=True,
+                  stats_summary_max_items=10,
+                  cmap=None, palette=None,
                   conditions=None, condition_col="Condition",
                   factor_cols=None, animal_col="AnimalName",
                   group_list=None, groups=None,
@@ -15841,6 +19654,9 @@ def plot_matrices(experiment, filtered_columns=None,
                 share_columns_across_panels=share_columns_across_panels,
                 triangle=triangle, show_diagonal=show_diagonal,
                 show_values=show_values, value_format=value_format,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
+                cmap=cmap, palette=palette,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -15865,6 +19681,10 @@ def plot_matrices(experiment, filtered_columns=None,
                 show_diagonal=show_diagonal,
                 show_values=show_values,
                 value_format=value_format,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
+                cmap=cmap,
+                palette=palette,
                 specificity=spec,
                 roi=roi,
                 save=save,
@@ -16034,6 +19854,7 @@ def plot_matrices(experiment, filtered_columns=None,
     result = run(
         experiment, over=level, action=matrix_action,
         factor=factor, specificity=specificity,
+        column_labels=column_labels,
         setup=setup, teardown=teardown,
         filtered_columns=resolved_columns,
         correlation=correlation, first_columns=first_columns,
@@ -16046,6 +19867,10 @@ def plot_matrices(experiment, filtered_columns=None,
         show_diagonal=show_diagonal,
         show_values=show_values,
         value_format=value_format,
+        show_stats_summary=show_stats_summary,
+        stats_summary_max_items=stats_summary_max_items,
+        cmap=cmap,
+        palette=palette,
         specificity_filter=specificity,
         roi_base=_roi_base,
     )
@@ -16632,6 +20457,92 @@ def _corr_difference_matrix_fig(matrix, title, tick_label_size, *,
     raise ValueError(f"Unknown matrix difference kind {kind!r}.")
 
 
+def _matrix_difference_detail_lines(method, comp_label, mres, *, gate="p",
+                                    alpha=0.05, max_items=None):
+    """Build compact side-summary lines for one matrix-difference payload."""
+    inferential = bool((mres or {}).get("inferential"))
+    try:
+        alpha_f = float(alpha)
+    except (TypeError, ValueError):
+        alpha_f = 0.05
+    lines = [
+        f"Test: {'Fisher z correlation difference' if inferential else 'Descriptive difference'}",
+        f"Method: {_correlation_display_name(method)}",
+        f"Comparison: {comp_label}",
+    ]
+    if not inferential:
+        lines.append("P-values: n/a for this method")
+        return lines
+
+    gate_df = mres.get("q") if _corr_difference_use_fdr(gate) else mres.get("p")
+    p_df = mres.get("p")
+    q_df = mres.get("q")
+    sig_df = mres.get("sig")
+    rows = []
+    if isinstance(gate_df, pd.DataFrame):
+        ycols = list(gate_df.index)
+        xcols = list(gate_df.columns)
+        square = ycols == xcols
+        for i, y_col in enumerate(ycols):
+            for j, x_col in enumerate(xcols):
+                if square and j <= i:
+                    continue
+                try:
+                    gate_value = float(gate_df.loc[y_col, x_col])
+                except (TypeError, ValueError):
+                    continue
+                if not np.isfinite(gate_value):
+                    continue
+                try:
+                    p_value = float(p_df.loc[y_col, x_col]) if isinstance(p_df, pd.DataFrame) else np.nan
+                except (TypeError, ValueError):
+                    p_value = np.nan
+                try:
+                    q_value = float(q_df.loc[y_col, x_col]) if isinstance(q_df, pd.DataFrame) else np.nan
+                except (TypeError, ValueError):
+                    q_value = np.nan
+                try:
+                    passed = bool(sig_df.loc[y_col, x_col]) if isinstance(sig_df, pd.DataFrame) else gate_value < alpha_f
+                except Exception:
+                    passed = gate_value < alpha_f
+                rows.append((gate_value, str(y_col), str(x_col), p_value, q_value, passed))
+    rows.sort(key=lambda item: (item[0], item[1], item[2]))
+    gate_label = "q" if _corr_difference_use_fdr(gate) else "p"
+    n_sig = sum(1 for row in rows if bool(row[5]))
+    lines.extend([
+        f"Gate: {gate_label}<{alpha_f:g}",
+        f"Cells tested: {len(rows)}",
+        f"Significant: {n_sig}",
+    ])
+    if rows:
+        detail = [
+            (
+                f"{y_col} vs {x_col}: p={_format_side_stats_pvalue(p_value)}, "
+                f"q={_format_side_stats_pvalue(q_value)}"
+            )
+            for _, y_col, x_col, p_value, q_value, _ in rows
+        ]
+        lines.extend(["Top cells:", *_limit_stats_detail_lines(detail, max_items=max_items)])
+    return lines
+
+
+def _annotate_matrix_difference_stats_summary(fig, method, comp_label, mres, *,
+                                              gate="p", alpha=0.05,
+                                              max_items=None):
+    ax = fig.axes[0] if getattr(fig, "axes", None) else None
+    if ax is None:
+        return None
+    lines = _matrix_difference_detail_lines(
+        method,
+        comp_label,
+        mres,
+        gate=gate,
+        alpha=alpha,
+        max_items=max_items,
+    )
+    return _annotate_stats_detail_text(ax, lines, x=1.18)
+
+
 def _corr_matrix_difference_label(methods, comparisons, factor, by):
     method_bits = "".join(_CORR_METHOD_SHORT.get(m, m[:1].upper()) for m in methods)
     comp_bits = f"{len(comparisons)}comparisons"
@@ -16659,6 +20570,8 @@ def _corr_render_matrix_differences(
     plot_pvalue_matrices=None,
     plot_qvalue_matrices=None,
     plot_gate_matrix=True,
+    show_stats_summary=True,
+    stats_summary_max_items=10,
     name_suffix="",
 ):
     """Render/save pairwise matrix differences from already-computed groups.
@@ -16796,6 +20709,12 @@ def _corr_render_matrix_differences(
                         tick_label_size, kind="signed",
                         annotation_df=star_df, alpha=alpha,
                     )
+                    if show_stats_summary:
+                        _annotate_matrix_difference_stats_summary(
+                            sfig, method, comp_label, mres,
+                            gate=gate, alpha=alpha,
+                            max_items=stats_summary_max_items,
+                        )
                     save_fig(sfig, fig_dir, _flat_stem(
                         f"{disp} Signed Difference Matrix", f"{disp} Signed Delta",
                         comp_label, "svg"))
@@ -16806,6 +20725,12 @@ def _corr_render_matrix_differences(
                         tick_label_size, kind="absolute",
                         annotation_df=star_df, alpha=alpha,
                     )
+                    if show_stats_summary:
+                        _annotate_matrix_difference_stats_summary(
+                            afig, method, comp_label, mres,
+                            gate=gate, alpha=alpha,
+                            max_items=stats_summary_max_items,
+                        )
                     save_fig(afig, fig_dir, _flat_stem(
                         f"{disp} Absolute Difference Matrix", f"{disp} Abs Delta",
                         comp_label, "svg"))
@@ -16815,6 +20740,12 @@ def _corr_render_matrix_differences(
                         mres["p"], f"{disp} correlation-difference P-Value Matrix\n{comp_label} (* p<{alpha:g})",
                         tick_label_size, kind="p", alpha=alpha,
                     )
+                    if show_stats_summary:
+                        _annotate_matrix_difference_stats_summary(
+                            pfig, method, comp_label, mres,
+                            gate=gate, alpha=alpha,
+                            max_items=stats_summary_max_items,
+                        )
                     save_fig(pfig, fig_dir, _flat_stem(
                         f"{disp} Difference P-Value Matrix", f"{disp} P Matrix",
                         comp_label, "svg"))
@@ -16824,6 +20755,12 @@ def _corr_render_matrix_differences(
                         mres["q"], f"{disp} correlation-difference FDR Q-Value Matrix\n{comp_label} (* q<{alpha:g})",
                         tick_label_size, kind="q", alpha=alpha,
                     )
+                    if show_stats_summary:
+                        _annotate_matrix_difference_stats_summary(
+                            qfig, method, comp_label, mres,
+                            gate=gate, alpha=alpha,
+                            max_items=stats_summary_max_items,
+                        )
                     save_fig(qfig, fig_dir, _flat_stem(
                         f"{disp} Difference FDR Q-Value Matrix", f"{disp} Q Matrix",
                         comp_label, "svg"))
@@ -16833,6 +20770,12 @@ def _corr_render_matrix_differences(
                         mres["sig"], f"{disp} correlation-difference gate\n{comp_label} @ {'q' if _corr_difference_use_fdr(gate) else 'p'}<{alpha:g}",
                         tick_label_size, kind="gate", alpha=alpha,
                     )
+                    if show_stats_summary:
+                        _annotate_matrix_difference_stats_summary(
+                            gfig, method, comp_label, mres,
+                            gate=gate, alpha=alpha,
+                            max_items=stats_summary_max_items,
+                        )
                     save_fig(gfig, fig_dir, _flat_stem(
                         f"{disp} Difference Gate Matrix", f"{disp} Gate Matrix",
                         comp_label, "svg"))
@@ -16931,6 +20874,7 @@ def _corr_pipeline_append_runs_index(experiment, manifest):
     _pio.append_runs_index(experiment, "Correlation Pipeline", row)
 
 
+@column_label_scope
 def plot_matrix_differences(
     experiment,
     filtered_columns=None,
@@ -16969,7 +20913,10 @@ def plot_matrix_differences(
     plot_qvalue_matrices=None,
     plot_gate_matrix=True,
     tick_label_size=20,
+    show_stats_summary=True,
+    stats_summary_max_items=10,
     run_label=None,
+    column_labels=None,
     condition_col="Condition",
     factor_cols=None,
     animal_col="AnimalName",
@@ -17138,6 +21085,8 @@ def plot_matrix_differences(
         plot_pvalue_matrices=plot_pvalue_matrices,
         plot_qvalue_matrices=plot_qvalue_matrices,
         plot_gate_matrix=plot_gate_matrix,
+        show_stats_summary=show_stats_summary,
+        stats_summary_max_items=stats_summary_max_items,
     )
 
     manifest = {
@@ -17245,6 +21194,7 @@ def plot_correlation_pipeline(
     return _correlation_pipeline(experiment, **kwargs)
 
 
+@column_label_scope
 def plot_multivariable_regression_matrix(
     experiment,
     filtered_columns=None,
@@ -17268,6 +21218,11 @@ def plot_multivariable_regression_matrix(
     correction='fdr',
     alpha=0.05,
     tick_label_size=20,
+    cmap=None,
+    palette=None,
+    column_labels=None,
+    show_stats_summary=True,
+    stats_summary_max_items=10,
     conditions=None,
     condition_col="Condition",
     factor_cols=None,
@@ -17345,6 +21300,11 @@ def plot_multivariable_regression_matrix(
                 correction=correction,
                 alpha=alpha,
                 tick_label_size=tick_label_size,
+                cmap=cmap,
+                palette=palette,
+                column_labels=column_labels,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
                 conditions=conditions,
                 combine_conditions=combine_conditions,
                 column_order=column_order,
@@ -17376,6 +21336,11 @@ def plot_multivariable_regression_matrix(
                 correction=correction,
                 alpha=alpha,
                 tick_label_size=tick_label_size,
+                cmap=cmap,
+                palette=palette,
+                column_labels=column_labels,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
                 conditions=conditions,
                 combine_conditions=combine_conditions,
                 column_order=column_order,
@@ -17538,6 +21503,26 @@ def plot_multivariable_regression_matrix(
     first_mappable = None
     vmin, vmax = _multivariable_heatmap_limits(value_key)
     value_label = _multivariable_value_label(value_key)
+    matrix_cmap = _resolve_matrix_cmap(
+        cmap=cmap,
+        palette=palette,
+        default=_multivariable_matrix_default_cmap(value_key),
+    )
+    if value_key in {"r2", "adj_r2"}:
+        scale_values = []
+        for _, _, panel_df, _ in panels:
+            scale_grid = _compute_multivariable_regression_grid(
+                panel_df,
+                panel_y_columns,
+                panel_predictor_sets,
+                min_n=min_n,
+                value_key=value_key,
+                correction_key=correction_key,
+                alpha=alpha,
+                emit_records=False,
+            )
+            scale_values.extend(scale_grid["values"].to_numpy(dtype=float).ravel())
+        vmin, vmax = _positive_matrix_value_limits(scale_values, vmin=vmin, vmax=None)
 
     for i, (kind, panel_name, panel_df, panel_display_name) in enumerate(panels):
         _progress_start_item(state, panel_name)
@@ -17606,7 +21591,7 @@ def plot_multivariable_regression_matrix(
             value_mat,
             annot=False,
             fmt=".2f",
-            cmap=pyflash_style_value("matrix_cmap", "coolwarm"),
+            cmap=matrix_cmap,
             linewidths=0.5,
             ax=ax,
             vmin=vmin,
@@ -17690,8 +21675,12 @@ def plot_multivariable_regression_matrix(
         try:
             last_ax = panel_fig_axes[-1][1]
             last_pos = last_ax.get_position()
-            cbar_pad = 0.008
-            cbar_width = 0.024
+            # Match the single-matrix renderer's comfortable gap/width so the
+            # colorbar never crowds the last panel. The figure is saved at its
+            # authored size (save_bbox="tight" below), so this gap, computed
+            # from the panel positions here, is preserved rather than reflowed.
+            cbar_pad = 0.014
+            cbar_width = _MATRIX_PANEL_COLORBAR_WIDTH
             cbar_height_frac = 0.72
             cbar_height = last_pos.height * cbar_height_frac
             cbar_y0 = last_pos.y0 + (last_pos.height - cbar_height) / 2.0
@@ -17711,15 +21700,24 @@ def plot_multivariable_regression_matrix(
                 cbar.outline.set_visible(False)
             except Exception:
                 pass
-            cbar.ax.text(
-                1.03, 1.04, value_label,
-                transform=cbar.ax.transAxes,
-                ha='left', va='bottom',
-                fontsize=max(13, int(tick_label_size * 1.15)),
-                fontweight='normal',
+            # Caption runs vertically along the colorbar (never collides with
+            # the panel titles above the grid, however narrow the panels).
+            _cbar_label_fs = max(13, int(tick_label_size * 1.15))
+            cbar.set_label(
+                value_label, rotation=270, labelpad=_cbar_label_fs + 6,
+                fontsize=_cbar_label_fs, fontweight='normal',
             )
         except Exception:
             pass
+    if show_stats_summary and panel_fig_axes:
+        _annotate_multivariable_regression_stats_summary(
+            panel_fig_axes[-1][1],
+            outputs,
+            value_key=value_key,
+            correction=correction_key,
+            alpha=alpha,
+            max_items=stats_summary_max_items,
+        )
     if save:
         subfolder, suffix = build_subfolder(
             plot_type='Multivariable Regression', marker='Matrices',
@@ -17732,11 +21730,1133 @@ def plot_multivariable_regression_matrix(
         if len(panels) > 3:
             panel_names += " and more"
         title = f"Multivariable Regression Matrix ({panel_names})"
-        save_fig(big_fig, experiment.fig_path, title + suffix, subfolder=subfolder)
+        # Multi-panel matrices are authored at their own cell-driven aspect;
+        # keep it so square cells stay square and the manually placed colorbar
+        # stays aligned with the last panel (the fixed landscape canvas would
+        # reflow the panels out from under the colorbar).
+        save_fig(big_fig, experiment.fig_path, title + suffix,
+                 subfolder=subfolder, save_bbox="tight")
     plt.close(big_fig)
     return outputs
 
 
+_MODEL_RESULT_DEFAULT_TABLE_ATTRS = (
+    "model_result_matrix",
+    "model_results",
+    "model_table",
+    "results",
+    "summary",
+)
+
+_MODEL_RESULT_ROW_COLS = (
+    "outcome",
+    "dependent_variable",
+    "metric",
+    "marker",
+    "column",
+    "feature",
+    "measure",
+    "variable",
+    "name",
+)
+
+_MODEL_RESULT_ROW_LABEL_COLS = (
+    "label",
+    "display_label",
+    "metric_label",
+    "outcome_label",
+    "column_label",
+)
+
+_MODEL_RESULT_GROUP_COLS = (
+    "group",
+    "condition",
+    "diagnosis",
+    "cohort",
+    "factor",
+    "contrast",
+)
+
+_MODEL_RESULT_PROFILE_COLS = (
+    "predictor",
+    "profile",
+    "model",
+    "term",
+    "comparison",
+    "test",
+    "method",
+)
+
+_MODEL_RESULT_VALUE_COLS = (
+    "r2",
+    "r_squared",
+    "rsquared",
+    "adj_r2",
+    "adjusted_r2",
+    "value",
+    "score",
+    "estimate",
+    "statistic",
+)
+
+_MODEL_RESULT_P_COLS = ("p", "p_value", "pvalue", "raw_p", "raw_p_value")
+_MODEL_RESULT_Q_COLS = ("q", "q_value", "qvalue", "fdr", "fdr_q", "fdr_q_value")
+
+
+def _model_result_column_lookup(df):
+    return {str(col).strip().casefold(): col for col in df.columns}
+
+
+def _resolve_model_result_column(df, requested=None, *, candidates=(), role="column",
+                                 required=True):
+    """Resolve a model-result table column by exact/casefold name."""
+    if requested is False:
+        return None
+    lookup = _model_result_column_lookup(df)
+    if requested is not None:
+        key = str(requested).strip().casefold()
+        if key in lookup:
+            return lookup[key]
+        if requested in df.columns:
+            return requested
+        if required:
+            raise ValueError(f"{role} {requested!r} was not found in the model result table.")
+        return None
+    for candidate in candidates:
+        key = str(candidate).strip().casefold()
+        if key in lookup:
+            return lookup[key]
+    if required:
+        raise ValueError(
+            f"Could not infer the model-result {role}. Pass {role}= explicitly. "
+            f"Available columns: {', '.join(map(str, df.columns))}"
+        )
+    return None
+
+
+def _model_result_table_from_named_source(experiment, name):
+    """Resolve a named table from a PyFLASH-like object."""
+    if experiment is None:
+        return None
+    text = str(name)
+    if hasattr(experiment, text):
+        value = getattr(experiment, text)
+        return value() if callable(value) and text.startswith("get_") else value
+    summaries = getattr(experiment, "summaries", None)
+    if isinstance(summaries, Mapping) and text in summaries:
+        return summaries[text]
+    data = getattr(experiment, "data", None)
+    if isinstance(data, Mapping) and text in data:
+        value = data[text]
+        return value.df if hasattr(value, "df") else value
+    return None
+
+
+def _model_result_default_source(experiment, table_attr=None, roi=None):
+    if experiment is None:
+        return None, None
+    if isinstance(experiment, pd.DataFrame):
+        return experiment, "dataframe"
+    if table_attr is not None:
+        source = _model_result_table_from_named_source(experiment, table_attr)
+        if source is None:
+            raise ValueError(f"table_attr {table_attr!r} was not found on the PyFLASH object.")
+        return source, str(table_attr)
+    if roi is not None:
+        source = _model_result_table_from_named_source(experiment, roi)
+        if source is not None:
+            return source, str(roi)
+    for attr in _MODEL_RESULT_DEFAULT_TABLE_ATTRS:
+        source = _model_result_table_from_named_source(experiment, attr)
+        if source is not None:
+            return source, attr
+    return None, None
+
+
+def _coerce_model_result_table(source, *, source_path=None):
+    if hasattr(source, "df"):
+        source = source.df
+    if source is None:
+        raise ValueError(
+            "Provide experiment=, model_table=, path=, a pandas DataFrame, or a "
+            "PyFLASH object with a model-result table."
+        )
+    if isinstance(source, pd.Series):
+        table = source.to_frame()
+    elif isinstance(source, pd.DataFrame):
+        table = source.copy()
+    else:
+        table = pd.DataFrame(source)
+    table = table.dropna(how="all").copy()
+    if table.empty:
+        suffix = f" from {source_path}" if source_path else ""
+        raise ValueError(f"The model result table{suffix} is empty.")
+    return table
+
+
+def _load_model_result_table(experiment=None, model_table=None, path=None,
+                             table_attr=None, roi=None):
+    """Resolve a model-result table from PyFLASH objects, raw tables, or CSV paths."""
+    source = model_table
+    source_path = path
+    source_name = None
+
+    if source_path is not None:
+        source_path = os.fspath(source_path)
+        source = pd.read_csv(source_path)
+        source_name = os.path.basename(source_path)
+    elif source is None:
+        if isinstance(experiment, (str, os.PathLike)):
+            source_path = os.fspath(experiment)
+            source = pd.read_csv(source_path)
+            source_name = os.path.basename(source_path)
+            experiment = None
+        else:
+            source, source_name = _model_result_default_source(
+                experiment, table_attr=table_attr, roi=roi,
+            )
+    elif isinstance(source, (str, os.PathLike)):
+        text = os.fspath(source)
+        named = None
+        if experiment is not None and not os.path.exists(text):
+            named = _model_result_table_from_named_source(experiment, text)
+        if named is not None:
+            source = named
+            source_name = text
+        else:
+            source_path = text
+            source = pd.read_csv(source_path)
+            source_name = os.path.basename(source_path)
+
+    table = _coerce_model_result_table(source, source_path=source_path)
+    return table, source_path, source_name, experiment
+
+
+def _model_result_as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        return [value]
+    try:
+        return list(value)
+    except TypeError:
+        return [value]
+
+
+def _model_result_ordered_unique(values):
+    out = []
+    seen = set()
+    for value in values:
+        if pd.isna(value):
+            continue
+        key = str(value)
+        if key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out
+
+
+def _model_result_label(value, labels=None, *, minimal=False):
+    if labels is None:
+        return get_display_name(value, minimal=minimal)
+    if isinstance(labels, Mapping):
+        if value in labels:
+            return str(labels[value])
+        text = str(value)
+        if text in labels:
+            return str(labels[text])
+    return get_display_name(value, minimal=minimal)
+
+
+def _model_result_filter_rows(table, row_col, row_label_col, *,
+                              filtered_columns=None, column_strings=None,
+                              regex_string=None, exclude=""):
+    out = table.copy()
+    if filtered_columns is not None:
+        requested = _model_result_as_list(filtered_columns)
+        row_lookup = {str(v).strip().casefold(): v for v in out[row_col].dropna().unique()}
+        label_lookup = {}
+        if row_label_col is not None and row_label_col in out.columns:
+            for _, row in out[[row_col, row_label_col]].dropna(subset=[row_col]).iterrows():
+                label = row.get(row_label_col)
+                if pd.notna(label):
+                    label_lookup[str(label).strip().casefold()] = row[row_col]
+        selected = []
+        missing = []
+        for item in requested:
+            key = str(item).strip().casefold()
+            match = row_lookup.get(key, label_lookup.get(key))
+            if match is None:
+                missing.append(str(item))
+            elif match not in selected:
+                selected.append(match)
+        if missing:
+            raise ValueError(
+                "No model-result rows matched data_cols/filtered_columns: "
+                + ", ".join(missing[:5])
+            )
+        out = out[out[row_col].isin(selected)]
+
+    text = out[row_col].astype(str)
+    if row_label_col is not None and row_label_col in out.columns:
+        text = text + " " + out[row_label_col].astype(str)
+    if column_strings is not None:
+        needles = [str(v).casefold() for v in _model_result_as_list(column_strings)]
+        if needles:
+            haystack = text.str.casefold()
+            mask = pd.Series(False, index=out.index)
+            for needle in needles:
+                mask = mask | haystack.str.contains(re.escape(needle), regex=True, na=False)
+            out = out[mask]
+            text = text.loc[out.index]
+    if regex_string is not None:
+        patterns = _model_result_as_list(regex_string)
+        if patterns:
+            mask = pd.Series(False, index=out.index)
+            for pattern in patterns:
+                mask = mask | text.str.contains(str(pattern), regex=True, na=False)
+            out = out[mask]
+            text = text.loc[out.index]
+    if exclude not in ("", None, []):
+        excluded = [str(v).casefold() for v in _model_result_as_list(exclude)]
+        if excluded:
+            haystack = text.str.casefold()
+            mask = pd.Series(False, index=out.index)
+            for needle in excluded:
+                mask = mask | haystack.str.contains(re.escape(needle), regex=True, na=False)
+            out = out[~mask]
+    if out.empty:
+        raise ValueError("No model-result rows remain after row filters.")
+    return out
+
+
+def _model_result_apply_order(values, requested_order, label_map=None):
+    values = list(values)
+    if requested_order is None:
+        return values
+    ordered = []
+    used = set()
+    requests = [str(v) for v in _model_result_as_list(requested_order)]
+    for request in requests:
+        request_key = request.strip().casefold()
+        for value in values:
+            if value in used:
+                continue
+            labels = [str(value)]
+            if label_map and value in label_map:
+                labels.append(str(label_map[value]))
+            if any(label.strip().casefold() == request_key for label in labels):
+                ordered.append(value)
+                used.add(value)
+        for value in values:
+            if value in used:
+                continue
+            labels = [str(value)]
+            if label_map and value in label_map:
+                labels.append(str(label_map[value]))
+            if any(label.startswith(request) for label in labels):
+                ordered.append(value)
+                used.add(value)
+    for value in values:
+        if value not in used:
+            ordered.append(value)
+    return ordered
+
+
+def _format_model_result_value(value, value_format=".2f"):
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(value_f):
+        return ""
+    if callable(value_format):
+        return str(value_format(value_f))
+    fmt = str(value_format).strip()
+    if fmt == "":
+        fmt = ".2f"
+    try:
+        if "{" in fmt:
+            return fmt.format(value_f)
+        return format(value_f, fmt)
+    except Exception:
+        return f"{value_f:.2f}"
+
+
+def _model_result_value_label(value_col, value_label=None):
+    if value_label is not None:
+        return str(value_label)
+    key = str(value_col).strip().lower().replace("-", "_").replace(" ", "_")
+    if key in {"r2", "r_squared", "rsquared"}:
+        return "R2"
+    if key in {"adj_r2", "adjusted_r2", "adjusted_r_squared"}:
+        return "Adjusted R2"
+    if key in {"p", "p_value", "pvalue"}:
+        return "p-value"
+    if key in {"q", "q_value", "qvalue", "fdr", "fdr_q"}:
+        return "FDR q"
+    return get_display_name(value_col, minimal=False)
+
+
+def _model_result_default_cmap(value_col):
+    key = str(value_col).strip().lower().replace("-", "_").replace(" ", "_")
+    if key in {"r2", "r_squared", "rsquared", "adj_r2", "adjusted_r2",
+               "adjusted_r_squared"}:
+        return "Greens"
+    if key in {"p", "p_value", "pvalue"}:
+        return pyflash_style_value("pvalue_cmap", _CORR_PVALUE_CMAP)
+    if key in {"q", "q_value", "qvalue", "fdr", "fdr_q"}:
+        return pyflash_style_value("qvalue_cmap", _CORR_QVALUE_CMAP)
+    return pyflash_style_value("matrix_cmap", "coolwarm")
+
+
+def _model_result_value_limits(values, value_col, vmin=None, vmax=None):
+    if vmin is not None or vmax is not None:
+        return vmin, vmax
+    key = str(value_col).strip().lower().replace("-", "_").replace(" ", "_")
+    if key in {"r2", "r_squared", "rsquared", "adj_r2", "adjusted_r2",
+               "adjusted_r_squared"}:
+        return _positive_matrix_value_limits(values, vmin=vmin, vmax=vmax)
+    if key in {"p", "p_value", "pvalue", "q", "q_value", "qvalue", "fdr", "fdr_q"}:
+        return 0.0, 1.0
+    finite = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if finite.empty:
+        return None, None
+    lo = float(finite.min())
+    hi = float(finite.max())
+    if lo == hi:
+        pad = abs(lo) * 0.05 or 1.0
+        return lo - pad, hi + pad
+    return lo, hi
+
+
+def _model_result_marker_text(p_value, q_value, *, p_alpha=0.05, q_alpha=0.05,
+                              significance_markers=None):
+    markers = significance_markers or {}
+    raw_marker = markers.get("p", markers.get("raw", "*")) if isinstance(markers, Mapping) else "*"
+    q_marker = markers.get("q", markers.get("fdr", "+")) if isinstance(markers, Mapping) else "+"
+    text = ""
+    try:
+        p_float = float(p_value)
+    except (TypeError, ValueError):
+        p_float = np.nan
+    try:
+        q_float = float(q_value)
+    except (TypeError, ValueError):
+        q_float = np.nan
+    if np.isfinite(p_float) and p_float < float(p_alpha):
+        text += str(raw_marker)
+    if np.isfinite(q_float) and q_float < float(q_alpha):
+        text += str(q_marker)
+    return text
+
+
+def _default_model_result_footer(value_label, p_col, q_col, p_alpha, q_alpha):
+    parts = [f"Values are {value_label}."]
+    sig_parts = []
+    if p_col is not None:
+        sig_parts.append(f"* raw p<{float(p_alpha):g}")
+    if q_col is not None:
+        sig_parts.append(f"+ FDR q<{float(q_alpha):g}")
+    if sig_parts:
+        parts.append("; ".join(sig_parts) + ".")
+    return " ".join(parts)
+
+
+def _default_model_result_note(matrices, profile_col, group_col):
+    labels = []
+    seen = set()
+    for meta in matrices.get("column_meta") or []:
+        label = str(meta.get("profile_label") or "").strip()
+        if label and label not in seen:
+            labels.append(label)
+            seen.add(label)
+    if labels and len(labels) <= 4:
+        rhs = "/".join(labels)
+    else:
+        rhs = get_display_name(profile_col, minimal=False)
+    note = f"Model in each cell: y ~ {rhs}"
+    if group_col is not None:
+        note += f" within {get_display_name(group_col, minimal=False)}"
+    return note + "."
+
+
+def _emit_model_result_matrix_records(records, *, value_col, p_col, q_col,
+                                      source_path=None, title=None,
+                                      p_alpha=0.05, q_alpha=0.05):
+    try:
+        import PyFLASH.report as report
+        if not report.is_active():
+            return
+        for record in records:
+            value = record.get("value")
+            p_value = record.get("p")
+            q_value = record.get("q")
+            emitted = {
+                "kind": "model_result_matrix",
+                "metric": record.get("row_label") or record.get("row"),
+                "outcome": record.get("row"),
+                "row": record.get("row"),
+                "row_label": record.get("row_label"),
+                "group": record.get("group"),
+                "profile": record.get("profile"),
+                "value_col": str(value_col),
+                "value": float(value) if value is not None and np.isfinite(value) else None,
+                "p": float(p_value) if p_value is not None and np.isfinite(p_value) else None,
+                "q": float(q_value) if q_value is not None and np.isfinite(q_value) else None,
+                "p_alpha": float(p_alpha),
+                "q_alpha": float(q_alpha),
+                "source_path": str(source_path) if source_path else None,
+                "title": title,
+            }
+            sig = []
+            if emitted["p"] is not None and emitted["p"] < emitted["p_alpha"]:
+                sig.append("raw_p")
+            if emitted["q"] is not None and emitted["q"] < emitted["q_alpha"]:
+                sig.append("fdr_q")
+            emitted["significance"] = sig
+            tail = []
+            if emitted["value"] is not None:
+                tail.append(f"{value_col}={emitted['value']:.3g}")
+            if emitted["p"] is not None:
+                tail.append(f"p={emitted['p']:.3g}")
+            if emitted["q"] is not None:
+                tail.append(f"q={emitted['q']:.3g}")
+            metric = emitted["metric"] or "metric"
+            profile = emitted["profile"] or "profile"
+            group = f" [{emitted['group']}]" if emitted.get("group") else ""
+            emitted["headline"] = f"{metric} ~ {profile}{group}: " + "; ".join(tail)
+            report.emit(emitted)
+    except Exception:
+        return
+
+
+def _build_model_result_matrices(table, *, row_col, row_label_col, group_col,
+                                 profile_col, value_col, p_col=None, q_col=None,
+                                 row_order=None, group_order=None,
+                                 profile_order=None, group_labels=None,
+                                 profile_labels=None, value_format=".2f",
+                                 p_alpha=0.05, q_alpha=0.05,
+                                 significance_markers=None):
+    table = table.copy()
+    table[value_col] = pd.to_numeric(table[value_col], errors="coerce")
+    if p_col is not None:
+        table[p_col] = _coerce_pvalue_series(table[p_col])
+    if q_col is not None:
+        table[q_col] = _coerce_pvalue_series(table[q_col])
+
+    subset = [row_col, profile_col]
+    if group_col is not None:
+        subset.insert(1, group_col)
+    duplicates = table.duplicated(subset=subset, keep=False)
+    if duplicates.any():
+        sample = table.loc[duplicates, subset].head(5).to_dict(orient="records")
+        raise ValueError(
+            "The model result table has duplicate cells for row/group/profile "
+            f"combinations. First duplicates: {sample}"
+        )
+
+    row_label_map = {}
+    for _, row in table.iterrows():
+        row_key = row[row_col]
+        if row_key not in row_label_map:
+            if row_label_col is not None and row_label_col in table.columns and pd.notna(row[row_label_col]):
+                row_label_map[row_key] = str(row[row_label_col])
+            else:
+                row_label_map[row_key] = _model_result_label(row_key, minimal=False)
+
+    rows = _model_result_ordered_unique(table[row_col])
+    rows = _model_result_apply_order(rows, row_order, label_map=row_label_map)
+    groups = [None]
+    if group_col is not None:
+        groups = _model_result_ordered_unique(table[group_col])
+        groups = _model_result_apply_order(groups, group_order, label_map=group_labels)
+    profiles = _model_result_ordered_unique(table[profile_col])
+    profiles = _model_result_apply_order(profiles, profile_order, label_map=profile_labels)
+
+    row_labels = [row_label_map.get(row, str(row)) for row in rows]
+    column_keys = []
+    column_labels = []
+    column_meta = []
+    for group in groups:
+        for profile in profiles:
+            profile_label = _model_result_label(profile, profile_labels, minimal=False)
+            if group is None:
+                group_label = None
+                label = profile_label
+            else:
+                group_label = _model_result_label(group, group_labels, minimal=False)
+                label = f"{group_label}\n{profile_label}"
+            column_keys.append((group, profile))
+            column_labels.append(label)
+            column_meta.append({
+                "group": group,
+                "profile": profile,
+                "group_label": group_label,
+                "profile_label": profile_label,
+                "column_label": label,
+            })
+
+    value_matrix = pd.DataFrame(np.nan, index=row_labels, columns=column_labels, dtype=float)
+    p_matrix = pd.DataFrame(np.nan, index=row_labels, columns=column_labels, dtype=float)
+    q_matrix = pd.DataFrame(np.nan, index=row_labels, columns=column_labels, dtype=float)
+    annotations = pd.DataFrame("", index=row_labels, columns=column_labels, dtype=object)
+    records = []
+
+    index_cols = [row_col, profile_col]
+    if group_col is not None:
+        index_cols.insert(1, group_col)
+    keyed = table.set_index(index_cols, drop=False)
+
+    for row_key, row_label in zip(rows, row_labels):
+        for (group, profile), column_label in zip(column_keys, column_labels):
+            lookup_key = (row_key, profile) if group_col is None else (row_key, group, profile)
+            if lookup_key not in keyed.index:
+                continue
+            source_row = keyed.loc[lookup_key]
+            if isinstance(source_row, pd.DataFrame):
+                source_row = source_row.iloc[0]
+            value = source_row.get(value_col, np.nan)
+            p_value = source_row.get(p_col, np.nan) if p_col is not None else np.nan
+            q_value = source_row.get(q_col, np.nan) if q_col is not None else np.nan
+            value_matrix.loc[row_label, column_label] = value
+            p_matrix.loc[row_label, column_label] = p_value
+            q_matrix.loc[row_label, column_label] = q_value
+            value_text = _format_model_result_value(value, value_format=value_format)
+            marker_text = _model_result_marker_text(
+                p_value,
+                q_value,
+                p_alpha=p_alpha,
+                q_alpha=q_alpha,
+                significance_markers=significance_markers,
+            )
+            annotations.loc[row_label, column_label] = value_text + marker_text
+            records.append({
+                "row": row_key,
+                "row_label": row_label,
+                "group": group,
+                "profile": profile,
+                "column_label": column_label,
+                "value": float(value) if pd.notna(value) else np.nan,
+                "p": float(p_value) if pd.notna(p_value) else np.nan,
+                "q": float(q_value) if pd.notna(q_value) else np.nan,
+            })
+
+    return {
+        "values": value_matrix,
+        "p_values": p_matrix if p_col is not None else None,
+        "q_values": q_matrix if q_col is not None else None,
+        "annotations": annotations,
+        "records": records,
+        "rows": rows,
+        "groups": groups if group_col is not None else None,
+        "profiles": profiles,
+        "column_meta": column_meta,
+    }
+
+
+def _model_result_save_root(experiment, source_path=None):
+    if experiment is not None and hasattr(experiment, "fig_path"):
+        return os.fspath(getattr(experiment, "fig_path"))
+    if source_path:
+        return os.path.dirname(os.fspath(source_path)) or "."
+    return "."
+
+
+def _model_result_column_group_spans(column_meta):
+    spans = []
+    start = None
+    current = None
+    for idx, meta in enumerate(column_meta or []):
+        label = meta.get("group_label")
+        if label is None:
+            continue
+        if current is None:
+            current = label
+            start = idx
+            continue
+        if label != current:
+            spans.append({"label": current, "start": start, "end": idx})
+            current = label
+            start = idx
+    if current is not None:
+        spans.append({"label": current, "start": start, "end": len(column_meta or [])})
+    return spans
+
+
+def _apply_matrix_grouped_column_headers(ax, spans, *, tick_label_size=20):
+    if not spans:
+        return
+    transform = ax.get_xaxis_transform()
+    group_fs = max(12, int(tick_label_size * 0.9))
+    for span in spans:
+        start = int(span["start"])
+        end = int(span["end"])
+        if end <= start:
+            continue
+        center = (start + end) / 2.0
+        ax.text(
+            center,
+            1.065,
+            str(span["label"]),
+            transform=transform,
+            ha="center",
+            va="bottom",
+            fontsize=group_fs,
+            fontweight="bold",
+            clip_on=False,
+        )
+
+
+def plot_model_result_matrix(
+    experiment=None,
+    model_table=None,
+    path=None,
+    table_attr=None,
+    row_col="outcome",
+    row_label_col=None,
+    group_col=None,
+    profile_col="predictor",
+    value_col="r2",
+    p_col="p",
+    q_col="q",
+    filtered_columns=None,
+    data_cols=None,
+    column_strings=None,
+    regex_string=None,
+    exclude="",
+    data_col_contains=None,
+    data_col_regex=None,
+    data_col_exclude=None,
+    row_order=None,
+    group_order=None,
+    profile_order=None,
+    group_labels=None,
+    profile_labels=None,
+    column_labels=None,
+    value_label=None,
+    value_format=".2f",
+    p_alpha=0.05,
+    q_alpha=0.05,
+    significance_markers=None,
+    title="Model result matrix",
+    model_note="auto",
+    footer="auto",
+    specificity=None,
+    filter_by=None,
+    roi=None,
+    save=True,
+    filename="Model Result Matrix",
+    subfolder="Model Results",
+    figsize=None,
+    tick_label_size=20,
+    cmap=None,
+    palette=None,
+    vmin=None,
+    vmax=None,
+    show_stats_summary=True,
+    stats_summary_max_items=10,
+    return_data=True,
+):
+    """Render a long-form precomputed model-result table as one heatmap.
+
+    Supports PyFLASH objects (Batch, Experiment, MiniExperiment, and
+    DataFrameExperiment), raw pandas DataFrames, CSV paths, and table-like
+    objects. The input table must contain one row per matrix cell, with columns
+    identifying the outcome/row, model profile/predictor, optional group, the
+    plotted value, and optional raw/FDR significance columns.
+    """
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+        data_cols=data_cols,
+        data_col_contains=data_col_contains,
+        data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    specificity = prefer_alias(
+        specificity,
+        normalize_filter_by(filter_by),
+        current_name="specificity",
+        alias_name="filter_by",
+    )
+
+    if isinstance(roi, (list, tuple, set, pd.Index, np.ndarray)) and not isinstance(roi, str):
+        return {
+            rb: plot_model_result_matrix(
+                experiment=experiment,
+                model_table=model_table,
+                path=path,
+                table_attr=table_attr,
+                row_col=row_col,
+                row_label_col=row_label_col,
+                group_col=group_col,
+                profile_col=profile_col,
+                value_col=value_col,
+                p_col=p_col,
+                q_col=q_col,
+                filtered_columns=filtered_columns,
+                column_strings=column_strings,
+                regex_string=regex_string,
+                exclude=exclude,
+                row_order=row_order,
+                group_order=group_order,
+                profile_order=profile_order,
+                group_labels=group_labels,
+                profile_labels=profile_labels,
+                column_labels=column_labels,
+                value_label=value_label,
+                value_format=value_format,
+                p_alpha=p_alpha,
+                q_alpha=q_alpha,
+                significance_markers=significance_markers,
+                title=title,
+                model_note=model_note,
+                footer=footer,
+                specificity=specificity,
+                roi=rb,
+                save=save,
+                filename=filename,
+                subfolder=subfolder,
+                figsize=figsize,
+                tick_label_size=tick_label_size,
+                cmap=cmap,
+                palette=palette,
+                vmin=vmin,
+                vmax=vmax,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
+                return_data=return_data,
+            )
+            for rb in list(roi)
+        }
+
+    if _is_specificity_queue(specificity):
+        return {
+            spec: plot_model_result_matrix(
+                experiment=experiment,
+                model_table=model_table,
+                path=path,
+                table_attr=table_attr,
+                row_col=row_col,
+                row_label_col=row_label_col,
+                group_col=group_col,
+                profile_col=profile_col,
+                value_col=value_col,
+                p_col=p_col,
+                q_col=q_col,
+                filtered_columns=filtered_columns,
+                column_strings=column_strings,
+                regex_string=regex_string,
+                exclude=exclude,
+                row_order=row_order,
+                group_order=group_order,
+                profile_order=profile_order,
+                group_labels=group_labels,
+                profile_labels=profile_labels,
+                column_labels=column_labels,
+                value_label=value_label,
+                value_format=value_format,
+                p_alpha=p_alpha,
+                q_alpha=q_alpha,
+                significance_markers=significance_markers,
+                title=title,
+                model_note=model_note,
+                footer=footer,
+                specificity=spec,
+                roi=roi,
+                save=save,
+                filename=filename,
+                subfolder=subfolder,
+                figsize=figsize,
+                tick_label_size=tick_label_size,
+                cmap=cmap,
+                palette=palette,
+                vmin=vmin,
+                vmax=vmax,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
+                return_data=return_data,
+            )
+            for spec in _iter_specificities(specificity)
+        }
+
+    table, source_path, source_name, source_experiment = _load_model_result_table(
+        experiment=experiment,
+        model_table=model_table,
+        path=path,
+        table_attr=table_attr,
+        roi=roi,
+    )
+    if specificity is not None:
+        table = filter_df_by_specificity(table, specificity)
+        if table.empty:
+            raise ValueError(f"No model-result rows remain after specificity={specificity!r}.")
+
+    if roi is not None and not (
+        isinstance(source_name, str) and str(source_name) == str(roi)
+    ):
+        for candidate in ("roi", "ROI", "region", "Region"):
+            if candidate in table.columns:
+                table = filter_df_by_specificity(table, (candidate, roi))
+                if table.empty:
+                    raise ValueError(f"No model-result rows remain after roi={roi!r}.")
+                break
+
+    resolved_row_col = _resolve_model_result_column(
+        table, row_col, candidates=_MODEL_RESULT_ROW_COLS, role="row_col", required=True,
+    )
+    resolved_row_label_col = _resolve_model_result_column(
+        table,
+        row_label_col,
+        candidates=_MODEL_RESULT_ROW_LABEL_COLS,
+        role="row_label_col",
+        required=False,
+    )
+    if resolved_row_label_col is None:
+        resolved_row_label_col = resolved_row_col
+    resolved_group_col = _resolve_model_result_column(
+        table, group_col, candidates=_MODEL_RESULT_GROUP_COLS,
+        role="group_col", required=False,
+    )
+    resolved_profile_col = _resolve_model_result_column(
+        table, profile_col, candidates=_MODEL_RESULT_PROFILE_COLS,
+        role="profile_col", required=True,
+    )
+    resolved_value_col = _resolve_model_result_column(
+        table, value_col, candidates=_MODEL_RESULT_VALUE_COLS,
+        role="value_col", required=True,
+    )
+    resolved_p_col = _resolve_model_result_column(
+        table, p_col, candidates=_MODEL_RESULT_P_COLS,
+        role="p_col", required=False,
+    )
+    resolved_q_col = _resolve_model_result_column(
+        table, q_col, candidates=_MODEL_RESULT_Q_COLS,
+        role="q_col", required=False,
+    )
+
+    table = _model_result_filter_rows(
+        table,
+        resolved_row_col,
+        resolved_row_label_col,
+        filtered_columns=filtered_columns,
+        column_strings=column_strings,
+        regex_string=regex_string,
+        exclude=exclude,
+    )
+    if column_labels is not None and profile_labels is None:
+        profile_labels = column_labels
+
+    matrices = _build_model_result_matrices(
+        table,
+        row_col=resolved_row_col,
+        row_label_col=resolved_row_label_col,
+        group_col=resolved_group_col,
+        profile_col=resolved_profile_col,
+        value_col=resolved_value_col,
+        p_col=resolved_p_col,
+        q_col=resolved_q_col,
+        row_order=row_order,
+        group_order=group_order,
+        profile_order=profile_order,
+        group_labels=group_labels,
+        profile_labels=profile_labels,
+        value_format=value_format,
+        p_alpha=p_alpha,
+        q_alpha=q_alpha,
+        significance_markers=significance_markers,
+    )
+    value_matrix = matrices["values"]
+    if value_matrix.empty:
+        raise ValueError("No matrix cells could be built from the model result table.")
+
+    label = _model_result_value_label(resolved_value_col, value_label=value_label)
+    vmin_resolved, vmax_resolved = _model_result_value_limits(
+        value_matrix.to_numpy(dtype=float).ravel(),
+        resolved_value_col,
+        vmin=vmin,
+        vmax=vmax,
+    )
+    if figsize is not None:
+        fig, ax = plt.subplots(figsize=figsize)
+        render_fig, render_ax = fig, ax
+    else:
+        render_fig, render_ax = None, None
+    matrix_cmap = _resolve_matrix_cmap(
+        cmap=cmap,
+        palette=palette,
+        default=_model_result_default_cmap(resolved_value_col),
+    )
+    fig, ax, _ = _render_value_matrix(
+        value_matrix,
+        fig=render_fig,
+        ax=render_ax,
+        cmap=matrix_cmap,
+        vmin=vmin_resolved,
+        vmax=vmax_resolved,
+        colorbar_label=label,
+        title=title,
+        annotations=matrices["annotations"],
+        tick_label_size=tick_label_size,
+        square=False,
+        minimal_labels=False,
+        show_values=False,
+        show_colorbar=True,
+    )
+    ax.xaxis.tick_top()
+    ax.tick_params(axis="x", top=True, bottom=False, labeltop=True,
+                   labelbottom=False, length=0, pad=4)
+    column_meta = matrices.get("column_meta") or []
+    if resolved_group_col is not None and column_meta:
+        profile_tick_labels = [str(meta.get("profile_label", "")) for meta in column_meta]
+        ax.set_xticklabels(
+            profile_tick_labels,
+            rotation=0,
+            ha="center",
+            va="bottom",
+            fontsize=max(8, int(tick_label_size * 0.68)),
+        )
+        if title:
+            ax.set_title(
+                title,
+                fontsize=ax.title.get_fontsize(),
+                fontweight="bold",
+                pad=max(76, int(tick_label_size * 3.8)),
+            )
+        _apply_matrix_grouped_column_headers(
+            ax,
+            _model_result_column_group_spans(column_meta),
+            tick_label_size=tick_label_size,
+        )
+    else:
+        ax.set_xticklabels(
+            [str(c) for c in value_matrix.columns],
+            rotation=0,
+            ha="center",
+            va="bottom",
+            fontsize=max(8, int(tick_label_size)),
+        )
+    ax.tick_params(axis="y", length=0)
+    if resolved_group_col is not None and matrices.get("profiles"):
+        n_profiles = max(1, len(matrices["profiles"]))
+        for xpos in range(n_profiles, len(value_matrix.columns), n_profiles):
+            ax.axvline(xpos, color="white", lw=2.0, zorder=3)
+
+    if model_note == "auto":
+        model_note_text = _default_model_result_note(
+            matrices, resolved_profile_col, resolved_group_col,
+        )
+    elif model_note:
+        model_note_text = str(model_note)
+    else:
+        model_note_text = ""
+    if model_note_text:
+        ax.text(
+            0.0,
+            -0.095,
+            model_note_text,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=max(9, int(tick_label_size * 0.66)),
+            color="#68707a",
+            clip_on=False,
+        )
+
+    if footer == "auto":
+        footer_text = _default_model_result_footer(
+            label, resolved_p_col, resolved_q_col, p_alpha, q_alpha,
+        )
+    elif footer:
+        footer_text = str(footer)
+    else:
+        footer_text = ""
+    if footer_text:
+        ax.text(
+            0.0,
+            -0.165 if model_note_text else -0.10,
+            footer_text,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=max(9, int(tick_label_size * 0.68)),
+            color="#68707a",
+            clip_on=False,
+        )
+    if show_stats_summary:
+        _annotate_model_result_matrix_stats_summary(
+            ax,
+            matrices["records"],
+            value_col=resolved_value_col,
+            p_col=resolved_p_col,
+            q_col=resolved_q_col,
+            p_alpha=p_alpha,
+            q_alpha=q_alpha,
+            max_items=stats_summary_max_items,
+        )
+
+    _emit_model_result_matrix_records(
+        matrices["records"],
+        value_col=resolved_value_col,
+        p_col=resolved_p_col,
+        q_col=resolved_q_col,
+        source_path=source_path,
+        title=title,
+        p_alpha=p_alpha,
+        q_alpha=q_alpha,
+    )
+
+    output_path = None
+    if save:
+        save_root = _model_result_save_root(source_experiment, source_path=source_path)
+        subfolder_out, suffix = build_subfolder(
+            plot_type=subfolder,
+            specificity=specificity,
+            aliases=getattr(source_experiment, "aliases", None),
+            roi_base=roi,
+            multi_roi=roi is not None and hasattr(source_experiment, "summaries"),
+        )
+        output_path = save_fig(
+            fig,
+            save_root,
+            str(filename) + suffix,
+            subfolder=subfolder_out,
+            verbose=False,
+            save_bbox="tight",
+        )
+        plt.close(fig)
+
+    if not return_data:
+        return output_path if save else fig
+    result = {
+        "path": output_path,
+        "source_path": source_path,
+        "source_name": source_name,
+        "table": table,
+        "values": matrices["values"],
+        "annotations": matrices["annotations"],
+        "p_values": matrices["p_values"],
+        "q_values": matrices["q_values"],
+        "records": matrices["records"],
+        "row_col": resolved_row_col,
+        "row_label_col": resolved_row_label_col,
+        "group_col": resolved_group_col,
+        "profile_col": resolved_profile_col,
+        "value_col": resolved_value_col,
+        "p_col": resolved_p_col,
+        "q_col": resolved_q_col,
+        "vmin": vmin_resolved,
+        "vmax": vmax_resolved,
+    }
+    if not save:
+        result["figure"] = fig
+    return result
+
+
+@column_label_scope
 def plot_rect_matrices(
     experiment,
     filtered_columns=None,
@@ -17764,6 +22884,7 @@ def plot_rect_matrices(
     against_data_col_contains=None,
     against_data_col_regex=None,
     against_data_col_exclude=None,
+    column_labels=None,
     conditions=None,
     condition_col="Condition",
     factor_cols=None,
@@ -17784,6 +22905,10 @@ def plot_rect_matrices(
     show_diagonal=True,
     show_values=False,
     value_format=".2f",
+    show_stats_summary=True,
+    stats_summary_max_items=10,
+    cmap=None,
+    palette=None,
 ):
     """
     Rectangular correlation heatmaps (Y columns vs X columns), optionally
@@ -17859,6 +22984,9 @@ def plot_rect_matrices(
                 blank_panel_on_nan=blank_panel_on_nan,
                 triangle=triangle, show_diagonal=show_diagonal,
                 show_values=show_values, value_format=value_format,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
+                cmap=cmap, palette=palette,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -17895,6 +23023,10 @@ def plot_rect_matrices(
                 show_diagonal=show_diagonal,
                 show_values=show_values,
                 value_format=value_format,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
+                cmap=cmap,
+                palette=palette,
             )
         return queued_outputs
 
@@ -18159,7 +23291,8 @@ def plot_rect_matrices(
             corr_mat,
             ax=ax,
             fig=fig,
-            cmap=pyflash_style_value("matrix_cmap", "coolwarm"),
+            cmap=cmap,
+            palette=palette,
             vmin=-1,
             vmax=1,
             colorbar_label=coeff_label,
@@ -18209,8 +23342,12 @@ def plot_rect_matrices(
         try:
             last_ax = panel_fig_axes[-1][1]
             last_pos = last_ax.get_position()
-            cbar_pad = 0.008
-            cbar_width = 0.024
+            # Match the single-matrix renderer's comfortable gap/width so the
+            # colorbar never crowds the last panel. The figure is saved at its
+            # authored size (save_bbox="tight" below), so this gap, computed
+            # from the panel positions here, is preserved rather than reflowed.
+            cbar_pad = 0.014
+            cbar_width = _MATRIX_PANEL_COLORBAR_WIDTH
             cbar_height_frac = 0.72
             cbar_height = last_pos.height * cbar_height_frac
             cbar_y0 = last_pos.y0 + (last_pos.height - cbar_height) / 2.0
@@ -18230,15 +23367,23 @@ def plot_rect_matrices(
                 cbar.outline.set_visible(False)
             except Exception:
                 pass
-            cbar.ax.text(
-                1.03, 1.04, coeff_label,
-                transform=cbar.ax.transAxes,
-                ha='left', va='bottom',
-                fontsize=max(13, int(tick_label_size * 1.15)),
-                fontweight='normal',
+            # Caption runs vertically along the colorbar (never collides with
+            # the panel titles above the grid, however narrow the panels).
+            _cbar_label_fs = max(13, int(tick_label_size * 1.15))
+            cbar.set_label(
+                coeff_label, rotation=270, labelpad=_cbar_label_fs + 6,
+                fontsize=_cbar_label_fs, fontweight='normal',
             )
         except Exception:
             pass
+    if show_stats_summary and panel_fig_axes:
+        _annotate_grouped_correlation_stats_summary(
+            panel_fig_axes[-1][1],
+            outputs,
+            test=correlation,
+            max_items=stats_summary_max_items,
+            x=1.23,
+        )
     # Avoid tight_layout here; it can expand inter-panel spacing with fixed-aspect axes.
     if save:
         subfolder, suffix = build_subfolder(
@@ -18253,11 +23398,15 @@ def plot_rect_matrices(
             panel_names += " and more"
         variant = f" {variant_label}" if variant_label else ""
         title = f"Rectangular {corr_label}{variant} Correlation Matrix ({panel_names})"
-        save_fig(big_fig, experiment.fig_path, title + suffix, subfolder=subfolder)
+        # Authored cell-driven aspect (see plot_multivariable_regression_matrix):
+        # keep it so cells stay square and the colorbar stays clear of the grid.
+        save_fig(big_fig, experiment.fig_path, title + suffix,
+                 subfolder=subfolder, save_bbox="tight")
     plt.close(big_fig)
     return outputs
 
 
+@column_label_scope
 def plot_coloc_upset(
     source,
     marker: "str|list[str]|tuple[str, ...]",
@@ -18272,6 +23421,7 @@ def plot_coloc_upset(
     normalize: bool = False,        # show % of total instead of counts
     sort_by: str = "cardinality",   # same semantics as upsetplot
     title: str | None = None,
+    column_labels=None,
     save: bool = True,
     df: pd.DataFrame | None = None, # optional override (defaults to source.data[marker].df)
     experiment=None,                # optional legacy alias for save/order context
@@ -18686,6 +23836,7 @@ def plot_coloc_upset(
     return outputs
 
 
+@column_label_scope
 def plot_coloc_sankey(
     source,
     marker: "str|list[str]|tuple[str, ...]",
@@ -18702,6 +23853,7 @@ def plot_coloc_sankey(
     normalize: bool = False,
     order: str | list[str] = "auto",
     title: str | None = None,
+    column_labels=None,
     save: bool = True,
     experiment=None,
     dpi: int = 110,
@@ -19433,7 +24585,34 @@ _PARAM_DESCRIPTIONS = {
     # ── Common to most functions ─────────────────────────────────────
     'experiment':           'Experiment or Batch object containing your data.',
     'source':               'Experiment, Batch, or MiniExperiment data source.',
+    'columns':              'Explicit baseline field mapping: age, sex, and sleep_treatment summary column names (or a three-item sequence in that order).',
     'data_cols':            'Exact data columns to plot or analyze. Alias of filtered_columns.',
+    'numerator_col':        'Numerator column for a paired ratio plot. If omitted, data_cols[1] is used.',
+    'denominator_col':      'Denominator column for a paired ratio plot. If omitted, data_cols[0] is used.',
+    'log_transform':        'For paired-ratio endpoint plots, use a log-scaled endpoint axis and test log(numerator/denominator) (default True). Set False for a linear endpoint axis and raw ratio tests.',
+    'pairwise_correction':  'Pairwise p-value correction for paired-ratio tests: "holm" (default), "bonferroni", "sidak", "fdr_bh", or "none"/"uncorrected".',
+    'ratio_test':           'Paired-ratio group test: "legacy" (Welch t for 2 groups, ANOVA for 3+), "auto", "anova", "welch_anova", "kruskal", "permutation", or two-group "student_t"/"welch_t"/"mannwhitney".',
+    'n_permutations':       'Number of label shuffles for permutation-based paired-ratio tests.',
+    'random_state':         'Optional random seed for permutation-based paired-ratio tests.',
+    'ratio_label':          'Optional display label for the tested paired ratio shown in the stats card; defaults to "numerator / denominator".',
+    'title':                'Optional figure-level title.',
+    'y_label':              'Optional y-axis label override.',
+    'footer':               'Optional footer text below the plot. Pass "auto" for a generic paired-ratio note or a list of footer lines.',
+    'primary_comparison':   'Preferred contrast to headline in the paired-ratio stats card, e.g. "AD vs Control" or ("Control", "AD").',
+    'show_sample_lines':  'Draw one line per subject joining denominator and numerator endpoints in paired-ratio endpoint plots (default True).',
+    'show_participant_lines': 'Legacy alias for show_sample_lines.',
+    'show_reference_line':  'Retained for backwards compatibility; paired endpoint plots do not draw a ratio=1 line on the endpoint axis.',
+    'show_comparisons':    'For paired-ratio endpoint plots, draw compact change-contrast brackets spanning the paired endpoints.',
+    'show_legend':         'For paired-ratio endpoint plots, draw the group legend above the axis (default True). Set False to remove it.',
+    'show_ns':             'Show non-significant paired-ratio comparison annotations when show_comparisons is enabled.',
+    'comparison_max_items': 'Maximum number of paired-ratio comparison annotations to draw on the graph.',
+    'stats_summary_title':  'Optional heading for the paired-ratio stats side card.',
+    'stats_summary_extra':  'Optional extra side-card sections, e.g. {"Age/sex-adjusted sensitivity": ["Three-group p = .008"]}.',
+    'line_alpha':           'Transparency for subject-level paired lines.',
+    'sample_dot_size':     'Marker diameter in points for individual paired endpoint dots in paired-ratio endpoint plots; defaults to half the global PyFLASH point_size.',
+    'sample_line_width':   'Line width for individual paired sample lines in paired-ratio endpoint plots.',
+    'mean_marker_size':    'Marker diameter in points for paired-ratio summary dots; defaults larger than individual sample dots.',
+    'line_width':           'Generic/legacy line-width parameter; in paired-ratio endpoint plots, this aliases sample_line_width.',
     'filtered_columns':     'Legacy alias for data_cols: exact column names to plot.',
     'data_col_contains':    'Substring filter for data column names. Alias of column_strings.',
     'column_strings':       'Legacy alias for data_col_contains.',
@@ -19453,8 +24632,16 @@ _PARAM_DESCRIPTIONS = {
     'normalize':            'Normalize values to the first condition (fold-change).',
     'ns':                   'Label for non-significant results (default "ns").',
     'multiple_comparison':  'Stats test type: "One-Way" (ANOVA/Kruskal) or "Two-Way".',
+    'stats_test':           'Explicit group-test override for mean bars: "auto", "student_t", "welch_t", "mannwhitney", "anova", "welch_anova", "kruskal", "two_way", or "linear_model".',
+    'variance_test':        'Equal-variance screen for auto stats: "Brown-Forsythe" (default), "Levene", "Bartlett", "Fligner-Killeen", or "none".',
+    'variance_alpha':       'Alpha threshold for the equal-variance screen (default 0.05).',
+    'auto_welch':           'If True, auto stats route normal unequal-variance one-way designs to Welch ANOVA/Tamhane instead of ordinary ANOVA/Tukey.',
+    'covariates':           'Covariate column(s) for stats_test="linear_model" in plot_mean_bars.',
+    'categorical_covariates': 'Subset of covariates to treat as categorical in linear-model stats.',
+    'cov_type':             'Statsmodels covariance type for linear-model stats, e.g. "HC3"; None uses ordinary standard errors.',
+    'cov_kwds':             'Keyword arguments passed to the statsmodels covariance estimator for linear-model stats.',
     'force_nonparametric':  'Force non-parametric tests regardless of normality.',
-    'posthoc':              'Post-hoc test. ANOVA accepts "Tukey", "Dunnett", "Fisher LSD", "Bonferroni", "Sidak", "Holm-Sidak", "Scheffe", or "Tamhane T2"; Kruskal-Wallis accepts "Conover", "Dunn", "Nemenyi", or "DSCF".',
+    'posthoc':              'Post-hoc test. ANOVA accepts "Tukey", "Dunnett", "Fisher LSD", "Bonferroni", "Sidak", "Holm-Sidak", "Scheffe", or "Tamhane T2"; Welch ANOVA accepts "Tamhane T2" or "Games-Howell"; Kruskal-Wallis accepts "Conover", "Dunn", "Nemenyi", or "DSCF".',
     'posthoc_correction':   'P-value correction for Dunn/Conover or Fisher LSD: "auto", "Bonferroni", "Sidak", "Holm", "Holm-Sidak", "Simes-Hochberg", "Hommel", "FDR-BH", "FDR-BY", "FDR-TSBH", "FDR-TSBKY", or "Uncorrected".',
     'bottom_ticks':         'Show tick marks on the bottom axis.',
     'bottom_tick_labels':   'Show tick labels on the bottom axis.',
@@ -19462,6 +24649,55 @@ _PARAM_DESCRIPTIONS = {
     'normality_dpi':        'DPI for normality test figures.',
     'dry_run':              'Compute stats without rendering; returns a DataFrame summary.',
     'combine':              'Overlay all groups on one panel instead of separate figures.',
+    'include_all':          'Include the overall All column in baseline-characteristics tables (default True).',
+    'audit_table':          'Precomputed significance-audit table as a pandas DataFrame or path-like CSV source.',
+    'model_table':          'Precomputed long-form model-result table as a pandas DataFrame, path, named PyFLASH object table, or table-like object.',
+    'adjusted_means':       'Linear-model adjusted-means table, or True/False in linear_model_pipeline to compute it.',
+    'coefficients':         'Linear-model coefficients table, usually linear_model_pipeline["coefficients"] or linear_model_coefficients.csv.',
+    'comparisons_path':     'CSV path for a linear-model adjusted-mean comparisons table.',
+    'comparisons_attr':     'Named attribute/table on a pipeline result object holding adjusted-mean comparisons.',
+    'raw_data':             'Raw row-level data to overlay on adjusted-mean plots. May be a DataFrame, CSV path, or per-outcome mapping.',
+    'raw_path':             'CSV path for raw row-level data to overlay on adjusted-mean plots.',
+    'raw_attr':             'Named attribute/table on a PyFLASH result object holding raw row-level model data.',
+    'raw_value_col':        'Column in raw_data containing observed outcome values. Defaults to dependent_variable.',
+    'raw_group_col':        'Column in raw_data containing observed group labels. Defaults to group.',
+    'show_raw':             'Overlay raw model-input rows on adjusted-mean plots when raw_data is available.',
+    'raw_point_alpha':      'Transparency for raw row-level points in adjusted-mean plots.',
+    'raw_point_size':       'Marker size for raw row-level points in adjusted-mean plots.',
+    'raw_point_jitter':     'Horizontal jitter width for raw row-level points in adjusted-mean plots.',
+    'raw_label':            'Legend label for raw row-level points in adjusted-mean plots.',
+    'adjusted_label':       'Legend label for adjusted estimated marginal mean markers.',
+    'path':                 'CSV path for a precomputed table-style plotting source.',
+    'table_attr':           'Named attribute/table on a PyFLASH object to use as the precomputed model-result source.',
+    'row_col':              'Column identifying matrix rows in a long-form model-result table, such as outcome or metric.',
+    'row_label_col':        'Column used as row labels in table-style plots. If omitted, a label-like column is inferred.',
+    'profile_col':          'Column identifying model profiles/predictor sets in a long-form model-result table.',
+    'value_col':            'Numeric column used for model-result matrix cell colour and displayed values.',
+    'p_col':                'Optional raw p-value column used for model-result matrix significance markers.',
+    'q_col':                'Optional FDR q-value column used for model-result matrix significance markers.',
+    'pvalue_cols':          'Explicit p-value columns to plot. If omitted, numeric 0-1 columns are inferred generically.',
+    'id_cols':              'Columns treated as identifiers/metadata rather than p-values during inference.',
+    'aesthetic':            'Significance-audit display style: "table" for baseline-table style or "matrix" for heatmap-style cells.',
+    'subtitle':             'Optional subtitle shown beneath a plot title.',
+    'show_stats_summary':   'Draw the detailed model/test p-value text block beside the figure, so the graph itself stays uncluttered.',
+    'stats_summary_max_items': 'Maximum number of detailed side-panel result rows to show before adding an omitted-count line.',
+    'column_labels':        'Per-column display-name override: a {column: label} dict (keys are the plotted column names) or a positional list matching the plotted columns. Renames legend/axis/annotation/matrix text only; column identity (palette keys, describe records, saved data) is unchanged.',
+    'profile_labels':       'Optional mapping from model profile values to display labels.',
+    'value_label':          'Colorbar label for a model-result matrix; defaults from value_col.',
+    'value_format':         'P-value display format: "p" for compact p-values, a format spec, a format string, or a callable.',
+    'p_alpha':              'Raw p-value threshold for model-result matrix markers.',
+    'q_alpha':              'FDR q-value threshold for model-result matrix markers.',
+    'significance_markers': 'Optional mapping for model-result markers, e.g. {"p": "*", "q": "+"}.',
+    'filename':             'Base filename used when saving a standalone table-style figure.',
+    'model_note':           'Grey explanatory note below a model-result matrix; "auto" describes the displayed y ~ model profile.',
+    'footer':               'Footer text below a model-result matrix; "auto" explains the value and marker thresholds.',
+    'subfolder':            'Output subfolder name for table-style saved figures.',
+    'return_data':          'Return reusable matrices/tables along with saved output metadata.',
+    'emit_report':          'When True, emit structured records to PyFLASH.report if the describe collector is active.',
+    'montage':              'Mark the saved figure as a headline pipeline figure for montage assembly.',
+    'show_ci':              'Draw confidence intervals around plotted estimates when a plot computes them.',
+    'covariate_adjustment': 'For covariate-adjusted Spearman correlation plots: "rank_then_residual" ranks numeric variables before residualising; "residual_then_correlation" residualises raw values first, then computes the requested correlation.',
+    'ci_alpha':             'Alpha level for confidence intervals; 0.05 gives 95% intervals.',
     'merge':                'Synonym for combine in some functions.',
     'group_list':           'Optional PyFLASH groupList when passing a raw pandas DataFrame directly.',
     'groups':               'Iterable of group objects for raw DataFrame input. Alias of group_list.',
@@ -19471,6 +24707,14 @@ _PARAM_DESCRIPTIONS = {
     'subject_col':          'Subject/sample/animal ID column in a raw DataFrame.',
     'animal_col':           'Legacy alias for subject_col.',
     'dataframe_kwargs':     'Advanced from_dataframe options such as colors, labels, ordering, or output paths.',
+    # ── Category counts ──────────────────────────────────────────────
+    'category':             'Categorical metadata column to count per group (e.g. "meteorological_season", "Sex"). Pass a list to plot one figure per column.',
+    'kind':                 'Bar layout: "grouped" (a cluster of bars per group) or "stacked" (one stacked bar per group).',
+    'category_order':       'Explicit order/subset of category levels; default is the categorical order, else sorted unique values.',
+    'category_labels':      'Optional {raw level: display label} mapping for legend labels.',
+    'palette':              'Category colours for categorical plots, or a seaborn/matplotlib palette name for matrix heatmaps.',
+    'annotate':             'Draw the count (or %) on each bar (default True).',
+    'legend':               'Show the category legend (default True).',
     # ── Marker-based functions ───────────────────────────────────────
     'marker':               'Marker name (e.g. "Iba1") or list of markers.',
     'markers':              'List of marker names to include (None = all).',
@@ -19528,6 +24772,38 @@ _PARAM_DESCRIPTIONS = {
     'size_factor':          'For 3D scatter, multiply size_by-derived point sizes.',
     'elevation':            'For 3D scatter, camera elevation in degrees.',
     'azimuth':              'For 3D scatter, camera azimuth in degrees.',
+    # ── Correlation contrast ─────────────────────────────────────────
+    'reference':            'Baseline group every other group is contrasted against '
+                            '(Fisher r-to-z). Defaults to the first group. Alias: control.',
+    'covariates':           'Optional adjustment columns for covariate-adjusted correlations or '
+                            'model coefficients. For Spearman correlation plots, '
+                            'covariate_adjustment controls whether numeric variables/covariates '
+                            'are rank-transformed before residualising. Omit for raw correlations.',
+    'significance':         'How to draw the between-group contrast: "lines" (one comparison line '
+                            'per significant measure per group, stacked above the axis, default), '
+                            '"stars" (per-measure stars at each node), "omnibus" (one Cauchy/ACAT '
+                            'comparison bracket per group vs the reference), or None (neither).',
+    'tail':                 'Alternative hypothesis for the between-group contrast: "two" (default), '
+                            '"greater"/"less" for a pre-specified direction, or "one" to halve the '
+                            'two-sided p in the observed direction. One-sided tests are only valid '
+                            'when the direction was chosen before seeing the data.',
+    'x_axis_width_scale':   'For correlation/coefficient contrast slopegraphs, multiplier for the '
+                            'plotted x-axis/data-region width only. Lower values pull group ticks '
+                            'closer together without changing the figure size; 1.0 restores the '
+                            'original spacing.',
+    'node_size':            'For correlation/coefficient contrast slopegraphs, marker diameter '
+                            'for the group nodes, in points.',
+    'rank':                 'Rank-transform x and each measure before fitting, giving a monotonic '
+                            '(Spearman-flavoured) version of the coefficient contrast.',
+    'associations':         'Ordered association specs to plot: either {display name: {x, y, covariates}} '
+                            'or a list of {x, y, covariates} mappings with labels inferred from the columns.',
+    'ci_method':            'Association-coefficient interval method: "bootstrap" (default) or "ols". '
+                            'The joint moderation test always uses the shared stratified bootstrap.',
+    'bootstrap_resamples':  'Number of group-stratified subject bootstrap resamples used for association '
+                            'coefficient intervals and the joint moderation test (default 5000).',
+    'terms':                'Restrict which model terms are drawn: a regex string (e.g. ":" for '
+                            'interactions only) or an iterable of exact names/substrings. Useful when '
+                            'main effects and interactions sit on very different scales.',
     # ── Volcano ──────────────────────────────────────────────────────
     'control':              'Name of the control condition for fold-change calculation.',
     'p_threshold':          'Significance threshold for highlighting (default 0.05).',
@@ -19568,13 +24844,16 @@ _PARAM_DESCRIPTIONS = {
                             '(aliases "pearson"/"p", "spearman"/"s", "kendall"/"k" also work).',
     'first_columns':        'Pin these columns to the left of the matrix.',
     'tick_label_size':      'Font size for axis tick labels.',
+    'cmap':                 'Matplotlib colormap name/object used for heatmap cell colours. Matrix plots also accept palette as a seaborn-friendly alias.',
+    'vmin':                 'Manual lower bound for heatmap colour scaling.',
+    'vmax':                 'Manual upper bound for heatmap colour scaling.',
     'prefix_order':         'Custom ordering of column prefixes.',
     'marker_order':         'Custom ordering of markers.',
     'share_columns_across_panels': 'Use same columns in every panel (default True).',
     'drop_duplicate_columns':      'Remove duplicate column entries.',
     'triangle':             'Matrix display mask: None/"full" for all cells, "lower" for lower-left, or "upper" for upper-right.',
     'show_diagonal':        'Show self-correlation diagonal cells in matrix views. Set False for slope/triangle matrices.',
-    'show_values':          'Write formatted numeric matrix values inside visible cells.',
+    'show_values':          'Write formatted numeric values directly on plot elements where supported.',
     'value_format':         'Format for in-cell matrix numbers, e.g. ".2f" or "{:.3f}".',
     # ── Rectangular matrices ─────────────────────────────────────────
     'leading_data_cols':        'Columns pinned to the left/top of a matrix. Alias of first_columns.',
@@ -19588,6 +24867,7 @@ _PARAM_DESCRIPTIONS = {
     'against_exclude':          'Legacy alias for against_data_col_exclude.',
     'outcomes':                 'Outcome columns modelled by linear_model. Alias of dependent_variables.',
     'dependent_variables':      'Legacy alias for outcomes in linear_model.',
+    'dependent_variable':       'Single outcome/dependent-variable to render from a model-result or adjusted-means table.',
     'predictors':               'Predictor/covariate columns, or candidate predictors in model sweeps.',
     'group':                    'Legacy primary grouping column for linear_model adjusted means.',
     'categorical':              'Categorical predictors for linear models. "auto" detects text/bool columns; group is treated as categorical.',
@@ -19605,12 +24885,19 @@ _PARAM_DESCRIPTIONS = {
     'adjusted_mean_weights':    'For reference-grid adjusted means, weight categorical covariate combinations equally or by observed sample frequency: "equal" or "observed".',
     'adjusted_mean_p_adjust':   'Multiple-comparison correction for adjusted-mean contrasts, e.g. "holm", "fdr_bh", "bonferroni", or "none".',
     'adjusted_mean_p_family':   'Family for adjusted-mean contrast correction: "dependent_variable" or "all".',
+    'adjustment_label':         'Text shown on adjusted-mean plots to state the covariates; "auto" infers from pipeline metadata, False hides it.',
+    'comparison_p_col':         'P-value column used for adjusted-mean comparison annotations, usually p_adjusted or p_value.',
     'plot_adjusted_means':      'Save adjusted mean point/errorbar plots for each dependent variable.',
+    'plot_raw_values':          'For linear_model_pipeline, overlay raw model-input rows on adjusted-mean plots.',
     'plot_coefficients':        'Save a coefficient forest plot for the fitted linear models.',
     'coefficient_gate':         'P-value column used to highlight coefficient forest terms: "p" or "fdr".',
     'max_coefficient_terms':    'Maximum coefficient terms shown in the coefficient forest plot.',
+    'title':                    'Optional figure title. Some model-summary plots omit a title by default to keep compact outputs clean.',
     'predictor_order':          'Custom ordering for multivariable regression predictor-set labels.',
-    'value':                    'Matrix value to colour, e.g. "r2", "adj_r2", "p", or "q".',
+    'value':                    'Matrix value to colour, e.g. "r2", "adj_r2", "p", or "q". For '
+                                'plot_coefficient_contrast instead selects the plotted node value: '
+                                '"beta" (standardized coefficient, equals Pearson r when no '
+                                'covariates are given) or "slope" (raw y-per-x units).',
     'correction':               'P-value correction for matrix significance annotations: "fdr" or "none".',
     'candidate_predictors':     'Candidate feature columns for iterative_model_sweep.',
     'possible_predictors':      'Legacy alias for candidate_predictors in iterative_model_sweep.',
@@ -19742,7 +25029,7 @@ _PARAM_DESCRIPTIONS = {
     'order':                'Custom ordering. For pie charts, sets slice/stack order clockwise from the top; for Sankey, use "auto" or a list of markers.',
     # ── Shared ───────────────────────────────────────────────────────
     'points':               'Overlay individual data points on bar charts.',
-    'point_fill':           'Mean bars: data-point fill color; use "group" to fill points with each group color.',
+    'point_fill':           'Mean bars/regressions: data-point fill color; use "group" for group-coloured points.',
     'point_edge':           'Mean bars: data-point edge color; use "group" for each group color or "none" for no edge.',
     'point_linewidth':      'Mean bars: linewidth for overlaid data-point edges.',
     'enforce_shared_columns': 'Force all panels to use the same column set.',
@@ -19971,12 +25258,67 @@ def plot_power_curve(batch=None, *, effect_sizes=(0.2, 0.5, 0.8), n_range=(2, 30
     return (fig, data) if return_data else fig
 
 
+def _annotate_pca_stats_summary(ax, *, feature_columns, explained_variance,
+                                loadings_df=None, n_subjects=None,
+                                max_items=None):
+    """Draw PCA variance/loading details in the removable side panel."""
+    evr = np.asarray(explained_variance, dtype=float)
+    lines = [
+        "Analysis: PCA",
+        f"Subjects: {n_subjects if n_subjects is not None else 'n/a'}",
+        f"Features: {len(feature_columns or [])}",
+    ]
+    for i, value in enumerate(evr[:3], start=1):
+        lines.append(f"PC{i}: {_format_side_stats_value(value * 100.0, 3)}% variance")
+    if isinstance(loadings_df, pd.DataFrame) and not loadings_df.empty:
+        load = loadings_df.copy()
+        score = (load.get("PC1", 0.0) ** 2 + load.get("PC2", 0.0) ** 2)
+        order = score.sort_values(ascending=False).index.tolist()
+        detail = [
+            (
+                f"{get_display_name(col, minimal=True)}: "
+                f"PC1={_format_side_stats_value(load.loc[col, 'PC1'], 3)}, "
+                f"PC2={_format_side_stats_value(load.loc[col, 'PC2'], 3)}"
+            )
+            for col in order
+            if "PC1" in load.columns and "PC2" in load.columns
+        ]
+        if detail:
+            lines.extend(["Top loadings:", *_limit_stats_detail_lines(detail, max_items=max_items)])
+    return _annotate_stats_detail_text(ax, lines)
+
+
+def _annotate_timecourse_stats_summary(ax, fits, *, model, max_items=None):
+    """Draw growth-curve fit details in the removable side panel."""
+    detail = []
+    for group, fit in (fits or {}).items():
+        if not fit:
+            detail.append(f"{group}: fit failed")
+            continue
+        detail.append(
+            f"{group}: {fit.get('model', model)}, "
+            f"n={fit.get('n', 'n/a')}, "
+            f"R2={_format_side_stats_value(fit.get('r_squared'), 3)}, "
+            f"AIC={_format_side_stats_value(fit.get('aic'), 3)}"
+        )
+    if not detail:
+        return None
+    lines = [
+        "Fit: growth curve",
+        f"Selection: {model}",
+        *_limit_stats_detail_lines(detail, max_items=max_items),
+    ]
+    return _annotate_stats_detail_text(ax, lines)
+
+
+@column_label_scope
 def plot_marker_pca(batch, columns=None, data_cols=None, column_strings=None,
                     regex_string=None, exclude='', data_col_contains=None,
                     data_col_regex=None, data_col_exclude=None,
                     hue_column="Condition", specificity=None, filter_by=None,
                     standardize=True, n_components=2, annotate_loadings=True,
-                    max_loadings=12, palette=None, title=None,
+                    max_loadings=12, palette=None, title=None, column_labels=None,
+                    show_stats_summary=True, stats_summary_max_items=8,
                     save=False, save_path=None, save_name=None, dpi=600,
                     return_data=False, condition_col="Condition",
                     factor_cols=None, animal_col="AnimalName",
@@ -20054,6 +25396,11 @@ def plot_marker_pca(batch, columns=None, data_cols=None, column_strings=None,
     pca = PCA(n_components=n_keep)
     scores = pca.fit_transform(Xv)
     evr = pca.explained_variance_ratio_
+    loadings_df = pd.DataFrame(
+        pca.components_[:2].T,
+        index=feat_cols,
+        columns=["PC1", "PC2"],
+    )
 
     fig, ax = plt.subplots(figsize=(8, 7), layout="constrained")
     color_map = _categorical_colors(list(hue.unique()), palette)
@@ -20064,7 +25411,7 @@ def plot_marker_pca(batch, columns=None, data_cols=None, column_strings=None,
                    linewidth=0.5, label=str(level))
 
     if annotate_loadings:
-        load = pca.components_[:2].T  # (features, 2)
+        load = loadings_df[["PC1", "PC2"]].to_numpy(dtype=float)  # (features, 2)
         scale = 0.9 * np.abs(scores[:, :2]).max() / (np.abs(load).max() or 1.0)
         order = np.argsort(-(load[:, 0] ** 2 + load[:, 1] ** 2))[:max_loadings]
         for i in order:
@@ -20079,6 +25426,15 @@ def plot_marker_pca(batch, columns=None, data_cols=None, column_strings=None,
     ax.set_ylabel(f"PC2 ({evr[1] * 100:.1f}%)")
     ax.set_title(title or f"Marker profile PCA (n={len(X)} subjects)")
     ax.legend(frameon=False, title=hue_column)
+    if show_stats_summary:
+        _annotate_pca_stats_summary(
+            ax,
+            feature_columns=feat_cols,
+            explained_variance=evr,
+            loadings_df=loadings_df,
+            n_subjects=len(X),
+            max_items=stats_summary_max_items,
+        )
 
     if save:
         save_fig(fig, _stat_plot_save_path(batch, save_path),
@@ -20087,15 +25443,17 @@ def plot_marker_pca(batch, columns=None, data_cols=None, column_strings=None,
     if return_data:
         scores_df = pd.DataFrame(scores[:, :2], columns=["PC1", "PC2"], index=X.index)
         scores_df[hue_column] = hue
-        loadings_df = pd.DataFrame(pca.components_[:2].T, index=feat_cols, columns=["PC1", "PC2"])
         return fig, {"scores": scores_df, "loadings": loadings_df, "explained_variance": evr}
     return fig
 
 
+@column_label_scope
 def plot_timecourse(batch, column, time_col="Time", group_col="Genotype",
                     model="auto", specificity=None, filter_by=None,
                     time_map=None, animal_col="AnimalName", subject_col=None,
-                    palette=None, show_points=True, title=None, save=False,
+                    palette=None, show_points=True, title=None,
+                    column_labels=None, show_stats_summary=True,
+                    stats_summary_max_items=8, save=False,
                     save_path=None, save_name=None, dpi=600,
                     return_data=False, condition_col="Condition",
                     factor_cols=None, group_list=None, groups=None,
@@ -20177,11 +25535,717 @@ def plot_timecourse(batch, column, time_col="Time", group_col="Genotype",
     ax.set_ylabel(str(column))
     ax.set_title(title or f"{column} time-course")
     ax.legend(frameon=False, title=group_col)
+    if show_stats_summary:
+        _annotate_timecourse_stats_summary(
+            ax,
+            fits,
+            model=model,
+            max_items=stats_summary_max_items,
+        )
 
     if save:
         save_fig(fig, _stat_plot_save_path(batch, save_path),
                  strip_name(save_name or f"{column}_timecourse"), verbose=False)
     return (fig, fits) if return_data else fig
+
+
+_OVW_SENTINEL = "NOT_INCLUDED_IN_EXPERIMENT"
+
+
+def _ovw_missingness_codes(scope_df, columns):
+    """Animals x columns code matrix: 0 present, 1 NaN, 2 not-included, 3 excluded."""
+    cols = list(columns)
+    n_rows = int(len(scope_df))
+    codes = np.zeros((n_rows, len(cols)), dtype=int)
+    for j, col in enumerate(cols):
+        s = scope_df[col]
+        excl = is_excluded_mask(s).to_numpy()
+        sent = (
+            s.astype(str).str.contains(_OVW_SENTINEL, na=False).to_numpy()
+            & ~excl
+        )
+        nan = s.isna().to_numpy() & ~sent & ~excl
+        codes[:, j] = np.select([excl, sent, nan], [3, 2, 1], default=0)
+    return codes
+
+
+def _ovw_missingness_figure(scope_df, columns, tick_label_size, title):
+    """Animals x columns map: present / missing (NaN) / not-included / excluded."""
+    from matplotlib.patches import Patch
+
+    cols = list(columns)
+    n_rows = int(len(scope_df))
+    if n_rows == 0 or len(cols) == 0:
+        return None
+    codes = _ovw_missingness_codes(scope_df, cols)
+
+    fig_w = min(max(7.0, len(cols) * 0.32), 30.0)
+    fig_h = min(max(5.0, n_rows * 0.28), 27.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    cmap = ListedColormap(["#2ca25f", "#bdbdbd", "#fdae61", "#de2d26"])
+    ax.imshow(codes, aspect="auto", cmap=cmap, vmin=0, vmax=3,
+              interpolation="none")
+    tick_fs = max(6, min(int(tick_label_size), int(200 / max(len(cols), 1))))
+    ax.set_xticks(range(len(cols)))
+    ax.set_xticklabels(
+        [str(c)[:28] for c in cols], rotation=90, fontsize=tick_fs)
+    if "AnimalName" in scope_df.columns:
+        ax.set_yticks(range(n_rows))
+        ax.set_yticklabels(
+            [str(a)[:24] for a in scope_df["AnimalName"]],
+            fontsize=max(6, min(int(tick_label_size), int(220 / max(n_rows, 1)))))
+    ax.set_title(title, fontsize=int(tick_label_size))
+    handles = [
+        Patch(color="#2ca25f", label="present"),
+        Patch(color="#bdbdbd", label="missing (NaN)"),
+        Patch(color="#fdae61", label="not included"),
+        Patch(color="#de2d26", label="excluded"),
+    ]
+    ax.legend(handles=handles, bbox_to_anchor=(1.01, 1.0),
+              loc="upper left", fontsize=9, frameon=False)
+    fig.tight_layout()
+    return fig
+
+
+def _ovw_short_label(value, limit=34):
+    text = str(value)
+    limit = max(4, int(limit))
+    return text if len(text) <= limit else text[:limit - 1] + "..."
+
+
+def _ovw_numeric_figure_columns(numeric_cols, inventory):
+    """Numeric columns worth visualising; excludes identifiers/all-missing roles."""
+    cols = list(numeric_cols or [])
+    common_ids = {"animalname", "animal", "id", "subject", "subjectid"}
+    if inventory is None or inventory.empty or "column" not in inventory.columns:
+        return [c for c in cols if str(c).replace("_", "").lower() not in common_ids]
+    inv = inventory.set_index("column")
+    out = []
+    for col in cols:
+        if str(col).replace("_", "").lower() in common_ids:
+            continue
+        role = str(inv.loc[col, "role"]) if col in inv.index else ""
+        if role in {"identifier", "all_missing"}:
+            continue
+        out.append(col)
+    return out
+
+
+def _ovw_limit_columns(columns, max_items):
+    cols = list(columns or [])
+    if max_items is None:
+        return cols
+    return cols[:max(1, int(max_items))]
+
+
+def _ovw_group_counts_figure(group_counts, tick_label_size, max_items):
+    """Bar chart of subject counts per group/factor level."""
+    if group_counts is None or group_counts.empty:
+        return None
+    df = group_counts.copy()
+    detail = df[df["grouping"].astype(str) != "(all)"].copy()
+    if detail.empty:
+        detail = df.copy()
+    if max_items is not None and len(detail) > int(max_items):
+        detail = detail.nlargest(int(max_items), "n_animals")
+
+    detail["label"] = np.where(
+        detail["grouping"].astype(str).eq("(all)"),
+        detail["level"].astype(str),
+        detail["grouping"].astype(str) + ": " + detail["level"].astype(str),
+    )
+    detail = detail.iloc[::-1].reset_index(drop=True)
+    n = len(detail)
+    fig_h = min(max(3.5, 0.38 * n + 1.7), 18.0)
+    fig, ax = plt.subplots(figsize=(8.5, fig_h))
+    y = np.arange(n)
+    groupings = detail["grouping"].astype(str).tolist()
+    palette = dict(zip(sorted(set(groupings)), plt.cm.tab10.colors))
+    colors = [palette[g] for g in groupings]
+    ax.barh(y, detail["n_animals"].astype(float), color=colors, alpha=0.86)
+    ax.set_yticks(y)
+    ax.set_yticklabels(
+        [_ovw_short_label(v, 42) for v in detail["label"]],
+        fontsize=max(7, int(tick_label_size) - 8),
+    )
+    ax.set_xlabel("Subjects", fontsize=max(9, int(tick_label_size) - 5))
+    ax.set_title("Group counts", fontsize=int(tick_label_size))
+    xmax = float(detail["n_animals"].max()) if len(detail) else 0.0
+    ax.set_xlim(0, xmax * 1.15 + 1)
+    for yi, val in zip(y, detail["n_animals"]):
+        ax.text(float(val) + max(0.15, xmax * 0.02), yi, str(int(val)),
+                va="center", fontsize=max(7, int(tick_label_size) - 9))
+    ax.grid(axis="x", alpha=0.25)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def _ovw_availability_figure(availability, tick_label_size, max_items):
+    """Heatmap of available subject counts for each metric x group."""
+    if availability is None or availability.empty:
+        return None
+    df = availability.copy()
+    df = df.apply(pd.to_numeric, errors="coerce")
+    if df.empty or df.shape[1] == 0:
+        return None
+    order = df.min(axis=1).sort_values(kind="mergesort").index.tolist()
+    df = df.loc[order]
+    if max_items is not None and len(df) > int(max_items):
+        df = df.iloc[:int(max_items)]
+
+    arr = df.to_numpy(dtype=float)
+    fig_w = min(max(7.0, df.shape[1] * 1.2), 16.0)
+    fig_h = min(max(4.0, df.shape[0] * 0.32 + 1.8), 18.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    im = ax.imshow(arr, aspect="auto", cmap="YlGnBu", interpolation="none")
+    ax.set_title("Availability by condition", fontsize=int(tick_label_size))
+    ax.set_xticks(range(df.shape[1]))
+    ax.set_xticklabels([_ovw_short_label(c, 22) for c in df.columns],
+                       rotation=45, ha="right",
+                       fontsize=max(7, int(tick_label_size) - 8))
+    ax.set_yticks(range(df.shape[0]))
+    ax.set_yticklabels([_ovw_short_label(i, 42) for i in df.index],
+                       fontsize=max(7, int(tick_label_size) - 9))
+    if df.size <= 180:
+        for i in range(df.shape[0]):
+            for j in range(df.shape[1]):
+                val = arr[i, j]
+                if np.isfinite(val):
+                    ax.text(j, i, str(int(val)), ha="center", va="center",
+                            fontsize=7, color="black")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
+    cbar.set_label("Non-missing subjects")
+    fig.tight_layout()
+    return fig
+
+
+def _ovw_metric_distributions_figure(numeric_df, numeric_cols, tick_label_size,
+                                     max_items):
+    """Z-scored subject-level distributions for each numeric summary metric."""
+    cols = []
+    data = []
+    for col in _ovw_limit_columns(numeric_cols, max_items):
+        vals = pd.to_numeric(numeric_df[col], errors="coerce").dropna()
+        if len(vals) < 2:
+            continue
+        sd = float(vals.std(ddof=1))
+        if not np.isfinite(sd) or sd == 0:
+            continue
+        z = ((vals - float(vals.mean())) / sd).to_numpy(dtype=float)
+        cols.append(col)
+        data.append(z)
+    if not data:
+        return None
+
+    n = len(data)
+    fig_h = min(max(4.5, 0.34 * n + 1.8), 18.0)
+    fig, ax = plt.subplots(figsize=(9.0, fig_h))
+    bp = ax.boxplot(data, vert=False, patch_artist=True, showfliers=False,
+                    widths=0.62)
+    for patch in bp["boxes"]:
+        patch.set_facecolor("#9ecae1")
+        patch.set_edgecolor("#3182bd")
+        patch.set_alpha(0.75)
+    for key in ("whiskers", "caps", "medians"):
+        for artist in bp[key]:
+            artist.set_color("#08519c")
+            artist.set_linewidth(1.2)
+    for yi, vals in enumerate(data, start=1):
+        jitter = np.linspace(-0.17, 0.17, len(vals)) if len(vals) > 1 else [0]
+        ax.scatter(vals, yi + jitter, s=pyflash_point_size(backend="area"),
+                   color="#252525", alpha=0.55, linewidths=0)
+    ax.axvline(0, color="#636363", linewidth=1.0, alpha=0.7)
+    ax.set_yticks(range(1, n + 1))
+    ax.set_yticklabels([_ovw_short_label(c, 44) for c in cols],
+                       fontsize=max(7, int(tick_label_size) - 9))
+    ax.set_xlabel("Z-score within metric", fontsize=max(9, int(tick_label_size) - 5))
+    ax.set_title("Metric distributions", fontsize=int(tick_label_size))
+    ax.grid(axis="x", alpha=0.25)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def _ovw_descriptives_figure(descriptives, tick_label_size, max_items):
+    """Rank metrics by coefficient of variation from descriptive statistics."""
+    if descriptives is None or descriptives.empty:
+        return None
+    df = descriptives.copy()
+    required = {"column", "n", "cv_pct", "q25", "q75"}
+    if not required.issubset(df.columns):
+        return None
+    df["iqr"] = pd.to_numeric(df["q75"], errors="coerce") - pd.to_numeric(
+        df["q25"], errors="coerce")
+    agg = (
+        df.groupby("column", as_index=False)
+        .agg(n_min=("n", "min"), cv_pct=("cv_pct", "mean"), iqr=("iqr", "mean"))
+    )
+    agg["cv_pct"] = pd.to_numeric(agg["cv_pct"], errors="coerce")
+    agg = agg[np.isfinite(agg["cv_pct"])]
+    if agg.empty:
+        return None
+    agg = agg.sort_values("cv_pct", ascending=False, kind="mergesort")
+    if max_items is not None and len(agg) > int(max_items):
+        agg = agg.head(int(max_items))
+    agg = agg.iloc[::-1].reset_index(drop=True)
+
+    n = len(agg)
+    fig_h = min(max(4.0, 0.34 * n + 1.8), 18.0)
+    fig, ax = plt.subplots(figsize=(9.0, fig_h))
+    y = np.arange(n)
+    ax.barh(y, agg["cv_pct"], color="#74c476", alpha=0.9)
+    ax.set_yticks(y)
+    ax.set_yticklabels([_ovw_short_label(c, 44) for c in agg["column"]],
+                       fontsize=max(7, int(tick_label_size) - 9))
+    ax.set_xlabel("Coefficient of variation (%)",
+                  fontsize=max(9, int(tick_label_size) - 5))
+    ax.set_title("Descriptive variability summary", fontsize=int(tick_label_size))
+    xmax = float(agg["cv_pct"].max()) if len(agg) else 0.0
+    ax.set_xlim(0, xmax * 1.2 + 1)
+    for yi, row in agg.iterrows():
+        ax.text(float(row["cv_pct"]) + max(0.15, xmax * 0.02), yi,
+                f"n>={int(row['n_min'])}", va="center",
+                fontsize=max(7, int(tick_label_size) - 9))
+    ax.grid(axis="x", alpha=0.25)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def _ovw_normality_figure(normality, alpha, tick_label_size, max_items):
+    """Heatmap of Shapiro p-values with nonparametric hints overlaid."""
+    if normality is None or normality.empty:
+        return None
+    if not {"group", "column", "shapiro_p", "suggested"}.issubset(normality.columns):
+        return None
+    df = normality.copy()
+    df["shapiro_p"] = pd.to_numeric(df["shapiro_p"], errors="coerce")
+    order = (
+        df.groupby("column")["shapiro_p"].min().sort_values(kind="mergesort")
+        .index.tolist()
+    )
+    if max_items is not None and len(order) > int(max_items):
+        order = order[:int(max_items)]
+    df = df[df["column"].isin(order)]
+    if df.empty:
+        return None
+    pvt = df.pivot_table(index="group", columns="column", values="shapiro_p",
+                         aggfunc="min").reindex(columns=order)
+    arr = pvt.to_numpy(dtype=float)
+    masked = np.ma.masked_invalid(arr)
+    cmap = plt.cm.viridis.copy()
+    cmap.set_bad("#d9d9d9")
+
+    fig_w = min(max(8.0, pvt.shape[1] * 0.55 + 2.0), 24.0)
+    fig_h = min(max(3.5, pvt.shape[0] * 0.45 + 2.0), 12.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    im = ax.imshow(masked, aspect="auto", cmap=cmap, vmin=0.0, vmax=1.0,
+                   interpolation="none")
+    ax.set_title(f"Normality screen (Shapiro p, alpha={float(alpha):g})",
+                 fontsize=int(tick_label_size))
+    ax.set_xticks(range(pvt.shape[1]))
+    ax.set_xticklabels([_ovw_short_label(c, 26) for c in pvt.columns],
+                       rotation=90, fontsize=max(7, int(tick_label_size) - 9))
+    ax.set_yticks(range(pvt.shape[0]))
+    ax.set_yticklabels([_ovw_short_label(g, 28) for g in pvt.index],
+                       fontsize=max(7, int(tick_label_size) - 8))
+    if pvt.size <= 220:
+        for i in range(pvt.shape[0]):
+            for j in range(pvt.shape[1]):
+                p = arr[i, j]
+                if not np.isfinite(p):
+                    txt = "n/a"
+                else:
+                    txt = "NP" if p < float(alpha) else "P"
+                ax.text(j, i, txt, ha="center", va="center",
+                        fontsize=7,
+                        color="white" if np.isfinite(p) and p < 0.45 else "black")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
+    cbar.set_label("Shapiro p-value")
+    fig.tight_layout()
+    return fig
+
+
+def _ovw_outlier_summary_figure(outliers, outlier_animals, tick_label_size,
+                                max_items):
+    """Two-panel roll-up of outlier flags by animal and metric."""
+    has_animals = outlier_animals is not None and not outlier_animals.empty
+    has_outliers = outliers is not None and not outliers.empty
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+    fig.suptitle("Outlier summary", fontsize=int(tick_label_size))
+
+    ax = axes[0]
+    if has_animals:
+        a = outlier_animals.copy().sort_values("n_flags", ascending=False)
+        if max_items is not None and len(a) > int(max_items):
+            a = a.head(int(max_items))
+        a = a.iloc[::-1].reset_index(drop=True)
+        y = np.arange(len(a))
+        ax.barh(y, a["n_flags"].astype(float), color="#fb6a4a", alpha=0.88)
+        ax.set_yticks(y)
+        ax.set_yticklabels([_ovw_short_label(v, 24) for v in a["AnimalName"]],
+                           fontsize=max(7, int(tick_label_size) - 9))
+        ax.set_xlabel("Flags")
+        ax.set_title("Animals")
+    else:
+        ax.text(0.5, 0.5, "No flagged subjects", ha="center", va="center")
+        ax.set_axis_off()
+
+    ax = axes[1]
+    if has_outliers:
+        m = (
+            outliers.groupby("column").size().rename("n_flags")
+            .reset_index().sort_values("n_flags", ascending=False)
+        )
+        if max_items is not None and len(m) > int(max_items):
+            m = m.head(int(max_items))
+        m = m.iloc[::-1].reset_index(drop=True)
+        y = np.arange(len(m))
+        ax.barh(y, m["n_flags"].astype(float), color="#9e9ac8", alpha=0.9)
+        ax.set_yticks(y)
+        ax.set_yticklabels([_ovw_short_label(v, 34) for v in m["column"]],
+                           fontsize=max(7, int(tick_label_size) - 9))
+        ax.set_xlabel("Flags")
+        ax.set_title("Metrics")
+    else:
+        ax.text(0.5, 0.5, "No flagged metrics", ha="center", va="center")
+        ax.set_axis_off()
+
+    for ax in axes:
+        ax.grid(axis="x", alpha=0.25)
+        for spine in ("top", "right", "left"):
+            ax.spines[spine].set_visible(False)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    return fig
+
+
+def _ovw_covariation_pairs_figure(covarying, threshold, tick_label_size,
+                                  max_items):
+    """Ranked bar chart of high-correlation metric pairs."""
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    ax.set_title(f"Covarying metric pairs (|r| >= {float(threshold):g})",
+                 fontsize=int(tick_label_size))
+    if covarying is None or covarying.empty:
+        ax.text(0.5, 0.5, "No pairs passed the threshold",
+                ha="center", va="center")
+        ax.set_axis_off()
+        fig.tight_layout()
+        return fig
+
+    df = covarying.copy().sort_values("abs_r", ascending=False)
+    if max_items is not None and len(df) > int(max_items):
+        df = df.head(int(max_items))
+    df["label"] = df.apply(
+        lambda r: f"{_ovw_short_label(r['x'], 24)} vs {_ovw_short_label(r['y'], 24)}",
+        axis=1,
+    )
+    df = df.iloc[::-1].reset_index(drop=True)
+    y = np.arange(len(df))
+    colors = np.where(df["r"].astype(float) >= 0, "#de2d26", "#3182bd")
+    ax.barh(y, df["abs_r"].astype(float), color=colors, alpha=0.88)
+    ax.axvline(float(threshold), color="#252525", linestyle="--", linewidth=1.0)
+    ax.set_yticks(y)
+    ax.set_yticklabels(df["label"], fontsize=max(7, int(tick_label_size) - 9))
+    ax.set_xlabel("Absolute correlation")
+    ax.set_xlim(0, 1.02)
+    for yi, row in df.iterrows():
+        ax.text(min(float(row["abs_r"]) + 0.015, 1.0), yi,
+                f"r={float(row['r']):.2f}", va="center",
+                fontsize=max(7, int(tick_label_size) - 9))
+    ax.grid(axis="x", alpha=0.25)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def _ovw_validate_distribution_plot(kind):
+    key = str(kind).strip().lower()
+    aliases = {
+        "rain": "raincloud",
+        "rainclouds": "raincloud",
+        "box": "boxstrip",
+        "boxplot": "boxstrip",
+        "points": "strip",
+        "point": "strip",
+    }
+    key = aliases.get(key, key)
+    valid = {"raincloud", "boxstrip", "violin", "strip"}
+    if key not in valid:
+        raise ValueError(
+            "condition_distribution_plot must be one of "
+            "'raincloud', 'boxstrip', 'violin', or 'strip'."
+        )
+    return key
+
+
+def _ovw_group_palette(labels):
+    colors = list(plt.cm.tab20.colors)
+    if len(labels) <= 10:
+        colors = list(plt.cm.tab10.colors)
+    return {str(label): colors[i % len(colors)] for i, label in enumerate(labels)}
+
+
+def _ovw_scaled_group_values(numeric_df, col, idx, scale):
+    vals = pd.to_numeric(numeric_df.loc[numeric_df.index.intersection(idx), col],
+                         errors="coerce").dropna().astype(float)
+    if str(scale).lower() != "zscore":
+        return vals.to_numpy(dtype=float)
+    all_vals = pd.to_numeric(numeric_df[col], errors="coerce").dropna()
+    if len(all_vals) < 2:
+        return np.asarray([], dtype=float)
+    sd = float(all_vals.std(ddof=1))
+    if not np.isfinite(sd) or sd == 0:
+        return np.asarray([], dtype=float)
+    return ((vals - float(all_vals.mean())) / sd).to_numpy(dtype=float)
+
+
+def _ovw_condition_distribution_figure(numeric_df, numeric_cols, groups,
+                                       tick_label_size, max_items,
+                                       plot_kind="raincloud", scale="raw"):
+    """Small-multiple group/factor distributions for selected metrics."""
+    cols = _ovw_limit_columns(numeric_cols, max_items)
+    if not cols or not groups:
+        return None
+    kind = _ovw_validate_distribution_plot(plot_kind)
+    scale_key = str(scale).strip().lower()
+    if scale_key not in {"raw", "zscore"}:
+        raise ValueError("condition distribution scale must be 'raw' or 'zscore'.")
+
+    labels = [str(g[0]) for g in groups]
+    palette = _ovw_group_palette(labels)
+    prepared = []
+    for col in cols:
+        data = [_ovw_scaled_group_values(numeric_df, col, gidx, scale_key)
+                for _glabel, gidx, _spec in groups]
+        if any(len(values) > 0 for values in data):
+            prepared.append((col, data))
+    if not prepared:
+        return None
+
+    n = len(prepared)
+    ncols = 2 if n > 1 else 1
+    nrows = int(np.ceil(n / ncols))
+    fig_w = 7.2 * ncols
+    fig_h = min(max(3.7 * nrows, 4.2), 24.0)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h),
+                             squeeze=False)
+    axes_flat = axes.reshape(-1)
+    positions = np.arange(1, len(labels) + 1)
+
+    for ax, (col, data) in zip(axes_flat, prepared):
+        nonempty = [(i, vals) for i, vals in enumerate(data) if len(vals) > 0]
+        if kind in {"raincloud", "violin"} and nonempty:
+            violin = ax.violinplot(
+                [vals for _i, vals in nonempty],
+                positions=[positions[i] for i, _vals in nonempty],
+                widths=0.78,
+                showmeans=False,
+                showmedians=False,
+                showextrema=False,
+            )
+            for body, (i, _vals) in zip(violin["bodies"], nonempty):
+                body.set_facecolor(palette[labels[i]])
+                body.set_edgecolor(palette[labels[i]])
+                body.set_alpha(0.28 if kind == "raincloud" else 0.45)
+        if kind in {"raincloud", "boxstrip"} and nonempty:
+            bp = ax.boxplot(
+                [vals for _i, vals in nonempty],
+                positions=[positions[i] for i, _vals in nonempty],
+                widths=0.32,
+                patch_artist=True,
+                showfliers=False,
+            )
+            for patch, (i, _vals) in zip(bp["boxes"], nonempty):
+                patch.set_facecolor("white")
+                patch.set_edgecolor(palette[labels[i]])
+                patch.set_linewidth(1.3)
+            for key in ("whiskers", "caps", "medians"):
+                for artist in bp[key]:
+                    artist.set_color("#252525")
+                    artist.set_linewidth(1.0)
+        if kind in {"raincloud", "boxstrip", "strip"}:
+            for i, vals in enumerate(data):
+                if len(vals) == 0:
+                    continue
+                if len(vals) == 1:
+                    jitter = np.asarray([0.0])
+                else:
+                    jitter = np.linspace(-0.16, 0.16, len(vals))
+                ax.scatter(
+                    positions[i] + jitter,
+                    vals,
+                    s=18,
+                    color=palette[labels[i]],
+                    alpha=0.72,
+                    linewidths=0,
+                    zorder=3,
+                )
+        ax.set_title(_ovw_short_label(col, 54), fontsize=max(9, int(tick_label_size) - 4))
+        ax.set_xticks(positions)
+        ax.set_xticklabels([_ovw_short_label(label, 20) for label in labels],
+                           rotation=35, ha="right",
+                           fontsize=max(7, int(tick_label_size) - 9))
+        ax.set_ylabel("Z-score" if scale_key == "zscore" else "Value",
+                      fontsize=max(8, int(tick_label_size) - 7))
+        ax.grid(axis="y", alpha=0.22)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
+    for ax in axes_flat[len(prepared):]:
+        ax.set_axis_off()
+    title = "Condition distributions"
+    if scale_key == "zscore":
+        title = "Condition distributions (z-scored within metric)"
+    fig.suptitle(title, fontsize=int(tick_label_size))
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    return fig
+
+
+def _ovw_matrix_figure(matrix, title, tick_label_size, max_items,
+                       cmap="viridis", center_zero=False, colorbar_label=None):
+    """Generic small overview heatmap for group x metric matrices."""
+    if matrix is None or matrix.empty:
+        return None
+    df = matrix.copy()
+    if max_items is not None and df.shape[1] > int(max_items):
+        variability = df.apply(
+            lambda s: pd.to_numeric(s, errors="coerce").max()
+            - pd.to_numeric(s, errors="coerce").min(),
+            axis=0,
+        ).sort_values(ascending=False, kind="mergesort")
+        df = df.loc[:, variability.head(int(max_items)).index]
+    if df.empty:
+        return None
+    arr = df.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    masked = np.ma.masked_invalid(arr)
+    cm = plt.get_cmap(cmap).copy()
+    cm.set_bad("#d9d9d9")
+    if center_zero:
+        finite = arr[np.isfinite(arr)]
+        vmax = max(1.0, float(np.nanmax(np.abs(finite)))) if finite.size else 1.0
+        vmin = -vmax
+    else:
+        finite = arr[np.isfinite(arr)]
+        vmin = float(np.nanmin(finite)) if finite.size else 0.0
+        vmax = float(np.nanmax(finite)) if finite.size else 1.0
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+    fig_w = min(max(7.5, df.shape[1] * 0.52 + 2.0), 24.0)
+    fig_h = min(max(3.6, df.shape[0] * 0.55 + 2.0), 14.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    im = ax.imshow(masked, aspect="auto", cmap=cm, vmin=vmin, vmax=vmax,
+                   interpolation="none")
+    ax.set_title(title, fontsize=int(tick_label_size))
+    ax.set_xticks(range(df.shape[1]))
+    ax.set_xticklabels([_ovw_short_label(c, 28) for c in df.columns],
+                       rotation=90, fontsize=max(7, int(tick_label_size) - 9))
+    ax.set_yticks(range(df.shape[0]))
+    ax.set_yticklabels([_ovw_short_label(g, 28) for g in df.index],
+                       fontsize=max(7, int(tick_label_size) - 8))
+    if df.size <= 120:
+        for i in range(df.shape[0]):
+            for j in range(df.shape[1]):
+                val = arr[i, j]
+                if np.isfinite(val):
+                    ax.text(j, i, f"{val:.2g}", ha="center", va="center",
+                            fontsize=7, color="black")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
+    if colorbar_label:
+        cbar.set_label(colorbar_label)
+    fig.tight_layout()
+    return fig
+
+
+def _lm_fmt_p(value):
+    try:
+        p = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if not np.isfinite(p):
+        return "n/a"
+    if p < 0.0001:
+        return "<0.0001"
+    return f"{p:.4g}"
+
+
+def _lm_method_label(method):
+    text = str(method or "").strip()
+    if text == "":
+        return ""
+    aliases = {
+        "holm": "Holm",
+        "bonferroni": "Bonferroni",
+        "fdr_bh": "FDR-BH",
+        "fdr-by": "FDR-BY",
+        "fdr_by": "FDR-BY",
+        "none": "none",
+    }
+    return aliases.get(text.lower().replace("-", "_"), text)
+
+
+def _lm_comparison_label(comp, condition_list):
+    try:
+        a, b = [int(x) - 1 for x in str(comp).split("-")]
+        if 0 <= a < len(condition_list) and 0 <= b < len(condition_list):
+            return f"{condition_list[a]} vs {condition_list[b]}"
+    except Exception:
+        pass
+    return str(comp)
+
+
+def _lm_annotate_adjusted_mean_stats(ax, comp_df, comparisons, p_col,
+                                     condition_list, post_hoc):
+    """Draw linear-model contrast details with explicit raw/adjusted p labels."""
+    p_col = str(p_col or "p_value")
+    table = pd.DataFrame(comp_df).copy()
+    method = ""
+    if "p_adjust_method" in table.columns and table["p_adjust_method"].notna().any():
+        vals = [
+            _lm_method_label(v)
+            for v in table["p_adjust_method"].dropna().unique()
+            if str(v).strip() != ""
+        ]
+        method = vals[0] if vals else ""
+    uses_adjusted = (
+        p_col == "p_adjusted"
+        and method.lower() not in {"", "none", "nan"}
+    )
+
+    lines = ["Test: Linear model", f"Post-hoc: {post_hoc}"]
+    if uses_adjusted:
+        n_contrasts = len(table) if len(table) else len(comparisons)
+        contrast_word = "contrast" if n_contrasts == 1 else "contrasts"
+        lines.append(f"Bracket labels: adjusted p")
+        lines.append(f"Correction: {method} across {n_contrasts} {contrast_word}")
+    else:
+        lines.append("Bracket labels: raw p")
+
+    for idx, comp in enumerate(comparisons):
+        row = table.iloc[idx] if idx < len(table) else None
+        label = _lm_comparison_label(comp, condition_list)
+        shown = row.get(p_col) if row is not None and p_col in table.columns else np.nan
+        raw = row.get("p_value") if row is not None and "p_value" in table.columns else np.nan
+        if uses_adjusted:
+            lines.append(f"{label}: adj p={_lm_fmt_p(shown)} (raw p={_lm_fmt_p(raw)})")
+        else:
+            lines.append(f"{label}: raw p={_lm_fmt_p(shown)}")
+
+    ax.text(
+        1.08,
+        1.0,
+        "\n".join(lines),
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85},
+        clip_on=False,
+    )
 
 
 def _linear_model_adjusted_means_figure(
@@ -20193,6 +26257,15 @@ def _linear_model_adjusted_means_figure(
     group_color_map=None,
     group_label_map=None,
     group_style_map=None,
+    raw_data=None,
+    raw_value_col=None,
+    raw_group_col=None,
+    show_raw=True,
+    raw_point_alpha=0.42,
+    raw_point_size=None,
+    raw_point_jitter=0.16,
+    raw_label="Raw subject values",
+    adjusted_label="Adjusted mean +/- 95% CI",
     comparisons=None,
     source=None,
     alpha=0.05,
@@ -20202,6 +26275,8 @@ def _linear_model_adjusted_means_figure(
     auto_style=None,
     style_cycle=None,
     comparison_p_col=None,
+    show_stats_summary=True,
+    adjustment_note=None,
 ):
     """Draw model-predicted group means with point/CI styling and stats."""
     df = pd.DataFrame(adjusted_means).copy()
@@ -20216,11 +26291,25 @@ def _linear_model_adjusted_means_figure(
     df["_order"] = df["group"].astype(str).map({g: i for i, g in enumerate(order)})
     df = df.sort_values("_order", kind="mergesort")
 
+    group_names = df["group"].astype(str).tolist()
+    raw_points = _lm_raw_points_frame(
+        raw_data,
+        dependent_variable=dependent_variable,
+        group=group,
+        raw_value_col=raw_value_col,
+        raw_group_col=raw_group_col,
+    )
+    raw_available = bool(show_raw) and not raw_points.empty
+
     y = pd.to_numeric(df["adjusted_mean"], errors="coerce").to_numpy(float)
     lo = pd.to_numeric(df["ci_low"], errors="coerce").to_numpy(float)
     hi = pd.to_numeric(df["ci_high"], errors="coerce").to_numpy(float)
-    x = np.arange(len(df), dtype=float)
-    group_names = df["group"].astype(str).tolist()
+    base_x = np.arange(len(df), dtype=float)
+    x = base_x.copy()
+    if raw_available and len(df) > 1:
+        group_spacing = 0.78
+        midpoint = (len(df) - 1) / 2.0
+        x = (base_x - midpoint) * group_spacing + midpoint
 
     source_colors = {}
     source_styles = {}
@@ -20241,7 +26330,15 @@ def _linear_model_adjusted_means_figure(
                 source_labels[name] = str(getattr(cond, "label", name))
 
     cmap = {str(k): v for k, v in (group_color_map or {}).items()}
-    colors = {g: cmap.get(g, source_colors.get(g, "#4C78A8")) for g in group_names}
+    palette = sns.color_palette("Set2", n_colors=max(1, len(group_names))).as_hex()
+    colors = {}
+    for idx, g in enumerate(group_names):
+        if g in cmap:
+            colors[g] = cmap[g]
+        elif g in source_colors:
+            colors[g] = source_colors[g]
+        else:
+            colors[g] = palette[idx % len(palette)]
     explicit_styles = {g: source_styles.get(g, "fill") for g in group_names}
     if group_style_map is not None:
         styles = {str(k): v for k, v in group_style_map.items()}
@@ -20253,36 +26350,188 @@ def _linear_model_adjusted_means_figure(
     for g in group_names:
         labels.setdefault(g, source_labels.get(g, g))
 
-    fig, ax = plt.subplots(figsize=(max(1, len(df)) * 2 / 3, 5))
-    scatter = None
-    ci_width = 0.12
-    for idx, group_name, mean, ci_lo, ci_hi in zip(x, group_names, y, lo, hi):
+    fig, ax = plt.subplots(figsize=(max(6.2, len(df) * 1.5 + 3.6), 5.2))
+    raw_x = x - 0.16 if raw_available else x
+    adjusted_x = x + 0.16 if raw_available else x
+    raw_drawn = False
+    if raw_available:
+        rng = np.random.default_rng(0)
+        marker_area = pyflash_point_size(raw_point_size, backend="area")
+        for idx, group_name in enumerate(group_names):
+            values = raw_points.loc[
+                raw_points["group"].astype(str).eq(str(group_name)), "value"
+            ].to_numpy(dtype=float)
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                continue
+            jitter = rng.uniform(
+                -float(raw_point_jitter),
+                float(raw_point_jitter),
+                size=values.size,
+            )
+            color = colors.get(group_name, "#4C78A8")
+            raw_scatter = ax.scatter(
+                np.full(values.size, float(raw_x[idx])) + jitter,
+                values,
+                s=marker_area,
+                facecolors="white",
+                edgecolors=color,
+                linewidths=1.2,
+                alpha=float(raw_point_alpha),
+                zorder=1.4,
+                clip_on=False,
+            )
+            raw_scatter.set_gid("pyflash-linear-model-raw-points")
+            raw_mean = float(np.mean(values))
+            raw_sem = (
+                float(np.std(values, ddof=1) / np.sqrt(values.size))
+                if values.size > 1 else 0.0
+            )
+            cap = 0.065
+            cap_lw = 2.5
+            raw_sem_line = ax.plot(
+                [raw_x[idx], raw_x[idx]],
+                [raw_mean - raw_sem, raw_mean + raw_sem],
+                color=color, lw=2.5, zorder=2.1, clip_on=False,
+            )[0]
+            raw_sem_line.set_gid("pyflash-linear-model-raw-sem")
+            raw_cap_hi = ax.plot(
+                [raw_x[idx] - cap, raw_x[idx] + cap],
+                [raw_mean + raw_sem, raw_mean + raw_sem],
+                color=color, lw=cap_lw, zorder=2.2, clip_on=False,
+            )[0]
+            raw_cap_hi.set_gid("pyflash-linear-model-raw-sem-cap")
+            raw_cap_lo = ax.plot(
+                [raw_x[idx] - cap, raw_x[idx] + cap],
+                [raw_mean - raw_sem, raw_mean - raw_sem],
+                color=color, lw=cap_lw, zorder=2.2, clip_on=False,
+            )[0]
+            raw_cap_lo.set_gid("pyflash-linear-model-raw-sem-cap")
+            raw_mean_marker = ax.scatter(
+                [raw_x[idx]],
+                [raw_mean],
+                s=pyflash_point_size(backend="area"),
+                marker="D",
+                facecolors="white",
+                edgecolors=color,
+                linewidths=2.4,
+                zorder=2.4,
+                clip_on=False,
+            )
+            raw_mean_marker.set_gid("pyflash-linear-model-raw-mean-sem")
+            raw_drawn = True
+
+    scatter = ax
+    ci_width = 0.065
+    ci_cap_lw = 2.5
+    for idx, x_pos, group_name, mean, ci_lo, ci_hi in zip(
+        range(len(group_names)), adjusted_x, group_names, y, lo, hi
+    ):
         color = colors.get(group_name, "#4C78A8")
         style = styles.get(group_name, "fill")
         render = _style_render(style)
         line_style = render.get("linestyle", "-")
         if np.isfinite(ci_lo) and np.isfinite(ci_hi):
-            ax.plot([idx, idx], [ci_lo, ci_hi], color=color, zorder=2.5,
-                    lw=2.5, linestyle=line_style)
-            ax.plot([idx - ci_width, idx + ci_width], [ci_hi, ci_hi],
-                    color=color, zorder=2.6, lw=2.5, linestyle=line_style)
-            ax.plot([idx - ci_width, idx + ci_width], [ci_lo, ci_lo],
-                    color=color, zorder=2.6, lw=2.5, linestyle=line_style)
-        scatter = sns.swarmplot(
-            x=[idx], y=[mean], size=pyflash_point_size(backend="points"),
-            color="white", edgecolor=color,
-            linewidth=3, label=labels.get(group_name, group_name),
-            clip_on=False, zorder=3, ax=ax,
+            ci_line = ax.plot([x_pos, x_pos], [ci_lo, ci_hi], color=color, zorder=2.5,
+                              lw=2.5, linestyle=line_style)[0]
+            ci_line.set_gid("pyflash-linear-model-adjusted-ci")
+            ci_cap_hi = ax.plot([x_pos - ci_width, x_pos + ci_width], [ci_hi, ci_hi],
+                                color=color, zorder=2.6, lw=ci_cap_lw,
+                                linestyle=line_style)[0]
+            ci_cap_hi.set_gid("pyflash-linear-model-adjusted-ci-cap")
+            ci_cap_lo = ax.plot([x_pos - ci_width, x_pos + ci_width], [ci_lo, ci_lo],
+                                color=color, zorder=2.6, lw=ci_cap_lw,
+                                linestyle=line_style)[0]
+            ci_cap_lo.set_gid("pyflash-linear-model-adjusted-ci-cap")
+        adjusted_marker = ax.scatter(
+            [x_pos],
+            [mean],
+            s=pyflash_point_size(backend="area"),
+            marker="o",
+            facecolors="white",
+            edgecolors=color,
+            linewidths=3.0,
+            clip_on=False, zorder=3,
         )
+        adjusted_marker.set_gid("pyflash-linear-model-adjusted-mean")
 
-    set_display_name(
-        ax, dependent_variable, compact_per=True,
-        fontdict={'weight': 'normal'}, size=25,
-    )
-    ax.legend().set_visible(False)
+    set_display_name(ax, dependent_variable, compact_per=True)
+    existing_handles, existing_labels = ax.get_legend_handles_labels()
+    if existing_handles and existing_labels:
+        legend = ax.legend()
+        if legend is not None:
+            legend.set_visible(False)
+    if raw_drawn:
+        from matplotlib.lines import Line2D
+        handles = [
+            Line2D(
+                [0], [0], marker="o", linestyle="None",
+                markerfacecolor="white", markeredgecolor="#606060",
+                markeredgewidth=1.2, alpha=float(raw_point_alpha),
+                markersize=7, label=str(raw_label),
+            ),
+            Line2D(
+                [0], [0], marker="D", linestyle="None",
+                markerfacecolor="white", markeredgecolor="#606060",
+                markeredgewidth=2.0, markersize=8,
+                label="Raw mean +/- SEM",
+            ),
+            Line2D(
+                [0], [0], marker="o", linestyle="None",
+                markerfacecolor="white", markeredgecolor="#202020",
+                markeredgewidth=2.0, markersize=9,
+                label=str(adjusted_label),
+            ),
+        ]
+        ax.legend(
+            handles=handles,
+            loc="upper left",
+            bbox_to_anchor=(1.06, 0.54),
+            borderaxespad=0.0,
+            handlelength=1.2,
+            labelspacing=0.7,
+        )
     sns.despine(trim=False, ax=ax)
-    ax.set_xticks(x)
-    ax.set_xticklabels([labels.get(g, g) for g in group_names], rotation=60, ha="right")
+    if raw_drawn:
+        for sep_x in (x[:-1] + x[1:]) / 2.0:
+            separator = ax.axvline(
+                float(sep_x),
+                color="#C7C7C7",
+                linestyle="--",
+                linewidth=1.2,
+                zorder=0.2,
+            )
+            separator.set_gid("pyflash-linear-model-condition-separator")
+        if len(x) > 1:
+            segment_width = float(np.mean(np.diff(x)))
+            ax.set_xlim(float(x[0] - segment_width / 2.0),
+                        float(x[-1] + segment_width / 2.0))
+        elif len(x) > 0:
+            ax.set_xlim(float(x[0] - 0.5), float(x[0] + 0.5))
+        slot_positions = []
+        slot_labels = []
+        for r_pos, a_pos in zip(raw_x, adjusted_x):
+            slot_positions.extend([r_pos, a_pos])
+            slot_labels.extend(["Raw", "Adj."])
+        ax.set_xticks(slot_positions)
+        ax.set_xticklabels(slot_labels, rotation=0, ha="center")
+        ax.tick_params(axis="x", labelsize=max(9, min(12, int(tick_label_size * 0.6))))
+        for center, group_name in zip(x, group_names):
+            ax.text(
+                center,
+                -0.15,
+                labels.get(group_name, group_name),
+                transform=ax.get_xaxis_transform(),
+                ha="center",
+                va="top",
+                fontsize=max(10, int(tick_label_size * 0.68)),
+                color="#202020",
+                clip_on=False,
+            )
+        fig.subplots_adjust(bottom=0.23)
+    else:
+        ax.set_xticks(x)
+        ax.set_xticklabels([labels.get(g, g) for g in group_names], rotation=60, ha="right")
     ax.tick_params(
         axis="x",
         which="both",
@@ -20291,19 +26540,55 @@ def _linear_model_adjusted_means_figure(
         labelbottom=bool(bottom_tick_labels),
     )
     ax.tick_params(axis="y", labelsize=tick_label_size)
+    if adjustment_note:
+        note_lines = str(adjustment_note).count("\n") + 1
+        note_on_right = bool(raw_drawn) or bool(show_stats_summary)
+        if bottom_tick_labels and not note_on_right:
+            fig.subplots_adjust(bottom=max(0.30, min(0.44, 0.22 + 0.055 * note_lines)))
+        note_x = 1.06 if note_on_right else 0.0
+        note_y = 0.02 if note_on_right else (-0.34 if bottom_tick_labels else -0.12)
+        ax.text(
+            note_x,
+            note_y,
+            str(adjustment_note),
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom" if note_on_right else "top",
+            fontsize=max(10, int(tick_label_size * 0.58)),
+            color="#4D5560",
+            clip_on=False,
+        )
 
     finite_tops = []
-    for mean, ci_hi in zip(y, hi):
+    finite_lows = []
+    for mean, ci_lo, ci_hi in zip(y, lo, hi):
         if np.isfinite(mean):
             finite_tops.append(float(mean))
+            finite_lows.append(float(mean))
+        if np.isfinite(ci_lo):
+            finite_lows.append(float(ci_lo))
         if np.isfinite(ci_hi):
             finite_tops.append(float(ci_hi))
+    if raw_drawn and not raw_points.empty:
+        raw_values_all = pd.to_numeric(raw_points["value"], errors="coerce").dropna()
+        if len(raw_values_all):
+            finite_tops.append(float(raw_values_all.max()))
+            finite_lows.append(float(raw_values_all.min()))
     ymax = None
     if finite_tops:
         ymax = round_up_to_nearest_5(max(finite_tops))
         if ymax > 0:
-            ax.set_ylim(ymax=ymax)
-            ax.yaxis.set_major_locator(LinearLocator(numticks=5))
+            if finite_lows:
+                data_min = min(finite_lows)
+                data_max = max(finite_tops)
+                span = max(float(data_max - data_min), 1.0)
+                ymin = float(data_min) - span * 0.08
+                if data_min >= 0:
+                    ymin = max(0.0, ymin)
+                ax.set_ylim(ymin=ymin, ymax=ymax)
+            else:
+                ax.set_ylim(ymax=ymax)
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
 
     comp_df = pd.DataFrame(comparisons).copy() if comparisons is not None else pd.DataFrame()
     if not comp_df.empty and "dependent_variable" in comp_df.columns:
@@ -20334,7 +26619,7 @@ def _linear_model_adjusted_means_figure(
             lw=2,
             max_override=ymax,
             group_values=[pd.Series([v]) for v in y],
-            group_positions=x.tolist(),
+            group_positions=adjusted_x.tolist(),
             group_colors=[colors.get(g, "black") for g in group_names],
             draw_error_bars=False,
         )
@@ -20346,22 +26631,36 @@ def _linear_model_adjusted_means_figure(
             ]
             if methods:
                 post_hoc = f"{post_hoc} ({methods[0]})"
-        _annotate_stats_summary(
-            ax=ax,
-            test="Linear model",
-            post_hoc=post_hoc,
-            overall=(np.nan, None),
-            comparisons=comp_tokens,
-            pairwise_pvalues=p_values,
-            condition_list=group_names,
-            factor_list=None,
-            effect_strings=None,
-        )
-        if ymax is not None and ymax > 0:
-            ax.set_ylim(ymax=ymax)
-            ax.yaxis.set_major_locator(LinearLocator(numticks=5))
+        if show_stats_summary:
+            _lm_annotate_adjusted_mean_stats(
+                ax=ax,
+                comp_df=comp_df,
+                comparisons=comp_tokens,
+                p_col=p_col,
+                condition_list=group_names,
+                post_hoc=post_hoc,
+            )
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
 
     return fig
+
+
+def _lm_display_coefficient_term(term):
+    """Render Patsy coefficient terms as compact human-readable labels."""
+    text = str(term)
+    patterns = [
+        r"^C\(([^,()]+),\s*Treatment\(reference=['\"][^'\"]+['\"]\)\)\[T\.(.+)\]$",
+        r"^C\(([^,()]+)\)\[T\.(.+)\]$",
+        r"^(.+)\[T\.(.+)\]$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, text)
+        if match:
+            return (
+                f"{get_display_name(match.group(1), minimal=True, compact_per=True)}: "
+                f"{match.group(2)}"
+            )
+    return get_display_name(text, minimal=True, compact_per=True)
 
 
 def _linear_model_coefficient_forest_figure(
@@ -20371,6 +26670,8 @@ def _linear_model_coefficient_forest_figure(
     gate="p",
     tick_label_size=20,
     max_terms=60,
+    title="auto",
+    dependent_order=None,
 ):
     """Draw a coefficient forest plot for fitted linear models."""
     df = pd.DataFrame(coefficients).copy()
@@ -20384,7 +26685,21 @@ def _linear_model_coefficient_forest_figure(
         gate_col = "p_value"
     df["_gate"] = pd.to_numeric(df.get(gate_col), errors="coerce")
     df["_abs_estimate"] = pd.to_numeric(df["estimate"], errors="coerce").abs()
-    df = df.sort_values(["_gate", "_abs_estimate"], ascending=[True, False], kind="mergesort")
+    if "dependent_variable" in df.columns:
+        if dependent_order is None:
+            dependent_order = list(dict.fromkeys(df["dependent_variable"].dropna().astype(str)))
+        dep_rank = {str(dep): i for i, dep in enumerate(dependent_order)}
+        df["_dependent_rank"] = (
+            df["dependent_variable"].astype(str).map(dep_rank).fillna(len(dep_rank))
+        )
+    else:
+        df["_dependent_rank"] = 0
+    df["_term_rank"] = np.arange(len(df), dtype=float)
+    df = df.sort_values(
+        ["_dependent_rank", "_term_rank"],
+        ascending=[True, True],
+        kind="mergesort",
+    )
     omitted = max(0, len(df) - int(max_terms))
     if omitted:
         df = df.iloc[:int(max_terms)].copy()
@@ -20399,7 +26714,10 @@ def _linear_model_coefficient_forest_figure(
     sig = pd.to_numeric(df.get(gate_col), errors="coerce").to_numpy(float) < float(alpha)
     colors = np.where(sig, "#C43C39", "#606060")
     labels = [
-        f"{r.dependent_variable}: {r.term}"
+        (
+            f"{get_display_name(r.dependent_variable, minimal=True, compact_per=True)}: "
+            f"{_lm_display_coefficient_term(r.term)}"
+        )
         for r in df.itertuples(index=False)
     ]
 
@@ -20415,8 +26733,19 @@ def _linear_model_coefficient_forest_figure(
     ax.set_yticks(y)
     ax.set_yticklabels(labels)
     ax.tick_params(axis="both", labelsize=max(8, min(int(tick_label_size), 14)))
-    ax.set_xlabel("Model coefficient")
-    ax.set_title(f"Linear model coefficients ({gate_col}, alpha={float(alpha):g})")
+    ax.set_xlabel("Model coefficient", fontweight="normal")
+    ax.xaxis.label.set_fontweight("normal")
+    for tick_label in [*ax.get_xticklabels(), *ax.get_yticklabels()]:
+        tick_label.set_fontweight("normal")
+    title_text = None
+    if isinstance(title, str) and title.strip().casefold() == "auto":
+        display_gate = "q value" if gate_col == "q_value" else "p value"
+        title_text = f"Linear model coefficients ({display_gate}, alpha={float(alpha):g})"
+    elif title:
+        title_text = str(title)
+    if title_text:
+        ax.set_title(title_text, fontweight="normal", pad=26)
+        ax.title.set_fontweight("normal")
     if omitted:
         ax.text(
             0.99, 0.01, f"{omitted} further term(s) omitted",
@@ -20433,6 +26762,641 @@ def _linear_model_coefficient_forest_figure(
 # callable on its own (docs/new_pipeline_plans/PREFERENCES.md §8). The pipeline
 # feeds precomputed inferential p/q into the cores via ``value_col``; the standalone
 # wrappers compute descriptive subject-level effect sizes / raw points themselves.
+
+
+def _lm_plot_save_root(experiment=None, save_path=None, source_path=None):
+    if save_path is not None:
+        return os.fspath(save_path)
+    if experiment is not None and hasattr(experiment, "fig_path"):
+        return os.fspath(getattr(experiment, "fig_path"))
+    if source_path:
+        return os.path.dirname(os.fspath(source_path)) or "."
+    return "."
+
+
+def _lm_table_source_from_object(obj, table_attr):
+    if obj is None or table_attr is None:
+        return None
+    if isinstance(obj, Mapping):
+        return obj.get(table_attr)
+    if hasattr(obj, table_attr):
+        return getattr(obj, table_attr)
+    return None
+
+
+def _coerce_linear_model_table(source, *, source_path=None, role="linear-model table",
+                               required=True):
+    if source is None:
+        if required:
+            raise ValueError(f"No {role} was supplied.")
+        return pd.DataFrame()
+    if isinstance(source, pd.Series):
+        table = source.to_frame()
+    elif isinstance(source, pd.DataFrame):
+        table = source.copy()
+    else:
+        table = pd.DataFrame(source)
+    table = table.dropna(how="all").copy()
+    if table.empty and required:
+        suffix = f" from {source_path}" if source_path else ""
+        raise ValueError(f"The {role}{suffix} is empty.")
+    return table
+
+
+def _load_linear_model_table(experiment=None, table=None, path=None,
+                             table_attr=None, *, role="linear-model table",
+                             required=True):
+    source = table
+    source_path = path
+
+    if source_path is not None:
+        source_path = os.fspath(source_path)
+        source = pd.read_csv(source_path)
+    elif source is None:
+        if isinstance(experiment, (str, os.PathLike)):
+            source_path = os.fspath(experiment)
+            source = pd.read_csv(source_path)
+            experiment = None
+        elif isinstance(experiment, pd.DataFrame):
+            source = experiment
+        else:
+            source = _lm_table_source_from_object(experiment, table_attr)
+    elif isinstance(source, (str, os.PathLike)):
+        source_path = os.fspath(source)
+        source = pd.read_csv(source_path)
+
+    return (
+        _coerce_linear_model_table(
+            source, source_path=source_path, role=role, required=required),
+        source_path,
+        experiment,
+    )
+
+
+def _linear_model_requested_dependencies(dependent_variable=None, dependent_variables=None):
+    requested = prefer_alias(
+        dependent_variable,
+        dependent_variables,
+        current_name="dependent_variable",
+        alias_name="dependent_variables",
+    )
+    if requested is None:
+        return None
+    if isinstance(requested, (str, bytes)):
+        return [str(requested)]
+    try:
+        return [str(v) for v in requested]
+    except TypeError:
+        return [str(requested)]
+
+
+def _linear_model_dependent_variables(table, dependent_variable=None,
+                                      dependent_variables=None):
+    requested = _linear_model_requested_dependencies(
+        dependent_variable=dependent_variable,
+        dependent_variables=dependent_variables,
+    )
+    if requested is not None:
+        return requested
+    if "dependent_variable" not in table.columns:
+        raise ValueError("Linear-model table needs a 'dependent_variable' column.")
+    return list(dict.fromkeys(table["dependent_variable"].dropna().astype(str)))
+
+
+def _emit_linear_model_plot_records(coefficients=None, adjusted_means=None, *,
+                                    group=None, predictors=None):
+    try:
+        import PyFLASH.report as report
+        if not report.is_active():
+            return
+        coeffs = pd.DataFrame(coefficients).copy() if coefficients is not None else pd.DataFrame()
+        means = pd.DataFrame(adjusted_means).copy() if adjusted_means is not None else pd.DataFrame()
+        deps = []
+        for table in (coeffs, means):
+            if not table.empty and "dependent_variable" in table.columns:
+                for dep in table["dependent_variable"].dropna().astype(str):
+                    if dep not in deps:
+                        deps.append(dep)
+        for dep in deps:
+            coeff_payload = {}
+            if not coeffs.empty and "dependent_variable" in coeffs.columns:
+                csub = coeffs[coeffs["dependent_variable"].astype(str).eq(dep)]
+                for _, row in csub.iterrows():
+                    term = str(row.get("term"))
+                    coeff_payload[term] = {
+                        "estimate": row.get("estimate"),
+                        "p": row.get("p_value"),
+                        "q": row.get("q_value"),
+                        "ci_low": row.get("ci_low"),
+                        "ci_high": row.get("ci_high"),
+                    }
+            mean_payload = {}
+            group_out = group
+            if not means.empty and "dependent_variable" in means.columns:
+                msub = means[means["dependent_variable"].astype(str).eq(dep)]
+                for _, row in msub.iterrows():
+                    mean_payload[str(row.get("group"))] = {
+                        "adjusted_mean": row.get("adjusted_mean"),
+                        "ci_low": row.get("ci_low"),
+                        "ci_high": row.get("ci_high"),
+                        "n": row.get("n"),
+                    }
+                if group_out is None and "group_col" in msub.columns and not msub.empty:
+                    group_out = str(msub["group_col"].dropna().iloc[0])
+            report.emit(report.build_linear_model_record(
+                dependent_variable=dep,
+                group=group_out,
+                predictors=predictors or [],
+                coefficients=coeff_payload,
+                adjusted_means=mean_payload,
+            ))
+    except Exception:
+        return
+
+
+def _lm_values_list(value):
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        return [str(value)]
+    try:
+        return [str(v) for v in value if str(v) not in {"", "None", "nan"}]
+    except TypeError:
+        return [str(value)]
+
+
+def _lm_mapping_value(source, *keys):
+    if isinstance(source, Mapping):
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _lm_adjustment_note(source=None, table=None, *, adjustment_label="auto",
+                        covariates=None, predictors=None):
+    if adjustment_label in (False, None):
+        return None
+    if str(adjustment_label).strip().lower() != "auto":
+        return str(adjustment_label)
+
+    terms = _lm_values_list(covariates)
+    if terms is None:
+        terms = _lm_values_list(predictors)
+    if terms is None:
+        terms = _lm_values_list(_lm_mapping_value(source, "covariates", "predictors"))
+
+    has_model_metadata = isinstance(source, Mapping) and any(
+        key in source for key in ("covariates", "predictors", "model_terms")
+    )
+    if terms:
+        text = f"Adjusted for: {', '.join(terms)}"
+    elif has_model_metadata:
+        text = "Adjusted for: none (group-only model)"
+    else:
+        text = "Adjusted for: not supplied"
+
+    profile = _lm_mapping_value(source, "covariate_profile")
+    weights = _lm_mapping_value(source, "adjusted_mean_weights")
+    if table is not None and isinstance(table, pd.DataFrame):
+        if profile is None and "covariate_profile" in table.columns:
+            vals = [str(v) for v in table["covariate_profile"].dropna().unique()]
+            profile = vals[0] if len(vals) == 1 else None
+        if weights is None and "adjusted_mean_weights" in table.columns:
+            vals = [str(v) for v in table["adjusted_mean_weights"].dropna().unique()]
+            weights = vals[0] if len(vals) == 1 else None
+    profile_labels = {
+        "reference_grid": "estimated marginal means",
+        "emm": "estimated marginal means",
+        "mean_mode": "mean/mode covariate profile",
+        "observed": "observed-row standardization",
+    }
+    weight_labels = {
+        "equal": "equal weights",
+        "observed": "observed weights",
+    }
+    extras = []
+    if profile:
+        profile_key = str(profile).strip().lower().replace("-", "_")
+        extras.append(profile_labels.get(profile_key, str(profile)))
+    if weights:
+        weight_key = str(weights).strip().lower().replace("-", "_")
+        extras.append(weight_labels.get(weight_key, f"weights: {weights}"))
+    if extras:
+        text = f"{text} ({'; '.join(extras)})"
+    return text
+
+
+def _lm_raw_source_from_object(obj, raw_attr="model_data"):
+    if obj is None:
+        return None
+    attrs = []
+    if raw_attr not in (None, ""):
+        attrs.append(str(raw_attr))
+    attrs.extend(["model_data", "model_frames", "raw_data", "model_frame"])
+    attrs = list(dict.fromkeys(attrs))
+    if isinstance(obj, Mapping):
+        for attr in attrs:
+            value = obj.get(attr)
+            if value is not None:
+                return value
+        return None
+    for attr in attrs:
+        if hasattr(obj, attr):
+            value = getattr(obj, attr)
+            if value is not None:
+                return value
+    return None
+
+
+def _lm_raw_data_for_dependent(raw_data, dependent_variable):
+    if raw_data is None:
+        return None
+    if isinstance(raw_data, (str, os.PathLike)):
+        return pd.read_csv(raw_data)
+    if isinstance(raw_data, pd.DataFrame):
+        return raw_data.copy()
+    if isinstance(raw_data, Mapping):
+        for key in (dependent_variable, str(dependent_variable)):
+            if key in raw_data and raw_data[key] is not None:
+                return _lm_raw_data_for_dependent(raw_data[key], dependent_variable)
+        for key in ("data", "raw_data", "model_data", "model_df", "frame"):
+            if key in raw_data and raw_data[key] is not None:
+                return _lm_raw_data_for_dependent(raw_data[key], dependent_variable)
+        try:
+            if all(not isinstance(v, (pd.DataFrame, Mapping)) for v in raw_data.values()):
+                return pd.DataFrame(raw_data)
+        except Exception:
+            return None
+    try:
+        return pd.DataFrame(raw_data).copy()
+    except Exception:
+        return None
+
+
+def _lm_resolve_column(df, column, *, role):
+    if column is None:
+        return None
+    mapped = resolve_column_key(df, column)
+    if mapped is None:
+        raise ValueError(f"Raw linear-model data needs a '{role}' column matching {column!r}.")
+    return str(mapped)
+
+
+def _lm_raw_points_frame(raw_data, *, dependent_variable, group,
+                         raw_value_col=None, raw_group_col=None):
+    raw_df = _lm_raw_data_for_dependent(raw_data, dependent_variable)
+    if not isinstance(raw_df, pd.DataFrame) or raw_df.empty:
+        return pd.DataFrame(columns=["group", "value"])
+
+    value_col = _lm_resolve_column(
+        raw_df,
+        raw_value_col if raw_value_col is not None else dependent_variable,
+        role="raw value",
+    )
+    group_col = _lm_resolve_column(
+        raw_df,
+        raw_group_col if raw_group_col is not None else group,
+        role="raw group",
+    )
+    if value_col is None or group_col is None:
+        return pd.DataFrame(columns=["group", "value"])
+
+    values = _to_numeric_excluding_not_included(raw_df[value_col])
+    groups = raw_df[group_col]
+    keep = values.notna() & groups.notna()
+    out = pd.DataFrame({
+        "group": groups.loc[keep].astype(str).to_numpy(),
+        "value": values.loc[keep].astype(float).to_numpy(),
+    })
+    return out[np.isfinite(out["value"].to_numpy(dtype=float))].reset_index(drop=True)
+
+
+def _lm_layer_note(*, raw_drawn=False):
+    if raw_drawn:
+        return "Left slot: raw subject values with mean +/- SEM; right slot: adjusted mean with 95% CI."
+    return "Large markers: adjusted means with 95% CI."
+
+
+@column_label_scope
+def plot_linear_model_adjusted_means(
+    experiment=None,
+    adjusted_means=None,
+    comparisons=None,
+    path=None,
+    comparisons_path=None,
+    table_attr="adjusted_means_table",
+    comparisons_attr="adjusted_mean_comparisons",
+    raw_data=None,
+    raw_path=None,
+    raw_attr="model_data",
+    raw_value_col=None,
+    raw_group_col=None,
+    show_raw=True,
+    raw_point_alpha=0.42,
+    raw_point_size=None,
+    raw_point_jitter=0.16,
+    raw_label="Raw subject values",
+    adjusted_label="Adjusted mean +/- 95% CI",
+    dependent_variable=None,
+    dependent_variables=None,
+    group=None,
+    group_col=None,
+    group_order=None,
+    group_labels=None,
+    group_colors=None,
+    group_styles=None,
+    covariates=None,
+    predictors=None,
+    adjustment_label="auto",
+    comparison_p_col=None,
+    alpha=0.05,
+    tick_label_size=20,
+    bottom_ticks=False,
+    bottom_tick_labels=True,
+    auto_style=None,
+    style_cycle=None,
+    show_stats_summary=True,
+    column_labels=None,
+    save=True,
+    save_path=None,
+    save_name=None,
+    subfolder="Adjusted Means",
+    montage=False,
+    return_data=False,
+    emit_report=True,
+):
+    """Plot linear-model adjusted means from pipeline result tables.
+
+    Accepts a linear-model pipeline result dict, raw pandas DataFrames, CSV
+    paths, or PyFLASH-like objects exposing ``table_attr`` and
+    ``comparisons_attr``.
+    """
+    means, source_path, source_experiment = _load_linear_model_table(
+        experiment=experiment,
+        table=adjusted_means,
+        path=path,
+        table_attr=table_attr,
+        role="linear-model adjusted-means table",
+    )
+    comp_table, _comp_path, _ = _load_linear_model_table(
+        experiment=experiment,
+        table=comparisons,
+        path=comparisons_path,
+        table_attr=comparisons_attr,
+        role="linear-model adjusted-mean comparisons table",
+        required=False,
+    )
+    if "dependent_variable" not in means.columns:
+        raise ValueError("Adjusted-means table needs a 'dependent_variable' column.")
+    if "group" not in means.columns:
+        raise ValueError("Adjusted-means table needs a 'group' column.")
+    group_name = prefer_alias(
+        group,
+        group_col,
+        current_name="group",
+        alias_name="group_col",
+    )
+    if group_name is None and "group_col" in means.columns and means["group_col"].notna().any():
+        group_name = str(means["group_col"].dropna().iloc[0])
+    if group_name is None:
+        group_name = "group"
+
+    deps = _linear_model_dependent_variables(
+        means,
+        dependent_variable=dependent_variable,
+        dependent_variables=dependent_variables,
+    )
+    selected_means = means[means["dependent_variable"].astype(str).isin(set(deps))].copy()
+    selected_comparisons = comp_table
+    if not comp_table.empty and "dependent_variable" in comp_table.columns:
+        selected_comparisons = comp_table[
+            comp_table["dependent_variable"].astype(str).isin(set(deps))
+        ].copy()
+    if emit_report:
+        _emit_linear_model_plot_records(
+            adjusted_means=selected_means,
+            group=group_name,
+            predictors=_lm_values_list(covariates) or _lm_values_list(predictors),
+        )
+
+    adjustment_note = _lm_adjustment_note(
+        source=source_experiment,
+        table=selected_means,
+        adjustment_label=adjustment_label,
+        covariates=covariates,
+        predictors=predictors,
+    )
+    save_root = _lm_plot_save_root(source_experiment, save_path, source_path)
+    raw_source = raw_data
+    if raw_path is not None:
+        raw_source = raw_path
+    elif raw_source is None:
+        raw_source = _lm_raw_source_from_object(source_experiment, raw_attr=raw_attr)
+    paths = {}
+    figures = {}
+    for dep in deps:
+        dep_raw = _lm_raw_data_for_dependent(raw_source, dep)
+        dep_raw_points = _lm_raw_points_frame(
+            dep_raw,
+            dependent_variable=dep,
+            group=group_name,
+            raw_value_col=raw_value_col,
+            raw_group_col=raw_group_col,
+        )
+        raw_drawn = bool(show_raw) and not dep_raw_points.empty
+        dep_note = adjustment_note
+        layer_note = _lm_layer_note(raw_drawn=raw_drawn)
+        if dep_note:
+            dep_note = f"{dep_note}\n{layer_note}"
+        else:
+            dep_note = layer_note
+        fig = _linear_model_adjusted_means_figure(
+            means,
+            dep,
+            group_name,
+            group_order=group_order,
+            group_color_map=group_colors,
+            group_label_map=group_labels,
+            group_style_map=group_styles,
+            raw_data=dep_raw_points,
+            raw_value_col="value",
+            raw_group_col="group",
+            show_raw=show_raw,
+            raw_point_alpha=raw_point_alpha,
+            raw_point_size=raw_point_size,
+            raw_point_jitter=raw_point_jitter,
+            raw_label=raw_label,
+            adjusted_label=adjusted_label,
+            comparisons=selected_comparisons,
+            source=source_experiment,
+            alpha=alpha,
+            tick_label_size=tick_label_size,
+            bottom_ticks=bottom_ticks,
+            bottom_tick_labels=bottom_tick_labels,
+            auto_style=auto_style,
+            style_cycle=style_cycle,
+            comparison_p_col=comparison_p_col,
+            show_stats_summary=show_stats_summary,
+            adjustment_note=dep_note,
+        )
+        if fig is None:
+            continue
+        if save:
+            stem = (
+                str(save_name)
+                if save_name and len(deps) == 1
+                else f"{save_name or 'Adjusted Means'} {dep}"
+            )
+            paths[dep] = save_fig(
+                fig,
+                save_root,
+                strip_name(stem),
+                subfolder=subfolder,
+                verbose=False,
+                montage=montage,
+            )
+            plt.close(fig)
+        else:
+            figures[dep] = fig
+
+    if not paths and not figures:
+        raise ValueError("No adjusted-mean figures could be created.")
+    if not return_data:
+        result = paths if save else figures
+        if len(result) == 1:
+            return next(iter(result.values()))
+        return result
+    return {
+        "paths": paths,
+        "figures": figures,
+        "adjusted_means": means,
+        "comparisons": comp_table,
+        "raw_data": raw_source,
+        "dependent_variables": deps,
+    }
+
+
+@column_label_scope
+def _filter_coefficient_terms(coeffs, terms):
+    """Filter a coefficient table by model term.
+
+    ``terms`` is either a regex string (matched with ``str.contains``) or an
+    iterable of exact term names / substrings. Returns a copy.
+    """
+    if "term" not in coeffs.columns:
+        raise ValueError("Coefficient table needs a 'term' column to filter by terms.")
+    series = coeffs["term"].astype(str)
+    if isinstance(terms, str):
+        try:
+            with warnings.catch_warnings():
+                # A literal patsy name like "C(Dx)[T.AD]" parses as a regex with
+                # match groups; that warning is noise here because we fall back
+                # to a literal match below when the pattern finds nothing.
+                warnings.simplefilter("ignore", UserWarning)
+                mask = series.str.contains(terms, regex=True, na=False)
+        except re.error as exc:
+            raise ValueError(f"terms regex {terms!r} is not a valid pattern: {exc}") from exc
+        if not bool(mask.any()):
+            # Patsy term names are full of regex metacharacters ("Age:C(Dx)[T.AD]"),
+            # so a pattern that matches nothing is far more often a literal name
+            # than a genuinely empty regex result. Retry literally before failing.
+            mask = series.str.contains(re.escape(terms), regex=True, na=False)
+            if bool(mask.any()):
+                # Say so: as a regex this pattern selected nothing, so the result
+                # the caller gets came from a literal reading of the same string.
+                _log.hint(
+                    f"[coefficient forest] terms={terms!r} matched no rows as a "
+                    f"regex; interpreted literally and matched "
+                    f"{int(mask.sum())} term(s).")
+    else:
+        wanted = [str(t) for t in terms]
+        if not wanted:
+            raise ValueError("terms must not be empty.")
+        mask = series.isin(wanted)
+        for want in wanted:
+            mask = mask | series.str.contains(re.escape(want), regex=True, na=False)
+    return coeffs[mask].copy()
+
+
+def plot_linear_model_coefficient_forest(
+    experiment=None,
+    coefficients=None,
+    path=None,
+    table_attr="coefficients",
+    dependent_variables=None,
+    terms=None,
+    alpha=0.05,
+    gate="p",
+    tick_label_size=20,
+    max_terms=60,
+    title="auto",
+    column_labels=None,
+    save=True,
+    save_path=None,
+    save_name="Coefficient Forest",
+    subfolder=None,
+    montage=False,
+    return_data=False,
+    emit_report=True,
+):
+    """Plot a linear-model coefficient forest from a fitted-model coefficient table.
+
+    ``terms`` restricts which model terms are drawn — a regex string such as
+    ``":"`` (interaction terms only) or an iterable of exact names/substrings.
+    Useful when main effects and interactions sit on very different scales and
+    a shared x-axis would flatten the terms of interest.
+    """
+    coeffs, source_path, source_experiment = _load_linear_model_table(
+        experiment=experiment,
+        table=coefficients,
+        path=path,
+        table_attr=table_attr,
+        role="linear-model coefficients table",
+    )
+    requested = _linear_model_requested_dependencies(dependent_variables=dependent_variables)
+    if requested is not None:
+        if "dependent_variable" not in coeffs.columns:
+            raise ValueError("Coefficient table needs a 'dependent_variable' column.")
+        coeffs = coeffs[coeffs["dependent_variable"].astype(str).isin(set(requested))].copy()
+        if coeffs.empty:
+            raise ValueError("No coefficient rows remain after dependent_variables filtering.")
+    if terms is not None:
+        coeffs = _filter_coefficient_terms(coeffs, terms)
+        if coeffs.empty:
+            raise ValueError(f"No coefficient rows remain after terms filtering ({terms!r}).")
+    if emit_report:
+        _emit_linear_model_plot_records(coefficients=coeffs)
+    fig = _linear_model_coefficient_forest_figure(
+        coeffs,
+        alpha=alpha,
+        gate=gate,
+        tick_label_size=tick_label_size,
+        max_terms=max_terms,
+        title=title,
+        dependent_order=requested,
+    )
+    if fig is None:
+        raise ValueError("No coefficient forest figure could be created.")
+    output_path = None
+    if save:
+        output_path = save_fig(
+            fig,
+            _lm_plot_save_root(source_experiment, save_path, source_path),
+            strip_name(save_name),
+            subfolder=subfolder,
+            verbose=False,
+            montage=montage,
+        )
+        plt.close(fig)
+    if not return_data:
+        return output_path if save else fig
+    return {
+        "path": output_path,
+        "figure": None if save else fig,
+        "coefficients": coeffs,
+    }
 
 
 def _superplot_figure(roi_long, order, marker, tick_label_size=20):
@@ -21139,12 +28103,14 @@ def _gc_plot_prepare(experiment, filtered_columns, column_strings, regex_string,
     return _roi_base, scope_df, num_df, numeric_cols, groups
 
 
+@column_label_scope
 def plot_superplot(experiment, filtered_columns=None, data_cols=None,
                    by='conditions', factor=None, specificity=None,
                    split_by=None, filter_by=None, roi=None,
                    column_strings=None, regex_string=None, exclude='',
                    data_col_contains=None, data_col_regex=None,
                    data_col_exclude=None, tick_label_size=20, save=True,
+                   column_labels=None,
                    condition_col="Condition", factor_cols=None,
                    animal_col="AnimalName", group_list=None, groups=None,
                    group_col=None, group_cols=None, subject_col=None,
@@ -21228,12 +28194,14 @@ def plot_superplot(experiment, filtered_columns=None, data_cols=None,
     return out
 
 
+@column_label_scope
 def plot_effect_forest(experiment, filtered_columns=None, data_cols=None,
                        by='conditions', factor=None,
                        specificity=None, split_by=None, filter_by=None,
                        roi=None, control=None, alpha=0.05,
                        max_items=30, effect_ci=True, n_resamples=2000, min_n=3,
-                       tick_label_size=20, save=True, column_strings=None,
+                       tick_label_size=20, save=True, column_labels=None,
+                       column_strings=None,
                        regex_string=None, exclude='', data_col_contains=None,
                        data_col_regex=None, data_col_exclude=None,
                        condition_col="Condition", factor_cols=None,
@@ -21316,12 +28284,14 @@ def plot_effect_forest(experiment, filtered_columns=None, data_cols=None,
     return fig
 
 
+@column_label_scope
 def plot_group_matrix(experiment, filtered_columns=None, data_cols=None,
                       by='conditions', factor=None,
                       specificity=None, split_by=None, filter_by=None,
                       roi=None, control=None, alpha=0.05,
                       effect_ci=False, n_resamples=2000, min_n=3, tick_label_size=20,
-                      save=True, column_strings=None, regex_string=None, exclude='',
+                      save=True, column_labels=None,
+                      column_strings=None, regex_string=None, exclude='',
                       data_col_contains=None, data_col_regex=None,
                       data_col_exclude=None, condition_col="Condition",
                       factor_cols=None, animal_col="AnimalName",
@@ -21401,6 +28371,1438 @@ def plot_group_matrix(experiment, filtered_columns=None, data_cols=None,
     return fig
 
 
+# ── Correlation contrast across groups (Fisher r-to-z / Zou / ACAT) ──────────
+# A slopegraph of how the correlation between an anchor variable ``x`` and each of
+# several measures ``y`` changes across an ordered grouping factor, with Fisher
+# r-to-z significance vs a reference group and an optional omnibus (Cauchy/ACAT)
+# comparison layer. Generic: no baked-in columns, groups, or reference name.
+
+_CORR_CONTRAST_SYMBOL = {"pearson": "r", "spearman": "ρ", "kendall": "τ"}
+
+
+def _corr_contrast_stars(p):
+    """Tiered significance stars: * <0.05, ** <0.01, *** <0.001; '' otherwise."""
+    if p is None or not np.isfinite(p):
+        return ""
+    return "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
+
+
+def _corr_contrast_test_fn(test):
+    """Resolve a correlation-test name to (method_tag, scipy_function)."""
+    from scipy.stats import pearsonr, spearmanr, kendalltau
+    t = str(test).strip().lower()
+    if t in ("p", "pearson", "pearsonr"):
+        return "pearson", pearsonr
+    if t in ("s", "spearman", "spearmanr"):
+        return "spearman", spearmanr
+    if t in ("k", "kendall", "kendalltau", "kendallt"):
+        return "kendall", kendalltau
+    raise ValueError(f"test must be 'pearsonr', 'spearmanr' or 'kendalltau'; got {test!r}.")
+
+
+def _normalize_covariate_adjustment(value):
+    key = (
+        str(value or "rank_then_residual")
+        .strip()
+        .lower()
+        .replace("_", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
+    if key in {"rank", "rankfirst", "rankthenresidual", "rankthenresidualize"}:
+        return "rank_then_residual"
+    if key in {
+        "residual",
+        "residualfirst",
+        "residualthenrank",
+        "residualthencorrelation",
+        "residualthenspearman",
+        "presentation",
+    }:
+        return "residual_then_correlation"
+    raise ValueError(
+        "covariate_adjustment must be 'rank_then_residual' or "
+        "'residual_then_correlation'"
+    )
+
+
+def _resolve_slopegraph_ci_alpha(ci_alpha):
+    try:
+        alpha = float(ci_alpha)
+    except (TypeError, ValueError):
+        raise ValueError("ci_alpha must be a finite number between 0 and 1.") from None
+    if not np.isfinite(alpha) or alpha <= 0 or alpha >= 1:
+        raise ValueError("ci_alpha must be a finite number between 0 and 1.")
+    return alpha
+
+
+def _correlation_value_ci(r, n, method, ci_alpha):
+    """Fisher-z confidence interval for one plotted correlation node."""
+    from scipy import stats as sp_stats
+    from PyFLASH import stats as _pf_stats
+
+    try:
+        r = float(r)
+        n = int(n)
+    except (TypeError, ValueError):
+        return float("nan"), float("nan")
+    se = _pf_stats.fisher_z_se(r, n, method)
+    if not (np.isfinite(r) and np.isfinite(se)):
+        return float("nan"), float("nan")
+    zcrit = float(sp_stats.norm.ppf(1.0 - float(ci_alpha) / 2.0))
+    rc = float(np.clip(r, -0.999999, 0.999999))
+    lo = np.tanh(np.arctanh(rc) - zcrit * se)
+    hi = np.tanh(np.arctanh(rc) + zcrit * se)
+    return float(np.clip(lo, -1.0, 1.0)), float(np.clip(hi, -1.0, 1.0))
+
+
+def _corr_contrast_declutter(values, min_gap):
+    """Nudge label positions apart to at least ``min_gap``, preserving order."""
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return arr
+    order = np.argsort(arr)
+    vals = arr[order]
+    for i in range(1, len(vals)):
+        if vals[i] - vals[i - 1] < min_gap:
+            vals[i] = vals[i - 1] + min_gap
+    out = np.empty_like(vals)
+    out[order] = vals
+    return out
+
+
+def _corr_contrast_declutter_bounded(values, min_gap, lower, upper):
+    """Declutter y positions while keeping the final anchors inside bounds."""
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return arr
+    lo = float(lower)
+    hi = float(upper)
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return _corr_contrast_declutter(arr, min_gap)
+    order = np.argsort(arr)
+    vals = np.clip(arr[order], lo, hi)
+    gap = float(min_gap)
+    if vals.size > 1:
+        gap = min(gap, max(0.0, (hi - lo) / float(vals.size - 1)))
+    for i in range(1, len(vals)):
+        vals[i] = max(vals[i], vals[i - 1] + gap)
+    if vals[-1] > hi:
+        vals -= vals[-1] - hi
+    for i in range(len(vals) - 2, -1, -1):
+        vals[i] = min(vals[i], vals[i + 1] - gap)
+    if vals[0] < lo:
+        vals += lo - vals[0]
+    vals = np.clip(vals, lo, hi)
+    out = np.empty_like(vals)
+    out[order] = vals
+    return out
+
+
+def _corr_contrast_covariate_design(cov_df, *, rank_numeric=False):
+    """Build the additive covariate design used by adjusted correlations."""
+    parts = [np.ones((len(cov_df), 1))]
+    for c in cov_df.columns:
+        col = cov_df[c]
+        num = pd.to_numeric(col, errors="coerce")
+        if col.notna().sum() > 0 and int(num.notna().sum()) == int(col.notna().sum()):
+            values = num.rank(method="average") if rank_numeric else num
+            parts.append(values.to_numpy(dtype=float).reshape(-1, 1))
+        else:
+            dummies = pd.get_dummies(col.astype("object"), drop_first=True, dtype=float)
+            if dummies.shape[1]:
+                parts.append(dummies.to_numpy(dtype=float))
+    return np.column_stack(parts)
+
+
+def _corr_contrast_residualize(y_arr, cov_df, *, rank_numeric=False):
+    """Residualize ``y_arr`` on covariate columns via least squares.
+
+    Numeric covariates are optionally rank-transformed for rank-first partial
+    Spearman; categorical covariates are one-hot encoded either way.
+    """
+    y = np.asarray(y_arr, dtype=float)
+    design = _corr_contrast_covariate_design(cov_df, rank_numeric=rank_numeric)
+    beta, *_ = np.linalg.lstsq(design, y, rcond=None)
+    return y - design @ beta
+
+
+def _corr_contrast_partial_pvalue(r, method, n, design_rank):
+    if not np.isfinite(r):
+        return np.nan
+    df_resid = int(n) - int(design_rank) - 1
+    if df_resid <= 0:
+        return np.nan
+    r = float(np.clip(r, -0.999999999999, 0.999999999999))
+    method = str(method).lower()
+    if method in {"pearson", "spearman"}:
+        denom = max(1.0 - r * r, np.finfo(float).eps)
+        t_stat = r * np.sqrt(float(df_resid) / denom)
+        from scipy import stats as sp_stats
+
+        return float(2.0 * sp_stats.t.sf(abs(t_stat), df_resid))
+    return np.nan
+
+
+def _correlation_contrast_table(scope_df, x, measure_cols, groups, test,
+                                covariates, min_n, ci_alpha=0.05,
+                                covariate_adjustment="rank_then_residual"):
+    """Per-(group, measure) correlation of ``x`` vs each measure, optionally
+    covariate-adjusted (partial correlation). Emits a correlation record per
+    finite result when the describe collector is armed. Returns (DataFrame, method)."""
+    method, fn = _corr_contrast_test_fn(test)
+    covariate_adjustment = _normalize_covariate_adjustment(covariate_adjustment)
+    covariates = [c for c in (covariates or [])]
+    try:
+        import PyFLASH.report as _report
+        active = _report.is_active()
+    except Exception:
+        _report, active = None, False
+
+    rows = []
+    for glabel, gidx, _spec in groups:
+        gdf = scope_df.loc[scope_df.index.intersection(gidx)]
+        xv = _to_numeric_excluding_not_included(gdf[x]).astype(float)
+        for measure in measure_cols:
+            yv = _to_numeric_excluding_not_included(gdf[measure]).astype(float)
+            mask = xv.notna() & yv.notna()
+            if covariates:
+                for c in covariates:
+                    cser = gdf[c]
+                    cnum = pd.to_numeric(cser, errors="coerce")
+                    mask &= cnum.notna() if int(cnum.notna().sum()) == int(cser.notna().sum()) else cser.notna()
+            xa = xv[mask].to_numpy(dtype=float)
+            ya = yv[mask].to_numpy(dtype=float)
+            design_rank = 1
+            rank_first = (
+                bool(covariates)
+                and method == "spearman"
+                and covariate_adjustment == "rank_then_residual"
+            )
+            if covariates and len(xa) >= int(min_n):
+                cov_frame = gdf.loc[mask, covariates]
+                if rank_first:
+                    xa = pd.Series(xa).rank(method="average").to_numpy(dtype=float)
+                    ya = pd.Series(ya).rank(method="average").to_numpy(dtype=float)
+                design = _corr_contrast_covariate_design(
+                    cov_frame,
+                    rank_numeric=rank_first,
+                )
+                design_rank = int(np.linalg.matrix_rank(design))
+                xa = xa - design @ np.linalg.lstsq(design, xa, rcond=None)[0]
+                ya = ya - design @ np.linalg.lstsq(design, ya, rcond=None)[0]
+            n = int(len(xa))
+            r = p = float("nan")
+            if n >= max(4, int(min_n)) and np.std(xa) > 0 and np.std(ya) > 0:
+                if rank_first:
+                    from scipy import stats as sp_stats
+
+                    res = sp_stats.pearsonr(xa, ya)
+                    r = float(res.statistic)
+                    p = _corr_contrast_partial_pvalue(r, method, n, design_rank)
+                else:
+                    res = fn(xa, ya)
+                    r, p = float(res[0]), float(res[1])
+            ci_low, ci_high = _correlation_value_ci(r, n, method, ci_alpha)
+            rows.append({"measure": str(measure), "group": str(glabel),
+                         "n": n, "r": r, "p": p, "method": method,
+                         "ci_low": ci_low, "ci_high": ci_high,
+                         "covariates": ", ".join(map(str, covariates)),
+                         "covariate_adjustment": covariate_adjustment,
+                         "covariate_df": max(0, int(design_rank) - 1)})
+            if active and np.isfinite(r):
+                try:
+                    rec = _report.build_correlation_record(
+                        x=x, y=measure, group=str(glabel), n=n, r=r, p=p, method=method)
+                    rec.update({
+                        "covariates": list(map(str, covariates)),
+                        "covariate_adjustment": covariate_adjustment,
+                        "covariate_df": max(0, int(design_rank) - 1),
+                    })
+                    _report.emit(rec)
+                except Exception:
+                    pass
+    return pd.DataFrame(rows), method
+
+
+def _correlation_contrast_stats(table, group_order, reference_label, method, tail="two"):
+    """Fisher r-to-z (per measure, each group vs reference) and Cauchy/ACAT omnibus
+    (per group, across measures). Returns (fisher_p, acat_p) dicts."""
+    from PyFLASH import stats as _pf_stats
+    lut = {(r["measure"], r["group"]): r for _, r in table.iterrows()}
+    measures = list(dict.fromkeys(table["measure"]))
+    fisher_p, acat_p = {}, {}
+    for grp in group_order:
+        if str(grp) == str(reference_label):
+            continue
+        per_measure = []
+        for m in measures:
+            ref = lut.get((m, str(reference_label)))
+            row = lut.get((m, str(grp)))
+            if ref is None or row is None:
+                continue
+            # Group first, reference second, so a directional ``tail`` describes
+            # (group - reference) — the same convention as the coefficient
+            # contrast's interaction estimate. Two-sided p is unaffected by order.
+            p = _pf_stats.fisher_z_correlation_difference(
+                row["r"], row["n"], ref["r"], ref["n"], method, tail=tail)
+            fisher_p[(m, str(grp))] = p
+            per_measure.append(p)
+        acat_p[str(grp)] = _pf_stats.cauchy_combination_test(per_measure)
+    return fisher_p, acat_p
+
+
+def _annotate_correlation_contrast_stats_summary(
+    ax,
+    table,
+    fisher_p,
+    acat_p,
+    group_order,
+    reference_label,
+    method,
+    *,
+    max_items=None,
+    tail="two",
+    y=None,
+):
+    """Draw exact contrast p-values in the removable side panel."""
+    lut = {(r["measure"], r["group"]): r for _, r in table.iterrows()}
+    rows = []
+    for (measure, group), p_value in (fisher_p or {}).items():
+        ref = lut.get((measure, str(reference_label)))
+        row = lut.get((measure, str(group)))
+        try:
+            p_sort = float(p_value)
+        except (TypeError, ValueError):
+            p_sort = np.inf
+        if not np.isfinite(p_sort):
+            p_sort = np.inf
+        rows.append((p_sort, str(measure), str(group), ref, row, p_value))
+    rows.sort(key=lambda item: (item[0], item[2], item[1]))
+    n_sig = sum(1 for p_sort, *_ in rows if np.isfinite(p_sort) and p_sort < 0.05)
+    detail = []
+    for _, measure, group, ref, row, p_value in rows:
+        r_ref = ref.get("r", np.nan) if hasattr(ref, "get") else np.nan
+        r_group = row.get("r", np.nan) if hasattr(row, "get") else np.nan
+        n_ref = ref.get("n", None) if hasattr(ref, "get") else None
+        n_group = row.get("n", None) if hasattr(row, "get") else None
+        n_txt = ""
+        if n_ref is not None and n_group is not None:
+            n_txt = f" (n={int(n_group)} vs {int(n_ref)})"
+        detail.append(
+            f"{get_display_name(measure, minimal=True)} {group}: "
+            f"r={_format_regression_rvalue(r_group)}{_format_side_stats_ci(row)} vs "
+            f"{_format_regression_rvalue(r_ref)}{_format_side_stats_ci(ref)}{n_txt}, "
+            f"p={_format_side_stats_pvalue(p_value)}"
+        )
+    omnibus = []
+    for group in group_order:
+        if str(group) == str(reference_label):
+            continue
+        p_value = (acat_p or {}).get(str(group), np.nan)
+        omnibus.append(f"{group} ACAT p={_format_side_stats_pvalue(p_value)}")
+    tail_txt = "" if str(tail).lower() in ("two", "none", "") else f", {tail}-tailed"
+    lines = [
+        f"Test: Fisher r-to-z ({method}{tail_txt})",
+        f"Reference: {reference_label}",
+        f"Measure contrasts: {len(rows)}",
+        f"Significant: {n_sig} (p<0.05)",
+    ]
+    if omnibus:
+        lines.extend(["Omnibus:", *_limit_stats_detail_lines(omnibus, max_items=max_items)])
+    if detail:
+        lines.extend(["Top contrasts:", *_limit_stats_detail_lines(detail, max_items=max_items)])
+    return _annotate_stats_detail_text(ax, lines, x=1.28, y=y)
+
+
+# Horizontal spacing of the slopegraph's x-axis, as a fraction of the figure
+# width per unit of x-distance — i.e. per gap between adjacent group ticks.
+# Sizing the data region from the x-SPAN (the group intervals plus the edge
+# padding) rather than the group count is what keeps that gap constant whether
+# there are two groups or five. Lower it to pull the x-ticks closer together;
+# the cap stops a many-group contrast from spanning the whole figure.
+_SLOPEGRAPH_TICK_GAP_FRAC = 0.185
+_SLOPEGRAPH_MAX_AXES_FRAC = 0.70
+_SLOPEGRAPH_X_PAD = 0.4          # x-limit padding either side of the end nodes
+_SLOPEGRAPH_DEFAULT_AXIS_WIDTH_SCALE = 0.8
+_SLOPEGRAPH_DEFAULT_NODE_SIZE = 10.0
+_SLOPEGRAPH_COMPARISON_STAR_SIZE = 35  # match stats.draw_comparison_brackets
+_SLOPEGRAPH_COMPARISON_STAR_Y_FRAC = -0.006
+_SLOPEGRAPH_NODE_STAR_GAP_FRAC = 0.10
+_SLOPEGRAPH_NODE_LABEL_GAP_FRAC = 0.12
+_SLOPEGRAPH_NODE_LABEL_FALLBACK_GAP_FRAC = 0.08
+_SLOPEGRAPH_NODE_STAR_TOP_MARGIN_FRAC = 0.075
+_SLOPEGRAPH_NODE_STAR_BOTTOM_MARGIN_FRAC = 0.035
+_SLOPEGRAPH_NODE_LABEL_TOP_MARGIN_FRAC = 0.035
+_SLOPEGRAPH_NODE_CONNECTOR_STAR_CORNER_FRAC = 0.045
+_SLOPEGRAPH_CI_CAPSIZE = 4.0
+_SLOPEGRAPH_CI_LINEWIDTH = 2.3
+
+
+def _resolve_slopegraph_axis_width_scale(x_axis_width_scale):
+    try:
+        scale = float(x_axis_width_scale)
+    except (TypeError, ValueError):
+        raise ValueError("x_axis_width_scale must be a positive finite number.") from None
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("x_axis_width_scale must be a positive finite number.")
+    return scale
+
+
+def _resolve_slopegraph_node_size(node_size):
+    try:
+        size = float(node_size)
+    except (TypeError, ValueError):
+        raise ValueError("node_size must be a positive finite number.") from None
+    if not np.isfinite(size) or size <= 0:
+        raise ValueError("node_size must be a positive finite number.")
+    return size
+
+
+def _contrast_slopegraph_figure(table, group_order, reference_label, *,
+                                contrast_p, omnibus_p, value_label, title_text,
+                                significance, palette, scale="correlation",
+                                annot_offsets=(0.08, 0.11, 0.17, 0.08),
+                                show_ci=True, summary_annotator=None,
+                                x_axis_width_scale=_SLOPEGRAPH_DEFAULT_AXIS_WIDTH_SCALE,
+                                node_size=_SLOPEGRAPH_DEFAULT_NODE_SIZE):
+    """Shared slopegraph renderer for the ``*_contrast`` plots.
+
+    One coloured line per measure across an ordered group axis, with the
+    between-group contrast drawn as per-measure stars, per-measure comparison
+    lines, or one omnibus bracket per group. Keeping both contrast plots on this
+    one renderer is what stops their aesthetics drifting apart.
+
+    ``table`` needs ``measure`` / ``group`` / ``r`` columns, where ``r`` holds the
+    plotted value — a correlation for :func:`plot_correlation_contrast`, a model
+    coefficient for :func:`plot_coefficient_contrast`. ``contrast_p`` is keyed by
+    ``(measure, group)`` and ``omnibus_p`` by ``group``. ``scale='correlation'``
+    pins the axis top to 1.0; ``scale='data'`` derives limits from the values.
+    ``annot_offsets`` are absolute y-offsets above the axis top for the omnibus
+    band, its per-group step, the comparison-line step, and the inter-block gap.
+    ``x_axis_width_scale`` multiplies the plotted x-axis width only; it does not
+    alter the figure canvas size.
+    ``node_size`` sets the marker diameter in points.
+    """
+    from PyFLASH.layout import mark_manual_layout
+
+    measures = list(table["measure"].drop_duplicates())
+    ref_r = {m: table[(table["measure"].eq(m)) & (table["group"].eq(str(reference_label)))]["r"].mean()
+             for m in measures}
+    measures = sorted(measures, key=lambda m: (ref_r.get(m) if np.isfinite(ref_r.get(m, np.nan)) else -np.inf),
+                      reverse=True)
+    color_of = _resolve_category_palette(measures, palette)
+    xpos = {str(g): i for i, g in enumerate(group_order)}
+    fisher_p, acat_p = contrast_p or {}, omnibus_p or {}
+
+    range_cols = ["r"]
+    if show_ci and {"ci_low", "ci_high"}.issubset(set(table.columns)):
+        range_cols.extend(["ci_low", "ci_high"])
+    finite_r = table[range_cols].to_numpy(dtype=float).ravel()
+    finite_r = finite_r[np.isfinite(finite_r)]
+    data_min = float(np.min(finite_r)) if finite_r.size else 0.0
+    data_max = float(np.max(finite_r)) if finite_r.size else 0.0
+    n_nonref = sum(1 for g in group_order if str(g) != str(reference_label))
+    mode = str(significance).lower() if significance else "none"
+
+    # A slopegraph carries one node per group, so it needs far less width than a
+    # data-dense plot; the legend and stats block live outside the axes and are
+    # picked up by the tight bbox at save time rather than by widening the axes.
+    fig_w = max(4.6, 1.15 * len(group_order) + 1.7)
+    fig, ax = plt.subplots(figsize=(fig_w, 6.8))
+    # Narrow the DATA REGION rather than the figure: with only a handful of nodes
+    # the default axes box spreads the groups far apart, and that wide gap
+    # between x-ticks is what makes a slopegraph read as flat. Sized as a
+    # fraction of the figure, which survives the export-canvas resize in
+    # save_fig, so the plot-area-to-figure ratio holds however the figure is
+    # finally sized.
+    _ax_left = 0.125
+    _x_span = (len(group_order) - 1) + 2 * _SLOPEGRAPH_X_PAD
+    _width_scale = _resolve_slopegraph_axis_width_scale(x_axis_width_scale)
+    _base_ax_width = min(_SLOPEGRAPH_MAX_AXES_FRAC,
+                         _SLOPEGRAPH_TICK_GAP_FRAC * _x_span)
+    _ax_width = min(_SLOPEGRAPH_MAX_AXES_FRAC, _base_ax_width * _width_scale)
+    _node_size = _resolve_slopegraph_node_size(node_size)
+    fig.subplots_adjust(left=_ax_left, right=_ax_left + _ax_width)
+
+    for m in measures:
+        sub = table[table["measure"].eq(m)].set_index("group")["r"]
+        xs = [xpos[str(g)] for g in group_order]
+        ys = [sub.get(str(g), np.nan) for g in group_order]
+        if show_ci and {"ci_low", "ci_high"}.issubset(set(table.columns)):
+            ci_sub = table[table["measure"].eq(m)].set_index("group")
+            lows = [ci_sub["ci_low"].get(str(g), np.nan) for g in group_order]
+            highs = [ci_sub["ci_high"].get(str(g), np.nan) for g in group_order]
+            yerr_low, yerr_high = [], []
+            any_ci = False
+            for yv, lo, hi in zip(ys, lows, highs):
+                if np.isfinite(yv) and np.isfinite(lo) and np.isfinite(hi):
+                    yerr_low.append(max(0.0, float(yv) - float(lo)))
+                    yerr_high.append(max(0.0, float(hi) - float(yv)))
+                    any_ci = True
+                else:
+                    yerr_low.append(np.nan)
+                    yerr_high.append(np.nan)
+            if any_ci:
+                ax.errorbar(
+                    xs, ys, yerr=[yerr_low, yerr_high], fmt="none",
+                    ecolor=color_of[m], elinewidth=_SLOPEGRAPH_CI_LINEWIDTH,
+                    capsize=_SLOPEGRAPH_CI_CAPSIZE,
+                    capthick=_SLOPEGRAPH_CI_LINEWIDTH,
+                    alpha=0.55, clip_on=False, zorder=2.4,
+                )
+        ax.plot(xs, ys, "-o", color=color_of[m],
+                lw=2.0, markersize=_node_size, markeredgecolor="white", markeredgewidth=0.8,
+                alpha=0.95, label=get_display_name(str(m), minimal=True),
+                clip_on=False, zorder=3)
+    ax.axhline(0, color="#888888", ls="--", lw=1.0, zorder=1)
+
+    # Correlation scale ends at 1; omnibus comparison lines sit above it
+    # (clip_on=False). A data scale pads symmetrically around the observed range.
+    if str(scale).lower() == "data":
+        pad = 0.12 * (data_max - data_min) if data_max > data_min else max(abs(data_max), 1.0) * 0.12
+        ymin, ymax = data_min - pad, data_max + pad
+    else:
+        ymin = max(-1.05, min(-0.15, data_min - 0.12))
+        ymax = 1.0
+    band_gap, band_step, line_dy, line_gap = annot_offsets
+    if str(scale).lower() == "data":
+        # The offsets above were tuned on the correlation axis span; rescale so an
+        # arbitrary coefficient axis gets proportionally the same annotation spacing.
+        unit = (ymax - ymin) / 2.05 if ymax > ymin else 1.0
+        band_gap, band_step, line_dy, line_gap = (v * unit for v in annot_offsets)
+    others = [g for g in group_order if str(g) != str(reference_label)]
+    top_annot_y = ymax   # highest point of any above-axis annotation
+
+    # Stars-mode annotations sit to the RIGHT of each node, so at the narrow end
+    # of the authored width they can overrun the right spine and slide under the
+    # legend. Collected here and measured after the x-limit is set, so the gutter
+    # is reserved inside the axes rather than by widening the figure.
+    right_annots = []
+
+    if mode == "stars":
+        # Per-measure contrast stars at each non-reference node.
+        span = (ymax - ymin) or 1.0
+        star_y_offset = span * _SLOPEGRAPH_COMPARISON_STAR_Y_FRAC
+        star_anchor_low = ymin + span * _SLOPEGRAPH_NODE_STAR_BOTTOM_MARGIN_FRAC
+        star_anchor_high = ymax - span * _SLOPEGRAPH_NODE_STAR_TOP_MARGIN_FRAC
+        sy_low = star_anchor_low - star_y_offset
+        sy_high = star_anchor_high - star_y_offset
+        for grp in group_order:
+            if str(grp) == str(reference_label):
+                continue
+            entries = []
+            for m in measures:
+                p = fisher_p.get((m, str(grp)))
+                rr = table[(table["measure"].eq(m)) & (table["group"].eq(str(grp)))]["r"]
+                if p is not None and np.isfinite(p) and p < 0.05 and len(rr) and np.isfinite(rr.iloc[0]):
+                    entries.append((m, float(rr.iloc[0]), float(p)))
+            if not entries:
+                continue
+            sy = _corr_contrast_declutter_bounded(
+                [e[1] for e in entries],
+                min_gap=span * _SLOPEGRAPH_NODE_STAR_GAP_FRAC,
+                lower=sy_low,
+                upper=sy_high,
+            )
+            gx = xpos[str(grp)]
+            star_anchor_ys = []
+            for (m, rr, p), yy in zip(entries, sy):
+                star_y = yy + star_y_offset
+                star_anchor_ys.append(float(star_y))
+                corner_offset = span * _SLOPEGRAPH_NODE_CONNECTOR_STAR_CORNER_FRAC
+                connector_y = star_y + corner_offset if rr > star_y else star_y - corner_offset
+                ax.plot([gx + 0.04, gx + 0.13], [rr, connector_y], color=color_of[m],
+                        lw=0.7, ls=":", alpha=0.6, zorder=2)
+                right_annots.append(ax.text(
+                    gx + 0.15, star_y, _corr_contrast_stars(p),
+                    color=color_of[m], ha="left", va="center",
+                    fontsize=_SLOPEGRAPH_COMPARISON_STAR_SIZE,
+                    fontweight="bold", zorder=4))
+            # Grey label naming the comparison. It sits above ordinary star
+            # clusters, but drops below clusters close to the axis top so it
+            # cannot spill into the title area.
+            label_top = ymax - span * _SLOPEGRAPH_NODE_LABEL_TOP_MARGIN_FRAC
+            label_y = max(star_anchor_ys) + span * _SLOPEGRAPH_NODE_LABEL_GAP_FRAC
+            label_va = "bottom"
+            if label_y > label_top:
+                label_y = max(
+                    ymin + span * _SLOPEGRAPH_NODE_STAR_BOTTOM_MARGIN_FRAC,
+                    min(star_anchor_ys) - span * _SLOPEGRAPH_NODE_LABEL_FALLBACK_GAP_FRAC,
+                )
+                label_va = "top"
+            right_annots.append(ax.text(
+                gx + 0.15, label_y, f"vs {reference_label}",
+                color="#888888", fontsize=11, ha="left", va=label_va, zorder=4))
+
+    elif mode == "omnibus" and n_nonref:
+        # One omnibus (Cauchy/ACAT) comparison bracket per group vs reference,
+        # floating above the y=1 axis top.
+        # Use the house bracket renderer shared with plot_mean_bars, so tiering,
+        # end handles, and ns-above-line / star-on-line placement match exactly.
+        from PyFLASH import stats as _pf_stats
+        labels = [str(g) for g in group_order]
+        ref_i = labels.index(str(reference_label)) + 1
+        comparisons, annots = [], []
+        for grp in others:
+            comparisons.append(f"{ref_i}-{labels.index(str(grp)) + 1}")
+            pc = acat_p.get(str(grp))
+            annots.append(
+                _corr_contrast_stars(pc)
+                if (pc is not None and np.isfinite(pc) and pc < 0.05) else "ns")
+        bracket_top, _line_y = _pf_stats.draw_comparison_brackets(
+            ax, [xpos[str(g)] for g in group_order], comparisons, annots,
+            base_height=ymax + band_gap,
+            pad_height=band_step,
+            handles=band_step * 0.3,
+            visible_y_span=(ymax - ymin) or 1.0,
+            lw=1.4, color="#333333",
+            star_y_offset_frac=_SLOPEGRAPH_COMPARISON_STAR_Y_FRAC,
+        )
+        top_annot_y = max(top_annot_y, bracket_top)
+
+    elif mode == "lines" and n_nonref:
+        # One comparison line per SIGNIFICANT measure per group vs reference,
+        # stacked above the axis (no end-handles); star centred tight to each line.
+        base, dy, gap = ymax + band_gap, line_dy, line_gap
+        visible_span = (ymax - ymin) or 1.0
+        star_y_offset = visible_span * _SLOPEGRAPH_COMPARISON_STAR_Y_FRAC
+        # Significant measures per non-reference group, in reference-node order
+        # (the top-left measure first).
+        blocks = []
+        for grp in others:
+            sig = []
+            for m in measures:
+                p = fisher_p.get((m, str(grp)))
+                if p is not None and np.isfinite(p) and p < 0.05:
+                    sig.append((m, float(p)))
+            blocks.append((str(grp), sig))
+        n_total = sum(len(sig) for _, sig in blocks)
+        n_used = sum(1 for _, sig in blocks if sig)
+        if n_total:
+            # Draw top-down: the farthest group (longest lines) sits on top and the
+            # nearest (e.g. reference→MCI, shortest lines) at the bottom; within each
+            # block the top-left measure is on top. Generalises to any group count.
+            yy = base + (n_total - 1) * dy + max(0, n_used - 1) * gap
+            top_annot_y = yy + visible_span * 0.07
+            for grp, sig in reversed(blocks):
+                for m, p in sig:
+                    x0, x1 = xpos[str(reference_label)], xpos[grp]
+                    lo, hi = sorted((x0, x1))
+                    ax.plot([lo, hi], [yy, yy], color=color_of[m], lw=2.6, alpha=0.9,
+                            solid_capstyle="butt", clip_on=False, zorder=5)
+                    ax.text((lo + hi) / 2.0, yy + star_y_offset, _corr_contrast_stars(p),
+                            color=color_of[m], ha="center", va="center",
+                            fontsize=_SLOPEGRAPH_COMPARISON_STAR_SIZE,
+                            fontweight="bold", clip_on=False, zorder=6)
+                    yy -= dy
+                if sig:
+                    yy -= gap
+
+    ax.set_ylim(ymin, ymax)
+    ax.set_xlim(-_SLOPEGRAPH_X_PAD,
+                (len(group_order) - 1) + _SLOPEGRAPH_X_PAD)
+    if right_annots:
+        # Grow the right limit until the widest star/"vs <reference>" annotation
+        # sits inside the axes. Measured rather than estimated because the label
+        # width depends on the reference group's name, which is user data.
+        #
+        # Iterated because the measurement chases itself: the labels have a fixed
+        # pixel width, so widening the x-limit also widens their footprint in
+        # DATA units and a single pass always undershoots. Converges quickly
+        # (geometrically, while the label is narrower than the axes); the cap is
+        # just a guard against a pathologically wide label never settling.
+        try:
+            for _ in range(6):
+                fig.canvas.draw()
+                inv = ax.transData.inverted()
+                x_needed = max(inv.transform((t.get_window_extent().x1, 0.0))[0]
+                               for t in right_annots)
+                lo, hi = ax.get_xlim()
+                if not np.isfinite(x_needed) or x_needed <= hi:
+                    break
+                ax.set_xlim(lo, x_needed + 0.04 * (hi - lo))
+        except Exception:
+            pass
+    ax.set_xticks(list(range(len(group_order))))
+    ax.set_xticklabels([str(g) for g in group_order])
+    ax.set_ylabel(value_label)
+    # Lift the title clear of any comparison lines/brackets floating above the axis
+    # (axes-fraction placement, so it works at any figure size).
+    if top_annot_y > ymax:
+        ax.set_title(title_text, y=(top_annot_y - ymin) / (ymax - ymin) + 0.03,
+                     fontweight="normal")
+    else:
+        ax.set_title(title_text, pad=30, fontweight="normal")
+    # Legend off the axis, to the right.
+    legend = ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0,
+                       frameon=True, framealpha=0.9)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", color="#f0f0f0", lw=0.7)
+    if summary_annotator is not None:
+        # Stack the stats block beneath the legend rather than behind it — both
+        # live in the right-hand margin, so a fixed anchor collides once the
+        # legend is more than a line or two tall.
+        #
+        # The legend's height in axes-fraction depends on the figure size, and
+        # save_fig resizes to the canonical export canvas before writing. Measure
+        # at THAT size, or the block is positioned for a canvas that never gets
+        # saved and drifts back under the legend.
+        y_top = 1.0
+        authored = fig.get_size_inches().copy()
+        try:
+            export_size = None
+            try:
+                from PyFLASH.aesthetics import (_normalize_save_bbox, get_pyflash_style,
+                                                pyflash_figure_size)
+                # 'standard'/'canvas'/'none'/'false' all normalise to the fixed
+                # canvas, so compare the normalised policy rather than the raw string.
+                if _normalize_save_bbox(get_pyflash_style("save_bbox")) == "fixed":
+                    export_size = pyflash_figure_size(None)
+            except Exception:
+                export_size = None
+            if export_size is not None:
+                fig.set_size_inches(export_size, forward=False)
+            fig.canvas.draw()
+            box = legend.get_window_extent().transformed(ax.transAxes.inverted())
+            # No lower clamp: every save policy exports with bbox_inches='tight'
+            # (aesthetics.pyflash_savefig_kwargs), so the canvas always grows to
+            # capture the block however far down it sits. Flooring the value would
+            # only push a tall legend back on top of it.
+            y_top = min(1.0, float(box.y0) - 0.04)
+        except Exception:
+            pass
+        finally:
+            try:
+                fig.set_size_inches(authored, forward=False)
+            except Exception:
+                pass
+        summary_annotator(ax, y_top)
+    mark_manual_layout(fig)
+    return fig
+
+
+def _correlation_contrast_figure(table, group_order, reference_label, x_label,
+                                 method, *, significance, palette, factor_name=None,
+                                 show_ci=True,
+                                 show_stats_summary=True,
+                                 stats_summary_max_items=10, tail="two",
+                                 x_axis_width_scale=_SLOPEGRAPH_DEFAULT_AXIS_WIDTH_SCALE,
+                                 node_size=_SLOPEGRAPH_DEFAULT_NODE_SIZE):
+    """Correlation slopegraph: Fisher r-to-z contrasts on the shared renderer."""
+    fisher_p, acat_p = _correlation_contrast_stats(
+        table, group_order, reference_label, method, tail=tail)
+    symbol = _CORR_CONTRAST_SYMBOL.get(method, "r")
+    span_txt = f" across {factor_name}" if factor_name else " across groups"
+
+    def _summary(ax, y=None):
+        return _annotate_correlation_contrast_stats_summary(
+            ax, table, fisher_p, acat_p, group_order, reference_label, method,
+            max_items=stats_summary_max_items, tail=tail, y=y)
+
+    return _contrast_slopegraph_figure(
+        table, group_order, reference_label,
+        contrast_p=fisher_p, omnibus_p=acat_p,
+        value_label=f"{method.capitalize()} correlation ({symbol})",
+        title_text=f"{get_display_name(x_label, minimal=True)} correlation{span_txt}",
+        significance=significance, palette=palette, scale="correlation",
+        show_ci=show_ci,
+        summary_annotator=_summary if show_stats_summary else None,
+        x_axis_width_scale=x_axis_width_scale,
+        node_size=node_size,
+    )
+
+
+def plot_correlation_contrast(experiment, x, y=None,
+                              filtered_columns=None, data_cols=None,
+                              by='conditions', factor=None,
+                              reference=None, control=None,
+                              test='spearmanr', covariates=None, tail='two',
+                              covariate_adjustment="rank_then_residual",
+                              group_order=None, significance="lines",
+                              min_n=4, palette=None, column_labels=None,
+                              x_axis_width_scale=_SLOPEGRAPH_DEFAULT_AXIS_WIDTH_SCALE,
+                              node_size=_SLOPEGRAPH_DEFAULT_NODE_SIZE,
+                              show_ci=True, ci_alpha=0.05,
+                              show_stats_summary=True,
+                              stats_summary_max_items=10,
+                              specificity=None, split_by=None, filter_by=None,
+                              roi=None, save=True,
+                              column_strings=None, regex_string=None, exclude='',
+                              data_col_contains=None, data_col_regex=None,
+                              data_col_exclude=None,
+                              condition_col="Condition", factor_cols=None,
+                              animal_col="AnimalName", group_list=None, groups=None,
+                              group_col=None, group_cols=None, subject_col=None,
+                              dataframe_kwargs=None):
+    """Contrast the correlation of an anchor variable ``x`` with each measure ``y``
+    across an ordered grouping factor — a slopegraph of the coefficient per group.
+
+    Each measure is one line; every non-reference group is tested against
+    ``reference`` (alias ``control``) with a **Fisher r-to-z** test for two
+    independent correlations. ``significance`` chooses how that is drawn: either
+    per-measure stars at each node, or one omnibus **Cauchy/ACAT** comparison
+    bracket per group (combining all measures) floating above the axis.
+
+    Parameters
+    ----------
+    x : str
+        Anchor column correlated against every measure (one column).
+    y : str | list[str] | None
+        Measure column(s). If ``None``, the measures are discovered from
+        ``filtered_columns`` / ``column_strings`` / ``regex_string`` like the
+        other summary plotters.
+    factor : str | None
+        Grouping factor whose ordered levels form the x-axis (e.g. ``"Diagnosis"``).
+        Without it, conditions are used.
+    reference / control : str | None
+        The baseline group for every contrast. Defaults to the first group.
+    test : {'pearsonr', 'spearmanr', 'kendalltau'}
+        Correlation statistic (aliases ``p`` / ``s`` / ``k``).
+    covariates : list[str] | None
+        Optional adjustment columns. When given, ``x`` and each ``y`` are
+        residualised on these within each group; when omitted, raw correlations
+        are shown. Numeric covariates are used as-is, categorical ones are
+        one-hot encoded.
+    covariate_adjustment : {'rank_then_residual', 'residual_then_correlation'}
+        For covariate-adjusted Spearman only. ``'rank_then_residual'`` (default)
+        ranks x, y, and numeric covariates before residualising, giving the
+        rank-first partial Spearman variant. ``'residual_then_correlation'``
+        residualises raw values first and then computes Spearman on residuals,
+        matching the older presentation matrix convention.
+    significance : {'lines', 'stars', 'omnibus', None}
+        How to show significance. ``'lines'`` (default) draws one comparison line
+        per significant measure per group (reference→group), stacked above the
+        axis, so which contrast each mark refers to is explicit; ``'stars'`` marks
+        per-measure Fisher r-to-z stars at each non-reference node; ``'omnibus'``
+        draws one Cauchy/ACAT comparison bracket per group vs the reference;
+        ``None`` shows neither (just the coefficient slopegraph).
+    group_order : list[str] | None
+        Explicit left-to-right ordering of the groups; defaults to factor order.
+    palette : dict | str | None
+        Per-line colours. A ``{measure: colour}`` dict sets each measure's line
+        colour individually — keys are the ``y`` column names, and any measure not
+        in the dict falls back to the default palette. A seaborn/matplotlib palette
+        name (e.g. ``"Set1"``) recolours all lines from that palette. ``None`` uses
+        the house ``Set2`` default.
+    column_labels : dict | list | None
+        Per-line display names. A ``{measure: label}`` dict renames individual
+        legend entries (keys are the ``y`` column names); a positional list renames
+        every measure in plotted order. Measures left unspecified keep their house
+        display name. Renames displayed text only — palette keys and describe
+        records still use the raw column names.
+    x_axis_width_scale : float
+        Multiplier for the plotted x-axis/data-region width. Lower values pull
+        group ticks closer together without changing the figure size; ``1.0``
+        restores the original slopegraph spacing.
+    node_size : float
+        Marker diameter for the group nodes, in points.
+    show_ci : bool
+        Draw per-node confidence intervals for the plotted correlations.
+    ci_alpha : float
+        Alpha level for confidence intervals; 0.05 gives 95% CIs.
+
+    Returns the figure (or a queue dict in ROI / specificity-queue modes).
+    """
+    ci_alpha = _resolve_slopegraph_ci_alpha(ci_alpha)
+    covariate_adjustment = _normalize_covariate_adjustment(covariate_adjustment)
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns, column_strings=column_strings,
+        regex_string=regex_string, exclude=exclude, data_cols=data_cols,
+        data_col_contains=data_col_contains, data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by, factor=factor, specificity=specificity, split_by=split_by,
+        filter_by=filter_by, default_by='conditions',
+    )
+    experiment = coerce_dataframe_input(
+        experiment, condition_col=condition_col, factor_cols=factor_cols,
+        animal_col=animal_col, group_list=group_list, groups=groups,
+        group_col=group_col, group_cols=group_cols, subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
+    if y is not None:
+        filtered_columns = [y] if isinstance(y, str) else list(y)
+
+    _roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(_roi_bases) > 1:
+        return {rb: plot_correlation_contrast(
+            experiment, x, y=y, filtered_columns=filtered_columns, by=by, factor=factor,
+            reference=reference, control=control, test=test, covariates=covariates,
+            tail=tail, covariate_adjustment=covariate_adjustment,
+            group_order=group_order, significance=significance,
+            min_n=min_n, palette=palette, column_labels=column_labels,
+            x_axis_width_scale=x_axis_width_scale,
+            node_size=node_size,
+            show_ci=show_ci, ci_alpha=ci_alpha,
+            show_stats_summary=show_stats_summary,
+            stats_summary_max_items=stats_summary_max_items,
+            specificity=specificity, roi=rb, save=save,
+            column_strings=column_strings, regex_string=regex_string, exclude=exclude)
+            for rb in _roi_bases}
+    if is_specificity_queue(specificity):
+        return {spec: plot_correlation_contrast(
+            experiment, x, y=y, filtered_columns=filtered_columns, by=by, factor=factor,
+            reference=reference, control=control, test=test, covariates=covariates,
+            tail=tail, covariate_adjustment=covariate_adjustment,
+            group_order=group_order, significance=significance,
+            min_n=min_n, palette=palette, column_labels=column_labels,
+            x_axis_width_scale=x_axis_width_scale,
+            node_size=node_size,
+            show_ci=show_ci, ci_alpha=ci_alpha,
+            show_stats_summary=show_stats_summary,
+            stats_summary_max_items=stats_summary_max_items,
+            specificity=spec, roi=roi, save=save,
+            column_strings=column_strings, regex_string=regex_string, exclude=exclude)
+            for spec in iter_specificities(specificity)}
+
+    _roi_base, scope_df, num_df, numeric_cols, grps = _gc_plot_prepare(
+        experiment, filtered_columns, column_strings, regex_string, exclude,
+        by, factor, specificity, roi)
+    x_key = resolve_column_key(scope_df, x)
+    if x_key is None:
+        raise ValueError(f"plot_correlation_contrast: anchor column {x!r} not found.")
+    covariate_keys = []
+    for c in (covariates or []):
+        ck = resolve_column_key(scope_df, c)
+        if ck is None:
+            raise ValueError(f"plot_correlation_contrast: covariate column {c!r} not found.")
+        covariate_keys.append(ck)
+    measure_cols = [c for c in numeric_cols if c != x_key and c not in covariate_keys]
+    if len(measure_cols) < 1:
+        raise ValueError("plot_correlation_contrast: no measure columns after removing x/covariates.")
+    if len(grps) < 2:
+        raise ValueError("plot_correlation_contrast: need at least two groups to contrast.")
+
+    group_labels = [str(g[0]) for g in grps]
+    if group_order:
+        wanted = [str(g) for g in group_order]
+        grps = sorted([g for g in grps if str(g[0]) in wanted],
+                      key=lambda g: wanted.index(str(g[0])))
+        group_labels = [str(g[0]) for g in grps]
+    reference_label = _match_group_label(group_labels, reference if reference is not None else control)
+
+    table, method = _correlation_contrast_table(
+        scope_df, x_key, measure_cols, grps, test, covariate_keys, min_n,
+        ci_alpha=ci_alpha,
+        covariate_adjustment=covariate_adjustment)
+    with column_label_overrides(normalize_column_labels(measure_cols, column_labels)):
+        fig = _correlation_contrast_figure(
+            table, group_labels, reference_label, x_key, method,
+            significance=significance, palette=palette, factor_name=factor,
+            show_ci=show_ci,
+            show_stats_summary=show_stats_summary,
+            stats_summary_max_items=stats_summary_max_items, tail=tail,
+            x_axis_width_scale=x_axis_width_scale, node_size=node_size)
+
+    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+    subfolder, suffix = build_subfolder(
+        plot_type='Correlation Contrast', factor=factor, specificity=specificity,
+        aliases=getattr(experiment, 'aliases', None), roi_base=_roi_base,
+        multi_roi=_multi_roi)
+    if save:
+        save_fig(fig, experiment.fig_path,
+                 f"Correlation Contrast {strip_name(x_key)}" + suffix,
+                 subfolder=subfolder, verbose=False)
+    return fig
+
+
+# ── Coefficient contrast ─────────────────────────────────────────────────────
+# Slope counterpart of the correlation contrast: nodes are per-group regression
+# coefficients and the between-group test is the x*group interaction rather than
+# Fisher r-to-z. Both plots share _contrast_slopegraph_figure so their aesthetic
+# cannot drift apart.
+
+_COEF_CONTRAST_VALUES = ("beta", "slope")
+
+
+def _coefficient_contrast_covariate_design(cov_frame, n_rows):
+    """Build the additive covariate design used for coefficient-node fits."""
+    if cov_frame is None or len(getattr(cov_frame, "columns", [])) == 0:
+        return np.zeros((int(n_rows), 0), dtype=float)
+    parts = []
+    for c in cov_frame.columns:
+        col = cov_frame[c]
+        num = pd.to_numeric(col, errors="coerce")
+        if col.notna().sum() > 0 and int(num.notna().sum()) == int(col.notna().sum()):
+            parts.append(num.to_numpy(dtype=float).reshape(-1, 1))
+        else:
+            dummies = pd.get_dummies(col.astype("object"), drop_first=True, dtype=float)
+            if dummies.shape[1]:
+                parts.append(dummies.to_numpy(dtype=float))
+    return np.column_stack(parts) if parts else np.zeros((int(n_rows), 0), dtype=float)
+
+
+def _coefficient_contrast_fit(xa, ya, cov_frame, value, ci_alpha=0.05):
+    """Within-group coefficient and CI in the same units as the plotted node."""
+    from scipy import stats as sp_stats
+
+    xa = np.asarray(xa, dtype=float)
+    ya = np.asarray(ya, dtype=float)
+    n = int(len(xa))
+    nan_result = {
+        "coef": float("nan"),
+        "se": float("nan"),
+        "df": 0,
+        "ci_low": float("nan"),
+        "ci_high": float("nan"),
+    }
+    if n < 3 or np.std(xa) <= 0 or np.std(ya) <= 0:
+        return nan_result
+    cov_design = _coefficient_contrast_covariate_design(cov_frame, n)
+    design = np.column_stack([np.ones(n), xa.reshape(-1, 1), cov_design])
+    rank = int(np.linalg.matrix_rank(design))
+    df_resid = n - rank
+    if df_resid <= 0:
+        return {**nan_result, "df": int(df_resid)}
+    try:
+        xtx_inv = np.linalg.pinv(design.T @ design)
+        beta = xtx_inv @ design.T @ ya
+        resid = ya - design @ beta
+        sigma2 = float(resid @ resid) / float(df_resid)
+        se = float(np.sqrt(max(sigma2 * float(xtx_inv[1, 1]), 0.0)))
+    except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+        return {**nan_result, "df": int(df_resid)}
+    coef = float(beta[1])
+    if str(value).lower() == "beta":
+        sd_x, sd_y = float(np.std(xa)), float(np.std(ya))
+        if sd_y <= 0:
+            return {**nan_result, "df": int(df_resid)}
+        scale = sd_x / sd_y
+        coef *= scale
+        se *= scale
+    if not (np.isfinite(coef) and np.isfinite(se)):
+        return {**nan_result, "df": int(df_resid)}
+    tcrit = float(sp_stats.t.ppf(1.0 - float(ci_alpha) / 2.0, df_resid))
+    ci_low = coef - tcrit * se
+    ci_high = coef + tcrit * se
+    return {
+        "coef": float(coef),
+        "se": float(se),
+        "df": int(df_resid),
+        "ci_low": float(ci_low),
+        "ci_high": float(ci_high),
+    }
+
+
+def _coefficient_contrast_slope(xa, ya, cov_frame, value):
+    """Within-group slope of ``ya`` on ``xa``, covariate-adjusted via
+    Frisch-Waugh-Lovell (equivalent to the multiple-regression coefficient).
+
+    ``value='beta'`` rescales by the total SDs of x and y, giving a standardized
+    coefficient that equals Pearson's r exactly when there are no covariates.
+    """
+    return _coefficient_contrast_fit(xa, ya, cov_frame, value).get("coef", float("nan"))
+
+
+def _coefficient_contrast_table(scope_df, x, measure_cols, groups, covariates,
+                                min_n, value="beta", rank=False, ci_alpha=0.05):
+    """Per-(group, measure) regression coefficient of each measure on ``x``.
+
+    Emits a correlation-style record per finite result when the describe
+    collector is armed. Returns a DataFrame with ``measure``/``group``/``n``/``r``
+    columns, where ``r`` holds the plotted coefficient.
+    """
+    from scipy import stats as sp_stats
+    covariates = [c for c in (covariates or [])]
+    try:
+        import PyFLASH.report as _report
+        active = _report.is_active()
+    except Exception:
+        _report, active = None, False
+
+    rows = []
+    for glabel, gidx, _spec in groups:
+        gdf = scope_df.loc[scope_df.index.intersection(gidx)]
+        xv = _to_numeric_excluding_not_included(gdf[x]).astype(float)
+        for measure in measure_cols:
+            yv = _to_numeric_excluding_not_included(gdf[measure]).astype(float)
+            mask = xv.notna() & yv.notna()
+            for c in covariates:
+                cser = gdf[c]
+                cnum = pd.to_numeric(cser, errors="coerce")
+                mask &= cnum.notna() if int(cnum.notna().sum()) == int(cser.notna().sum()) else cser.notna()
+            xa = xv[mask].to_numpy(dtype=float)
+            ya = yv[mask].to_numpy(dtype=float)
+            n = int(len(xa))
+            coef = float("nan")
+            se = df_resid = ci_low = ci_high = float("nan")
+            if n >= max(4, int(min_n)) and np.std(xa) > 0 and np.std(ya) > 0:
+                if rank:
+                    xa, ya = sp_stats.rankdata(xa), sp_stats.rankdata(ya)
+                cov_frame = gdf.loc[mask, covariates] if covariates else None
+                fit = _coefficient_contrast_fit(xa, ya, cov_frame, value, ci_alpha=ci_alpha)
+                coef = fit["coef"]
+                se = fit["se"]
+                df_resid = fit["df"]
+                ci_low = fit["ci_low"]
+                ci_high = fit["ci_high"]
+            rows.append({"measure": str(measure), "group": str(glabel),
+                         "n": n, "r": coef, "p": float("nan"), "method": str(value),
+                         "se": se, "df": df_resid,
+                         "ci_low": ci_low, "ci_high": ci_high})
+            if active and np.isfinite(coef):
+                try:
+                    _report.emit(_report.build_correlation_record(
+                        x=x, y=measure, group=str(glabel), n=n, r=coef,
+                        p=float("nan"), method=f"{value}{'-rank' if rank else ''}"))
+                except Exception:
+                    pass
+    return pd.DataFrame(rows)
+
+
+def _coefficient_contrast_stats(scope_df, x, measure_cols, groups, group_order,
+                                reference_label, covariates, tail="two",
+                                rank=False, value="beta", table=None, min_n=4):
+    """OLS ``x * group`` interaction (per measure, each group vs reference) plus a
+    Cauchy/ACAT omnibus per group. Returns ``(interaction_p, acat_p, details)``.
+
+    When ``table`` is supplied, contrasts whose plotted endpoints are missing or
+    below ``min_n`` are skipped, so a significance mark can never appear on a
+    comparison with no node to attach it to.
+    """
+    from PyFLASH import stats as _pf_stats
+    covariates = [c for c in (covariates or [])]
+    idx_of = {str(gl): gidx for gl, gidx, _spec in groups}
+    ref_idx = idx_of.get(str(reference_label))
+    inter_p, acat_p, details = {}, {}, {}
+    if ref_idx is None:
+        return inter_p, acat_p, details
+
+    def _node_usable(measure, group):
+        if table is None or table.empty:
+            return True
+        rows = table[table["measure"].eq(str(measure)) & table["group"].eq(str(group))]
+        if rows.empty:
+            return False
+        return bool(np.isfinite(rows["r"].iloc[0])) and int(rows["n"].iloc[0]) >= max(4, int(min_n))
+
+    for grp in group_order:
+        if str(grp) == str(reference_label):
+            continue
+        grp_idx = idx_of.get(str(grp))
+        if grp_idx is None:
+            continue
+        per_measure = []
+        for measure in measure_cols:
+            if not (_node_usable(measure, reference_label) and _node_usable(measure, grp)):
+                continue
+            ref_rows = scope_df.loc[scope_df.index.intersection(ref_idx)]
+            grp_rows = scope_df.loc[scope_df.index.intersection(grp_idx)]
+            sub = pd.concat([ref_rows, grp_rows], axis=0)
+            labels = pd.Series(
+                [str(reference_label)] * len(ref_rows) + [str(grp)] * len(grp_rows),
+                index=range(len(sub)))
+            xv = _to_numeric_excluding_not_included(sub[x]).astype(float).reset_index(drop=True)
+            yv = _to_numeric_excluding_not_included(sub[measure]).astype(float).reset_index(drop=True)
+            cov_frame = sub[covariates].reset_index(drop=True) if covariates else None
+            try:
+                res = _pf_stats.interaction_slope_difference(
+                    xv, yv, labels, reference=str(reference_label),
+                    covariates=cov_frame, tail=tail,
+                    standardize=(str(value).lower() == "beta"), rank=rank)
+            except ValueError:
+                continue
+            inter_p[(str(measure), str(grp))] = res["p"]
+            details[(str(measure), str(grp))] = res
+            per_measure.append(res["p"])
+        acat_p[str(grp)] = _pf_stats.cauchy_combination_test(per_measure)
+    return inter_p, acat_p, details
+
+
+def _annotate_coefficient_contrast_stats_summary(ax, table, inter_p, acat_p, details,
+                                                 group_order, reference_label, value,
+                                                 *, max_items=None, tail="two",
+                                                 rank=False, y=None):
+    """Draw exact interaction estimates and p-values in the removable side panel."""
+    lut = {(r["measure"], r["group"]): r for _, r in table.iterrows()}
+    rows = []
+    for (measure, group), p_value in (inter_p or {}).items():
+        try:
+            p_sort = float(p_value)
+        except (TypeError, ValueError):
+            p_sort = np.inf
+        if not np.isfinite(p_sort):
+            p_sort = np.inf
+        rows.append((p_sort, str(measure), str(group), p_value))
+    rows.sort(key=lambda item: (item[0], item[2], item[1]))
+    n_sig = sum(1 for p_sort, *_ in rows if np.isfinite(p_sort) and p_sort < 0.05)
+
+    detail = []
+    for _, measure, group, p_value in rows:
+        res = (details or {}).get((measure, group), {})
+        row = lut.get((measure, str(group)))
+        ref = lut.get((measure, str(reference_label)))
+        b_group = row.get("r", np.nan) if hasattr(row, "get") else np.nan
+        b_ref = ref.get("r", np.nan) if hasattr(ref, "get") else np.nan
+        n = res.get("n", None)
+        n_txt = f", n={int(n)}" if n else ""
+        # Report the difference between the PLOTTED nodes, so it is commensurate
+        # with the values on the graph. The model's own estimate is standardised
+        # over the pooled two-group sample, which is a different scale from the
+        # per-group standardisation used for 'beta' nodes; only its standard
+        # error is shown, and only when the units do match ('slope').
+        node_dif = (float(b_group) - float(b_ref)
+                    if np.isfinite(b_group) and np.isfinite(b_ref) else np.nan)
+        se_txt = ""
+        if str(value).lower() == "slope":
+            se_txt = f"+/-{_format_side_stats_value(res.get('se', np.nan))}"
+        detail.append(
+            f"{get_display_name(measure, minimal=True)} {group}: "
+            f"{_format_side_stats_value(b_group)}{_format_side_stats_ci(row)} vs "
+            f"{_format_side_stats_value(b_ref)}{_format_side_stats_ci(ref)}"
+            f"{n_txt}, dif={_format_side_stats_value(node_dif)}{se_txt}, "
+            f"p={_format_side_stats_pvalue(p_value)}"
+        )
+    omnibus = []
+    for group in group_order:
+        if str(group) == str(reference_label):
+            continue
+        omnibus.append(f"{group} ACAT p={_format_side_stats_pvalue((acat_p or {}).get(str(group), np.nan))}")
+
+    tail_txt = "" if str(tail).lower() in ("two", "none", "") else f", {tail}-tailed"
+    unit = "standardized beta" if str(value).lower() == "beta" else "raw slope"
+    lines = [
+        f"Test: OLS x*group interaction{tail_txt}",
+        f"Value: {unit}{' (rank)' if rank else ''}",
+        f"Reference: {reference_label}",
+        f"Measure contrasts: {len(rows)}",
+        f"Significant: {n_sig} (p<0.05)",
+    ]
+    if omnibus:
+        lines.extend(["Omnibus:", *_limit_stats_detail_lines(omnibus, max_items=max_items)])
+    if detail:
+        lines.extend(["Top contrasts:", *_limit_stats_detail_lines(detail, max_items=max_items)])
+    return _annotate_stats_detail_text(ax, lines, x=1.28, y=y)
+
+
+def _coefficient_contrast_figure(table, group_order, reference_label, x_label,
+                                 inter_p, acat_p, details, *, value, significance,
+                                 palette, factor_name=None, tail="two", rank=False,
+                                 show_ci=True,
+                                 show_stats_summary=True, stats_summary_max_items=10,
+                                 x_axis_width_scale=_SLOPEGRAPH_DEFAULT_AXIS_WIDTH_SCALE,
+                                 node_size=_SLOPEGRAPH_DEFAULT_NODE_SIZE):
+    """Coefficient slopegraph: interaction contrasts on the shared renderer."""
+    range_cols = ["r"]
+    if show_ci and {"ci_low", "ci_high"}.issubset(set(table.columns)):
+        range_cols.extend(["ci_low", "ci_high"])
+    finite = table[range_cols].to_numpy(dtype=float).ravel()
+    finite = finite[np.isfinite(finite)]
+    bounded = bool(finite.size) and float(np.max(np.abs(finite))) <= 1.0
+    # Standardized betas share the correlation axis when they fit inside it, so the
+    # two contrast plots stay visually comparable; otherwise fall back to data limits.
+    scale = "correlation" if (str(value).lower() == "beta" and bounded) else "data"
+    span_txt = f" across {factor_name}" if factor_name else " across groups"
+    if str(value).lower() == "beta":
+        value_label = "Standardized slope (beta)"
+    else:
+        value_label = f"Slope per unit {get_display_name(x_label, minimal=True)}"
+
+    def _summary(ax, y=None):
+        return _annotate_coefficient_contrast_stats_summary(
+            ax, table, inter_p, acat_p, details, group_order, reference_label,
+            value, max_items=stats_summary_max_items, tail=tail, rank=rank, y=y)
+
+    return _contrast_slopegraph_figure(
+        table, group_order, reference_label,
+        contrast_p=inter_p, omnibus_p=acat_p,
+        value_label=value_label,
+        title_text=f"{get_display_name(x_label, minimal=True)} coefficient{span_txt}",
+        significance=significance, palette=palette, scale=scale,
+        show_ci=show_ci,
+        summary_annotator=_summary if show_stats_summary else None,
+        x_axis_width_scale=x_axis_width_scale,
+        node_size=node_size,
+    )
+
+
+def plot_coefficient_contrast(experiment, x, y=None,
+                              filtered_columns=None, data_cols=None,
+                              by='conditions', factor=None,
+                              reference=None, control=None,
+                              value='beta', covariates=None, tail='two',
+                              rank=False,
+                              group_order=None, significance="lines",
+                              min_n=4, palette=None, column_labels=None,
+                              x_axis_width_scale=_SLOPEGRAPH_DEFAULT_AXIS_WIDTH_SCALE,
+                              node_size=_SLOPEGRAPH_DEFAULT_NODE_SIZE,
+                              show_ci=True, ci_alpha=0.05,
+                              show_stats_summary=True,
+                              stats_summary_max_items=10,
+                              specificity=None, split_by=None, filter_by=None,
+                              roi=None, save=True,
+                              column_strings=None, regex_string=None, exclude='',
+                              data_col_contains=None, data_col_regex=None,
+                              data_col_exclude=None,
+                              condition_col="Condition", factor_cols=None,
+                              animal_col="AnimalName", group_list=None, groups=None,
+                              group_col=None, group_cols=None, subject_col=None,
+                              dataframe_kwargs=None):
+    """Contrast the regression coefficient of ``x`` on each measure ``y`` across an
+    ordered grouping factor — the slope counterpart of :func:`plot_correlation_contrast`.
+
+    Each measure is one line; every non-reference group is tested against
+    ``reference`` (alias ``control``) with the **OLS ``x * group`` interaction**,
+    i.e. "does the slope differ between these groups?". That is a different
+    question from the correlation contrast, which asks whether the *correlation*
+    differs; the two can disagree when groups differ in spread.
+
+    Parameters
+    ----------
+    x : str
+        Anchor column regressed against every measure (one column).
+    y : str | list[str] | None
+        Measure column(s). If ``None``, measures are discovered from
+        ``filtered_columns`` / ``column_strings`` / ``regex_string``.
+    factor : str | None
+        Grouping factor whose ordered levels form the x-axis (e.g. ``"Diagnosis"``).
+    reference / control : str | None
+        Baseline group for every contrast. Defaults to the first group.
+    value : {'beta', 'slope'}
+        Node value. ``'beta'`` (default) is the standardized coefficient, which
+        equals Pearson's r exactly when no covariates are given and so shares the
+        correlation axis; ``'slope'`` keeps raw y-per-x units.
+    covariates : list[str] | None
+        Optional adjustment columns. These enter the model as **additive terms**
+        (unlike :func:`plot_correlation_contrast`, which residualises the inputs
+        into a partial correlation). Numeric columns are used as-is, categorical
+        ones are one-hot encoded.
+    tail : {'two', 'less', 'greater', 'one'}
+        Alternative hypothesis for the slope difference. One-sided tests are only
+        valid when the direction was specified before seeing the data.
+    rank : bool
+        Rank-transform x and y first, giving a monotonic (Spearman-flavoured)
+        version of the contrast.
+    significance : {'stars', 'omnibus', 'lines', None}
+        How to show significance, exactly as in :func:`plot_correlation_contrast`.
+    show_stats_summary : bool
+        Draw the removable right-side block with exact coefficients, differences,
+        standard errors and p-values.
+    stats_summary_max_items : int
+        Cap on listed rows in that block before an omitted-count line.
+    x_axis_width_scale : float
+        Multiplier for the plotted x-axis/data-region width. Lower values pull
+        group ticks closer together without changing the figure size; ``1.0``
+        restores the original slopegraph spacing.
+    node_size : float
+        Marker diameter for the group nodes, in points.
+    show_ci : bool
+        Draw per-node confidence intervals for the plotted coefficients.
+    ci_alpha : float
+        Alpha level for confidence intervals; 0.05 gives 95% CIs.
+
+    Returns the figure (or a queue dict in ROI / specificity-queue modes).
+    """
+    if str(value).lower() not in _COEF_CONTRAST_VALUES:
+        raise ValueError(
+            f"plot_coefficient_contrast: value must be one of {_COEF_CONTRAST_VALUES}; got {value!r}.")
+    ci_alpha = _resolve_slopegraph_ci_alpha(ci_alpha)
+    filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
+        filtered_columns=filtered_columns, column_strings=column_strings,
+        regex_string=regex_string, exclude=exclude, data_cols=data_cols,
+        data_col_contains=data_col_contains, data_col_regex=data_col_regex,
+        data_col_exclude=data_col_exclude,
+    )
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by, factor=factor, specificity=specificity, split_by=split_by,
+        filter_by=filter_by, default_by='conditions',
+    )
+    experiment = coerce_dataframe_input(
+        experiment, condition_col=condition_col, factor_cols=factor_cols,
+        animal_col=animal_col, group_list=group_list, groups=groups,
+        group_col=group_col, group_cols=group_cols, subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
+    if y is not None:
+        filtered_columns = [y] if isinstance(y, str) else list(y)
+
+    _roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(_roi_bases) > 1:
+        return {rb: plot_coefficient_contrast(
+            experiment, x, y=y, filtered_columns=filtered_columns, by=by, factor=factor,
+            reference=reference, control=control, value=value, covariates=covariates,
+            tail=tail, rank=rank, group_order=group_order, significance=significance,
+            min_n=min_n, palette=palette, column_labels=column_labels,
+            x_axis_width_scale=x_axis_width_scale,
+            node_size=node_size,
+            show_ci=show_ci, ci_alpha=ci_alpha,
+            show_stats_summary=show_stats_summary,
+            stats_summary_max_items=stats_summary_max_items,
+            specificity=specificity, roi=rb, save=save,
+            column_strings=column_strings, regex_string=regex_string, exclude=exclude)
+            for rb in _roi_bases}
+    if is_specificity_queue(specificity):
+        return {spec: plot_coefficient_contrast(
+            experiment, x, y=y, filtered_columns=filtered_columns, by=by, factor=factor,
+            reference=reference, control=control, value=value, covariates=covariates,
+            tail=tail, rank=rank, group_order=group_order, significance=significance,
+            min_n=min_n, palette=palette, column_labels=column_labels,
+            x_axis_width_scale=x_axis_width_scale,
+            node_size=node_size,
+            show_ci=show_ci, ci_alpha=ci_alpha,
+            show_stats_summary=show_stats_summary,
+            stats_summary_max_items=stats_summary_max_items,
+            specificity=spec, roi=roi, save=save,
+            column_strings=column_strings, regex_string=regex_string, exclude=exclude)
+            for spec in iter_specificities(specificity)}
+
+    _roi_base, scope_df, num_df, numeric_cols, grps = _gc_plot_prepare(
+        experiment, filtered_columns, column_strings, regex_string, exclude,
+        by, factor, specificity, roi)
+    x_key = resolve_column_key(scope_df, x)
+    if x_key is None:
+        raise ValueError(f"plot_coefficient_contrast: anchor column {x!r} not found.")
+    covariate_keys = []
+    for c in (covariates or []):
+        ck = resolve_column_key(scope_df, c)
+        if ck is None:
+            raise ValueError(f"plot_coefficient_contrast: covariate column {c!r} not found.")
+        covariate_keys.append(ck)
+    measure_cols = [c for c in numeric_cols if c != x_key and c not in covariate_keys]
+    if len(measure_cols) < 1:
+        raise ValueError("plot_coefficient_contrast: no measure columns after removing x/covariates.")
+    if len(grps) < 2:
+        raise ValueError("plot_coefficient_contrast: need at least two groups to contrast.")
+
+    group_labels = [str(g[0]) for g in grps]
+    if group_order:
+        wanted = [str(g) for g in group_order]
+        grps = sorted([g for g in grps if str(g[0]) in wanted],
+                      key=lambda g: wanted.index(str(g[0])))
+        group_labels = [str(g[0]) for g in grps]
+    reference_label = _match_group_label(group_labels, reference if reference is not None else control)
+
+    table = _coefficient_contrast_table(
+        scope_df, x_key, measure_cols, grps, covariate_keys, min_n,
+        value=value, rank=rank, ci_alpha=ci_alpha)
+    inter_p, acat_p, details = _coefficient_contrast_stats(
+        scope_df, x_key, measure_cols, grps, group_labels, reference_label,
+        covariate_keys, tail=tail, rank=rank, value=value,
+        table=table, min_n=min_n)
+    with column_label_overrides(normalize_column_labels(measure_cols, column_labels)):
+        fig = _coefficient_contrast_figure(
+            table, group_labels, reference_label, x_key,
+            inter_p, acat_p, details, value=value,
+            significance=significance, palette=palette, factor_name=factor,
+            tail=tail, rank=rank, show_ci=show_ci,
+            show_stats_summary=show_stats_summary,
+            stats_summary_max_items=stats_summary_max_items,
+            x_axis_width_scale=x_axis_width_scale, node_size=node_size)
+
+    _multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+    subfolder, suffix = build_subfolder(
+        plot_type='Coefficient Contrast', factor=factor, specificity=specificity,
+        aliases=getattr(experiment, 'aliases', None), roi_base=_roi_base,
+        multi_roi=_multi_roi)
+    if save:
+        save_fig(fig, experiment.fig_path,
+                 f"Coefficient Contrast {strip_name(x_key)}" + suffix,
+                 subfolder=subfolder, verbose=False)
+    return fig
+
+
 # ── Rhythm / circadian plots ─────────────────────────────────────────────────
 # Standalone plot functions for the rhythm module (PyFLASH.pipeline.rhythm reuses
 # these cores, per PREFERENCES.md §8). They read a subject-level frame (an
@@ -21408,6 +29810,1328 @@ def plot_group_matrix(experiment, filtered_columns=None, data_cols=None,
 # external CSVs (human actigraphy) alike. plot_cosinor is period-generic (24 h
 # daily, 12 mo seasonal, free-running tau); plot_acrophase_clock treats a peak
 # time as circular.
+_ASSOCIATION_COEFFICIENT_MARKERS = ("o", "s", "D", "^", "v", "P", "X", "h")
+
+
+def _resolve_association_coefficient_specs(scope_df, associations):
+    from PyFLASH.association_coefficients import normalize_specs
+
+    resolved = []
+    for spec in normalize_specs(associations):
+        x_key = resolve_column_key(scope_df, spec["x"])
+        y_key = resolve_column_key(scope_df, spec["y"])
+        if x_key is None:
+            raise ValueError(
+                f"plot_association_coefficients: predictor column {spec['x']!r} not found."
+            )
+        if y_key is None:
+            raise ValueError(
+                f"plot_association_coefficients: outcome column {spec['y']!r} not found."
+            )
+        covariate_keys = []
+        for covariate in spec["covariates"]:
+            key = resolve_column_key(scope_df, covariate)
+            if key is None:
+                raise ValueError(
+                    f"plot_association_coefficients: covariate column {covariate!r} not found."
+                )
+            covariate_keys.append(key)
+        resolved.append(
+            {**spec, "x": x_key, "y": y_key, "covariates": covariate_keys}
+        )
+    return resolved
+
+
+def _resolve_association_correlation_specs(scope_df, associations):
+    from PyFLASH.association_correlations import normalize_specs
+
+    resolved = []
+    for spec in normalize_specs(associations):
+        x_key = resolve_column_key(scope_df, spec["x"])
+        y_key = resolve_column_key(scope_df, spec["y"])
+        if x_key is None:
+            raise ValueError(
+                f"plot_association_correlations: x column {spec['x']!r} not found."
+            )
+        if y_key is None:
+            raise ValueError(
+                f"plot_association_correlations: y column {spec['y']!r} not found."
+            )
+        covariate_keys = []
+        for covariate in spec["covariates"]:
+            key = resolve_column_key(scope_df, covariate)
+            if key is None:
+                raise ValueError(
+                    f"plot_association_correlations: covariate column {covariate!r} not found."
+                )
+            covariate_keys.append(key)
+        resolved.append(
+            {**spec, "x": x_key, "y": y_key, "covariates": covariate_keys}
+        )
+    return resolved
+
+
+def _association_coefficient_display_specs(specs):
+    display_specs = []
+    for spec in specs:
+        label = spec["name"]
+        if label is None:
+            label = (
+                f"{get_display_name(spec['x'], minimal=True)} -> "
+                f"{get_display_name(spec['y'], minimal=True)}"
+            )
+        display_specs.append({**spec, "label": str(label)})
+    labels = [spec["label"] for spec in display_specs]
+    if len(labels) != len(set(labels)):
+        raise ValueError(
+            "plot_association_coefficients: association display names must be unique."
+        )
+    return display_specs
+
+
+def _association_coefficient_group_series(scope_df, groups):
+    labels = pd.Series(index=scope_df.index, dtype="object")
+    for group_label, group_index, _specificity in groups:
+        labels.loc[scope_df.index.isin(group_index)] = str(group_label)
+    return labels
+
+
+def _association_covariate_list(covariates):
+    if covariates is None:
+        return []
+    if isinstance(covariates, str):
+        return [part.strip() for part in covariates.split(",") if part.strip()]
+    return [str(part) for part in covariates if str(part).strip()]
+
+
+def _association_model_formula(y, x, factor_name, covariates):
+    terms = [f"{x} * {factor_name or 'group'}", *_association_covariate_list(covariates)]
+    return f"{y} ~ " + " + ".join(terms)
+
+
+def _association_component_models_from_coefficients(coefficients, factor_name):
+    rows = []
+    for row in coefficients.drop_duplicates("association").itertuples(index=False):
+        covariates = _association_covariate_list(row.covariates)
+        rows.append(
+            {
+                "association": str(row.association),
+                "formula": _association_model_formula(
+                    str(row.y), str(row.x), factor_name, covariates
+                ),
+                "x": str(row.x),
+                "y": str(row.y),
+                "group": str(factor_name or "group"),
+                "covariates": covariates,
+            }
+        )
+    return rows
+
+
+def _association_model_summary_lines(component_models, *, width=62):
+    lines = ["Models:"]
+    for model in component_models:
+        lines.append(f"  {model['association']}:")
+        formula = str(model["formula"])
+        parts = re.findall(r".{1,%d}(?:\s+|$)" % int(width), formula)
+        wrapped = [part.strip() for part in parts if part.strip()] or [formula]
+        lines.extend(f"    {part}" for part in wrapped)
+    return lines
+
+
+def _association_coefficient_summary_lines(
+    coefficients,
+    interactions,
+    joint_test,
+    *,
+    factor_name=None,
+    value,
+    bootstrap,
+    max_items,
+):
+    unit = "standardized beta" if value == "beta" else "raw slope"
+    component_models = _association_component_models_from_coefficients(
+        coefficients,
+        factor_name,
+    )
+    lines = [
+        *_association_model_summary_lines(component_models),
+        f"Value: {unit}",
+        f"Bootstrap: {bootstrap['valid']}/{bootstrap['requested']} valid",
+        f"Seed: {bootstrap['random_state']}",
+        (
+            f"Joint Wald: chi-square({int(joint_test['df'])})="
+            f"{_format_side_stats_value(joint_test['statistic'])}, "
+            f"p={_format_side_stats_pvalue(joint_test['p'])}"
+        ),
+        "Details:",
+    ]
+    interaction_lookup = {
+        (str(row.association), str(row.group)): row
+        for row in interactions.itertuples(index=False)
+    }
+    coefficient_rows = list(coefficients.itertuples(index=False))
+    if max_items is None:
+        shown_rows = coefficient_rows
+    else:
+        shown_rows = coefficient_rows[:max(0, int(max_items))]
+    detail = []
+    active_association = None
+    for row in shown_rows:
+        if str(row.association) != active_association:
+            active_association = str(row.association)
+            detail.append(f"{active_association}:")
+        text = (
+            f"  {row.group}: "
+            f"{_format_side_stats_value(row.estimate)} "
+            f"[{_format_side_stats_value(row.ci_low)}, "
+            f"{_format_side_stats_value(row.ci_high)}], n={int(row.n)}"
+        )
+        interaction = interaction_lookup.get((str(row.association), str(row.group)))
+        if interaction is not None:
+            text += (
+                f", delta={_format_side_stats_value(interaction.estimate)}, "
+                f"p={_format_side_stats_pvalue(interaction.p)}"
+            )
+        detail.append(text)
+    omitted = len(coefficient_rows) - len(shown_rows)
+    if omitted > 0:
+        detail.append(f"... {omitted} more")
+    return lines + detail
+
+
+def _association_correlation_method_label(
+    test,
+    covariates,
+    covariate_adjustment="rank_then_residual",
+):
+    base = "Spearman rho" if str(test).lower() == "spearmanr" else "Pearson r"
+    covariate_list = _association_covariate_list(covariates)
+    adjustment = str(covariate_adjustment or "rank_then_residual")
+    if covariate_list and str(test).lower() == "spearmanr" and adjustment == "residual_then_correlation":
+        return "Spearman rho of covariate-adjusted residuals"
+    if covariate_list:
+        return f"partial {base}"
+    return base
+
+
+def _association_correlation_formula(
+    x,
+    y,
+    covariates,
+    test,
+    covariate_adjustment="rank_then_residual",
+):
+    method = _association_correlation_method_label(
+        test,
+        covariates,
+        covariate_adjustment,
+    )
+    covariate_list = _association_covariate_list(covariates)
+    adjustment = str(covariate_adjustment or "rank_then_residual")
+    covar_text = f" | {', '.join(covariate_list)}" if covariate_list else ""
+    if covariate_list and str(test).lower() == "spearmanr" and adjustment == "residual_then_correlation":
+        return f"{method}({x}, {y}; adjusted for {', '.join(covariate_list)})"
+    return f"{method}({x}, {y}{covar_text})"
+
+
+def _association_correlation_component_models(correlations):
+    models = []
+    for row in correlations.drop_duplicates("association").itertuples(index=False):
+        covariates = _association_covariate_list(row.covariates)
+        covariate_adjustment = getattr(row, "covariate_adjustment", "rank_then_residual")
+        models.append(
+            {
+                "association": str(row.association),
+                "formula": _association_correlation_formula(
+                    str(row.x),
+                    str(row.y),
+                    covariates,
+                    str(row.test),
+                    covariate_adjustment,
+                ),
+                "x": str(row.x),
+                "y": str(row.y),
+                "covariates": covariates,
+                "method": _association_correlation_method_label(
+                    str(row.test),
+                    covariates,
+                    covariate_adjustment,
+                ),
+                "covariate_adjustment": str(covariate_adjustment),
+            }
+        )
+    return models
+
+
+def _association_correlation_summary_lines(
+    correlations,
+    contrasts,
+    heterogeneity,
+    *,
+    bootstrap,
+    max_items,
+):
+    models = _association_correlation_component_models(correlations)
+    lines = [
+        *_association_model_summary_lines(models),
+        f"Bootstrap: {bootstrap['valid']}/{bootstrap['requested']} valid",
+        f"Seed: {bootstrap['random_state']}",
+        "Heterogeneity:",
+    ]
+    for row in heterogeneity.itertuples(index=False):
+        lines.append(
+            f"  {row.association}: Q({int(row.df)})="
+            f"{_format_side_stats_value(row.statistic)}, "
+            f"p={_format_side_stats_pvalue(row.p)}"
+        )
+    lines.append("Details:")
+    contrast_lookup = {
+        (str(row.association), str(row.group)): row
+        for row in contrasts.itertuples(index=False)
+    } if contrasts is not None and not contrasts.empty else {}
+    correlation_rows = list(correlations.itertuples(index=False))
+    if max_items is None:
+        shown_rows = correlation_rows
+    else:
+        shown_rows = correlation_rows[:max(0, int(max_items))]
+    detail = []
+    active_association = None
+    for row in shown_rows:
+        if str(row.association) != active_association:
+            active_association = str(row.association)
+            detail.append(f"{active_association}:")
+        text = (
+            f"  {row.group}: "
+            f"{_format_side_stats_value(row.estimate)} "
+            f"[{_format_side_stats_value(row.ci_low)}, "
+            f"{_format_side_stats_value(row.ci_high)}], "
+            f"p={_format_side_stats_pvalue(row.p)}, n={int(row.n)}"
+        )
+        contrast = contrast_lookup.get((str(row.association), str(row.group)))
+        if contrast is not None:
+            text += (
+                f", delta={_format_side_stats_value(contrast.delta)}, "
+                f"p={_format_side_stats_pvalue(contrast.p)}"
+            )
+        detail.append(text)
+    omitted = len(correlation_rows) - len(shown_rows)
+    if omitted > 0:
+        detail.append(f"... {omitted} more")
+    return lines + detail
+
+
+def _association_correlations_figure(
+    correlations,
+    contrasts,
+    heterogeneity,
+    group_order,
+    *,
+    factor_name=None,
+    test="spearmanr",
+    palette=None,
+    show_values=True,
+    show_stats_summary=True,
+    stats_summary_max_items=10,
+    bootstrap=None,
+    title=None,
+    subtitle=None,
+):
+    from PyFLASH.layout import mark_manual_layout
+
+    associations = list(correlations["association"].drop_duplicates())
+    color_of = _resolve_category_palette(associations, palette)
+    positions = {str(group): index for index, group in enumerate(group_order)}
+    offsets = (
+        np.linspace(-0.12, 0.12, len(associations))
+        if len(associations) > 1
+        else np.asarray([0.0])
+    )
+    legend_width = 6.2 + 0.10 * sum(len(str(item)) for item in associations)
+    fig_width = min(
+        16.0,
+        max(9.2, 1.6 * len(group_order) + 4.4, legend_width),
+    )
+    fig, ax = plt.subplots(figsize=(fig_width, 7.2))
+
+    for association_index, association in enumerate(associations):
+        subset = (
+            correlations.loc[correlations["association"].eq(association)]
+            .set_index("group")
+            .loc[[str(group) for group in group_order]]
+        )
+        estimates = subset["estimate"].to_numpy(dtype=float)
+        low = subset["ci_low"].to_numpy(dtype=float)
+        high = subset["ci_high"].to_numpy(dtype=float)
+        x = np.asarray(
+            [positions[str(group)] for group in group_order], dtype=float
+        ) + offsets[association_index]
+        ax.errorbar(
+            x,
+            estimates,
+            yerr=np.vstack([estimates - low, high - estimates]),
+            fmt=_ASSOCIATION_COEFFICIENT_MARKERS[
+                association_index % len(_ASSOCIATION_COEFFICIENT_MARKERS)
+            ],
+            color=color_of[association],
+            ecolor=color_of[association],
+            markersize=9,
+            markeredgecolor="white",
+            markeredgewidth=0.9,
+            elinewidth=2.0,
+            capsize=4,
+            capthick=1.8,
+            linestyle="none",
+            label=str(association),
+            zorder=3,
+        )
+        if show_values:
+            for x_value, estimate in zip(x, estimates):
+                tier = abs(association_index - (len(associations) - 1) / 2.0)
+                if offsets[association_index] < 0:
+                    side = -1
+                elif offsets[association_index] > 0:
+                    side = 1
+                else:
+                    side = -1 if association_index % 2 == 0 else 1
+                x_offset = side * (22 + 5 * tier)
+                y_offset = 9 if estimate >= 0 else -9
+                ax.annotate(
+                    f"{estimate:+.2f}",
+                    (x_value, estimate),
+                    xytext=(x_offset, y_offset),
+                    textcoords="offset points",
+                    ha="left" if side > 0 else "right",
+                    va="bottom" if estimate >= 0 else "top",
+                    fontsize=16,
+                    fontweight="bold",
+                    color=color_of[association],
+                    annotation_clip=False,
+                    zorder=5,
+                )
+
+    ax.set_ylim(-1.08, 1.08)
+    ax.axhline(0, color="#9ca3af", linestyle="--", linewidth=1.5, zorder=1)
+    ax.set_xticks(range(len(group_order)))
+    ax.set_xticklabels([str(group) for group in group_order])
+    ax.set_xlim(-0.55, len(group_order) - 0.45)
+    ax.set_xlabel(
+        get_display_name(factor_name, minimal=True) if factor_name else "Group"
+    )
+    ylabel = "Spearman correlation (rho)" if str(test).lower() == "spearmanr" else "Pearson correlation (r)"
+    ax.set_ylabel(ylabel)
+    ax.grid(axis="y", color="#d1d5db", linewidth=0.8, alpha=0.65)
+    ax.set_axisbelow(True)
+    ax.legend(
+        loc="upper left",
+        bbox_to_anchor=(1.07, 1.02),
+        ncol=1,
+    )
+
+    display_factor = get_display_name(factor_name, minimal=True) if factor_name else "groups"
+    default_title = f"Association correlations across {display_factor}"
+    ax.set_title(str(title) if title is not None else default_title, loc="left", pad=92)
+    ax.text(
+        0.0,
+        1.135,
+        str(subtitle or "Group-specific correlations with bootstrap confidence intervals."),
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=16,
+        color="#374151",
+        clip_on=False,
+    )
+    hetero_parts = [
+        f"{row.association} p={_format_side_stats_pvalue(row.p)}"
+        for row in heterogeneity.itertuples(index=False)
+    ]
+    ax.text(
+        0.0,
+        1.075,
+        "Correlation heterogeneity tests: " + "; ".join(hetero_parts),
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=16,
+        fontweight="bold",
+        color="#111827",
+        clip_on=False,
+    )
+    if show_stats_summary:
+        lines = _association_correlation_summary_lines(
+            correlations,
+            contrasts,
+            heterogeneity,
+            bootstrap=bootstrap,
+            max_items=stats_summary_max_items,
+        )
+        _annotate_stats_detail_text(ax, lines, x=1.07, y=0.82)
+    mark_manual_layout(fig)
+    return fig
+
+
+def _association_coefficients_figure(
+    coefficients,
+    interactions,
+    joint_test,
+    group_order,
+    *,
+    factor_name=None,
+    value="beta",
+    palette=None,
+    show_values=True,
+    show_stats_summary=True,
+    stats_summary_max_items=10,
+    bootstrap=None,
+    title=None,
+    subtitle=None,
+):
+    from PyFLASH.layout import mark_manual_layout
+
+    associations = list(coefficients["association"].drop_duplicates())
+    color_of = _resolve_category_palette(associations, palette)
+    positions = {str(group): index for index, group in enumerate(group_order)}
+    offsets = (
+        np.linspace(-0.12, 0.12, len(associations))
+        if len(associations) > 1
+        else np.asarray([0.0])
+    )
+    legend_width = 6.2 + 0.10 * sum(len(str(item)) for item in associations)
+    fig_width = min(
+        16.0,
+        max(9.2, 1.6 * len(group_order) + 4.4, legend_width),
+    )
+    fig, ax = plt.subplots(figsize=(fig_width, 7.2))
+
+    for association_index, association in enumerate(associations):
+        subset = (
+            coefficients.loc[coefficients["association"].eq(association)]
+            .set_index("group")
+            .loc[[str(group) for group in group_order]]
+        )
+        estimates = subset["estimate"].to_numpy(dtype=float)
+        low = subset["ci_low"].to_numpy(dtype=float)
+        high = subset["ci_high"].to_numpy(dtype=float)
+        x = np.asarray(
+            [positions[str(group)] for group in group_order], dtype=float
+        ) + offsets[association_index]
+        ax.errorbar(
+            x,
+            estimates,
+            yerr=np.vstack([estimates - low, high - estimates]),
+            fmt=_ASSOCIATION_COEFFICIENT_MARKERS[
+                association_index % len(_ASSOCIATION_COEFFICIENT_MARKERS)
+            ],
+            color=color_of[association],
+            ecolor=color_of[association],
+            markersize=9,
+            markeredgecolor="white",
+            markeredgewidth=0.9,
+            elinewidth=2.0,
+            capsize=4,
+            capthick=1.8,
+            linestyle="none",
+            label=str(association),
+            zorder=3,
+        )
+        if show_values:
+            for x_value, estimate in zip(x, estimates):
+                tier = abs(association_index - (len(associations) - 1) / 2.0)
+                if offsets[association_index] < 0:
+                    side = -1
+                elif offsets[association_index] > 0:
+                    side = 1
+                else:
+                    side = -1 if association_index % 2 == 0 else 1
+                x_offset = side * (22 + 5 * tier)
+                y_offset = 9 if estimate >= 0 else -9
+                ax.annotate(
+                    f"{estimate:+.2f}",
+                    (x_value, estimate),
+                    xytext=(x_offset, y_offset),
+                    textcoords="offset points",
+                    ha="left" if side > 0 else "right",
+                    va="bottom" if estimate >= 0 else "top",
+                    fontsize=16,
+                    fontweight="bold",
+                    color=color_of[association],
+                    annotation_clip=False,
+                    zorder=5,
+                )
+
+    finite = coefficients[["estimate", "ci_low", "ci_high"]].to_numpy(dtype=float).ravel()
+    finite = finite[np.isfinite(finite)]
+    data_min = min(float(np.min(finite)) if finite.size else -1.0, 0.0)
+    data_max = max(float(np.max(finite)) if finite.size else 1.0, 0.0)
+    span = max(0.5, data_max - data_min)
+    padding = 0.12 * span
+    ax.set_ylim(data_min - padding, data_max + padding)
+    ax.axhline(0, color="#9ca3af", linestyle="--", linewidth=1.5, zorder=1)
+    ax.set_xticks(range(len(group_order)))
+    ax.set_xticklabels([str(group) for group in group_order])
+    ax.set_xlim(-0.55, len(group_order) - 0.45)
+    ax.set_xlabel(
+        get_display_name(factor_name, minimal=True) if factor_name else "Group"
+    )
+    ax.set_ylabel(
+        (
+            "Coefficient (standardized beta)"
+            if value == "beta"
+            else "Coefficient (raw slope)"
+        )
+    )
+    ax.grid(axis="y", color="#d1d5db", linewidth=0.8, alpha=0.65)
+    ax.set_axisbelow(True)
+    ax.legend(
+        loc="upper left",
+        bbox_to_anchor=(1.07, 1.02),
+        ncol=1,
+    )
+
+    default_title = (
+        f"Association coefficients across {get_display_name(factor_name, minimal=True)}"
+        if factor_name
+        else "Association coefficients across groups"
+    )
+    ax.set_title(str(title) if title is not None else default_title, loc="left", pad=92)
+    ax.text(
+        0.0,
+        1.135,
+        str(subtitle or "Group-specific model slopes with confidence intervals."),
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=16,
+        color="#374151",
+        clip_on=False,
+    )
+    ax.text(
+        0.0,
+        1.075,
+        (
+            f"Joint group-moderation test: chi-square({int(joint_test['df'])})="
+            f"{joint_test['statistic']:.2f}, p={joint_test['p']:.3f}"
+        ),
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=16,
+        fontweight="bold",
+        color="#111827",
+        clip_on=False,
+    )
+    if show_stats_summary:
+        lines = _association_coefficient_summary_lines(
+            coefficients,
+            interactions,
+            joint_test,
+            value=value,
+            factor_name=factor_name,
+            bootstrap=bootstrap,
+            max_items=stats_summary_max_items,
+        )
+        _annotate_stats_detail_text(ax, lines, x=1.07, y=0.82)
+    mark_manual_layout(fig)
+    return fig
+
+
+def _emit_association_coefficients_report(
+    schemas, coefficients, interactions, joint_test, *, factor_name, value
+):
+    try:
+        import PyFLASH.report as report
+
+        if not report.is_active():
+            return
+        method = "standardized_beta" if value == "beta" else "raw_slope"
+        for row in coefficients.itertuples(index=False):
+            report.emit(
+                report.build_correlation_record(
+                    x=row.x,
+                    y=row.y,
+                    group=row.group,
+                    n=row.n,
+                    r=row.estimate,
+                    p=None,
+                    method=method,
+                )
+            )
+        component_models = []
+        for schema in schemas:
+            spec = schema["spec"]
+            covariates = _association_covariate_list(spec["covariates"])
+            formula = _association_model_formula(
+                spec["y"],
+                spec["x"],
+                factor_name,
+                covariates,
+            )
+            component_models.append(
+                {
+                    "association": spec["label"],
+                    "formula": formula,
+                    "x": spec["x"],
+                    "y": spec["y"],
+                    "group": factor_name or "group",
+                    "covariates": covariates,
+                }
+            )
+            nodes = coefficients.loc[
+                coefficients["association"].eq(spec["label"])
+            ]
+            model_interactions = interactions.loc[
+                interactions["association"].eq(spec["label"])
+            ]
+            model_coefficients = {
+                f"slope[{row.group}]": {
+                    "estimate": row.estimate,
+                    "ci_low": row.ci_low,
+                    "ci_high": row.ci_high,
+                    "n": row.n,
+                }
+                for row in nodes.itertuples(index=False)
+            }
+            model_coefficients.update(
+                {
+                    f"interaction[{row.group}]": {
+                        "estimate": row.estimate,
+                        "se": row.standard_error,
+                        "p": row.p,
+                    }
+                    for row in model_interactions.itertuples(index=False)
+                }
+            )
+            report.emit(
+                report.build_linear_model_record(
+                    dependent_variable=spec["y"],
+                    formula=formula,
+                    group=factor_name or "group",
+                    predictors=[spec["x"], *covariates],
+                    covariates=covariates,
+                    n=int(nodes["n"].sum()),
+                    coefficients=model_coefficients,
+                )
+            )
+        report.emit(
+            report.build_linear_model_record(
+                dependent_variable="joint association moderation",
+                formula="all predictor-by-group interaction terms = 0",
+                group=factor_name or "group",
+                predictors=[schema["spec"]["x"] for schema in schemas],
+                n=int(coefficients.groupby("association")["n"].sum().max()),
+                p=joint_test["p"],
+                component_models=component_models,
+                coefficients={
+                    "joint_wald": {
+                        "statistic": joint_test["statistic"],
+                        "df": joint_test["df"],
+                    }
+                },
+            )
+        )
+    except Exception:
+        pass
+
+
+def _emit_association_correlations_report(
+    correlations,
+    contrasts,
+    heterogeneity,
+    *,
+    factor_name=None,
+):
+    try:
+        import PyFLASH.report as report
+
+        if not report.is_active():
+            return
+        for row in correlations.itertuples(index=False):
+            covariates = _association_covariate_list(row.covariates)
+            covariate_adjustment = getattr(row, "covariate_adjustment", "rank_then_residual")
+            rec = report.build_correlation_record(
+                x=row.x,
+                y=row.y,
+                group=row.group,
+                n=row.n,
+                r=row.estimate,
+                p=row.p,
+                method=row.method,
+            )
+            rec.update(
+                {
+                    "association": str(row.association),
+                    "factor": str(factor_name) if factor_name else None,
+                    "covariates": covariates,
+                    "formula": _association_correlation_formula(
+                        str(row.x),
+                        str(row.y),
+                        covariates,
+                        str(row.test),
+                        covariate_adjustment,
+                    ),
+                    "ci_low": float(row.ci_low),
+                    "ci_high": float(row.ci_high),
+                    "covariate_df": int(row.covariate_df),
+                    "dof": int(row.dof),
+                    "covariate_adjustment": str(covariate_adjustment),
+                }
+            )
+            report.emit(rec)
+        if heterogeneity is not None and not heterogeneity.empty:
+            component_models = _association_correlation_component_models(correlations)
+            report.emit(
+                {
+                    "kind": "correlation_heterogeneity",
+                    "factor": str(factor_name) if factor_name else None,
+                    "method": "Inverse-variance Fisher-z Q test",
+                    "component_models": component_models,
+                    "tests": [
+                        {
+                            "association": str(row.association),
+                            "statistic": float(row.statistic),
+                            "df": int(row.df),
+                            "p": float(row.p),
+                            "total_n": int(row.total_n),
+                        }
+                        for row in heterogeneity.itertuples(index=False)
+                    ],
+                    "contrasts": [
+                        {
+                            "association": str(row.association),
+                            "comparison": str(row.comparison),
+                            "reference": str(row.reference),
+                            "group": str(row.group),
+                            "delta": float(row.delta),
+                            "ci_low": float(row.ci_low),
+                            "ci_high": float(row.ci_high),
+                            "p": float(row.p),
+                        }
+                        for row in contrasts.itertuples(index=False)
+                    ]
+                    if contrasts is not None and not contrasts.empty
+                    else [],
+                    "headline": "correlation heterogeneity by "
+                    + (str(factor_name) if factor_name else "group"),
+                }
+            )
+    except Exception:
+        pass
+
+
+def plot_association_correlations(
+    experiment,
+    associations,
+    by="conditions",
+    factor=None,
+    group_order=None,
+    reference=None,
+    test="spearmanr",
+    covariate_adjustment="rank_then_residual",
+    ci_method="bootstrap",
+    ci_alpha=0.05,
+    bootstrap_resamples=5000,
+    random_state=0,
+    min_n=4,
+    palette=None,
+    column_labels=None,
+    show_values=True,
+    show_stats_summary=True,
+    stats_summary_max_items=10,
+    title=None,
+    subtitle=None,
+    specificity=None,
+    split_by=None,
+    filter_by=None,
+    roi=None,
+    save=True,
+    return_data=False,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
+    dataframe_kwargs=None,
+):
+    """Plot grouped Pearson/Spearman r values for multiple association specs.
+
+    ``associations`` is an ordered ``{name: specification}`` mapping or a list of
+    mappings. Each specification requires ``x`` and ``y`` and may provide its own
+    ``covariates`` list. Covariates are residualised within each group, giving a
+    partial correlation for that association only; associations with no
+    covariates are raw correlations. For covariate-adjusted Spearman,
+    ``covariate_adjustment="rank_then_residual"`` ranks variables before
+    residualising, while ``"residual_then_correlation"`` matches older
+    presentation matrices by residualising raw values before Spearman
+    correlation.
+    """
+    from PyFLASH.association_correlations import analyze, normalize_specs
+
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="conditions",
+    )
+    experiment = coerce_dataframe_input(
+        experiment,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
+    roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(roi_bases) > 1:
+        return {
+            roi_base: plot_association_correlations(
+                experiment,
+                associations=associations,
+                by=by,
+                factor=factor,
+                group_order=group_order,
+                reference=reference,
+                test=test,
+                covariate_adjustment=covariate_adjustment,
+                ci_method=ci_method,
+                ci_alpha=ci_alpha,
+                bootstrap_resamples=bootstrap_resamples,
+                random_state=random_state,
+                min_n=min_n,
+                palette=palette,
+                column_labels=column_labels,
+                show_values=show_values,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
+                title=title,
+                subtitle=subtitle,
+                specificity=specificity,
+                roi=roi_base,
+                save=save,
+                return_data=return_data,
+            )
+            for roi_base in roi_bases
+        }
+    if is_specificity_queue(specificity):
+        return {
+            spec: plot_association_correlations(
+                experiment,
+                associations=associations,
+                by=by,
+                factor=factor,
+                group_order=group_order,
+                reference=reference,
+                test=test,
+                covariate_adjustment=covariate_adjustment,
+                ci_method=ci_method,
+                ci_alpha=ci_alpha,
+                bootstrap_resamples=bootstrap_resamples,
+                random_state=random_state,
+                min_n=min_n,
+                palette=palette,
+                column_labels=column_labels,
+                show_values=show_values,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
+                title=title,
+                subtitle=subtitle,
+                specificity=spec,
+                roi=roi,
+                save=save,
+                return_data=return_data,
+            )
+            for spec in iter_specificities(specificity)
+        }
+
+    raw_specs = normalize_specs(associations)
+    requested_columns = list(
+        dict.fromkeys(
+            column
+            for spec in raw_specs
+            for column in [spec["x"], spec["y"], *spec["covariates"]]
+        )
+    )
+    roi_base, scope_df, _num_df, _numeric_cols, resolved_groups = _gc_plot_prepare(
+        experiment,
+        requested_columns,
+        None,
+        None,
+        "",
+        by,
+        factor,
+        specificity,
+        roi,
+    )
+    if len(resolved_groups) < 2:
+        raise ValueError("plot_association_correlations: at least two groups are required.")
+    resolved_specs = _resolve_association_correlation_specs(scope_df, associations)
+    display_columns = list(
+        dict.fromkeys(
+            column
+            for spec in resolved_specs
+            for column in [spec["x"], spec["y"], *spec["covariates"]]
+        )
+    )
+    with column_label_overrides(normalize_column_labels(display_columns, column_labels)):
+        display_specs = _association_coefficient_display_specs(resolved_specs)
+        available_groups = [str(group[0]) for group in resolved_groups]
+        if group_order is None:
+            ordered_groups = available_groups
+        else:
+            wanted = [str(group) for group in group_order]
+            missing = [group for group in wanted if group not in available_groups]
+            if missing:
+                raise ValueError(
+                    f"plot_association_correlations: group_order levels not found: {missing}."
+                )
+            ordered_groups = wanted
+        reference_label = _match_group_label(
+            ordered_groups,
+            reference if reference is not None else ordered_groups[0],
+        )
+
+        internal_group = "__pyflash_association_correlation_group__"
+        while internal_group in scope_df.columns:
+            internal_group = "_" + internal_group
+        analysis_scope = scope_df.copy()
+        analysis_scope[internal_group] = _association_coefficient_group_series(
+            scope_df, resolved_groups
+        )
+        analysis_scope = analysis_scope.dropna(subset=[internal_group])
+        analysis_scope[internal_group] = analysis_scope[internal_group].astype(str)
+        analysis_scope = analysis_scope.loc[
+            analysis_scope[internal_group].isin(ordered_groups)
+        ].copy()
+        analysis = analyze(
+            analysis_scope,
+            group_col=internal_group,
+            specs=display_specs,
+            group_order=ordered_groups,
+            reference=reference_label,
+            test=test,
+            covariate_adjustment=covariate_adjustment,
+            ci_method=ci_method,
+            ci_alpha=ci_alpha,
+            bootstrap_resamples=bootstrap_resamples,
+            random_state=random_state,
+            min_n=min_n,
+        )
+        fig = _association_correlations_figure(
+            analysis["correlations"],
+            analysis["contrasts"],
+            analysis["heterogeneity"],
+            ordered_groups,
+            factor_name=factor,
+            test=str(test).lower(),
+            palette=palette,
+            show_values=show_values,
+            show_stats_summary=show_stats_summary,
+            stats_summary_max_items=stats_summary_max_items,
+            bootstrap=analysis["bootstrap"],
+            title=title,
+            subtitle=subtitle,
+        )
+        _emit_association_correlations_report(
+            analysis["correlations"],
+            analysis["contrasts"],
+            analysis["heterogeneity"],
+            factor_name=factor,
+        )
+
+    multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+    subfolder, suffix = build_subfolder(
+        plot_type="Association Correlations",
+        factor=factor,
+        specificity=specificity,
+        aliases=getattr(experiment, "aliases", None),
+        roi_base=roi_base,
+        multi_roi=multi_roi,
+    )
+    if save:
+        save_fig(
+            fig,
+            experiment.fig_path,
+            "Association Correlations" + suffix,
+            subfolder=subfolder,
+            verbose=False,
+        )
+    result = {
+        "figure": fig,
+        "correlations": analysis["correlations"],
+        "contrasts": analysis["contrasts"],
+        "heterogeneity": analysis["heterogeneity"],
+        "bootstrap": analysis["bootstrap"],
+    }
+    return result if return_data else fig
+
+
+def plot_association_coefficients(
+    experiment,
+    associations,
+    by="conditions",
+    factor=None,
+    group_order=None,
+    reference=None,
+    value="beta",
+    ci_method="bootstrap",
+    ci_alpha=0.05,
+    bootstrap_resamples=5000,
+    random_state=0,
+    min_n=4,
+    palette=None,
+    column_labels=None,
+    show_values=True,
+    show_stats_summary=True,
+    stats_summary_max_items=10,
+    title=None,
+    subtitle=None,
+    specificity=None,
+    split_by=None,
+    filter_by=None,
+    roi=None,
+    save=True,
+    return_data=False,
+    condition_col="Condition",
+    factor_cols=None,
+    animal_col="AnimalName",
+    group_list=None,
+    groups=None,
+    group_col=None,
+    group_cols=None,
+    subject_col=None,
+    dataframe_kwargs=None,
+):
+    """Plot several adjusted association coefficients across the same groups.
+
+    ``associations`` is an ordered ``{name: specification}`` mapping or a list of
+    mappings. Each specification requires ``x`` and ``y`` and may provide its own
+    ``covariates`` list. A combined ``y ~ x * group + covariates`` model supplies
+    each association's group slopes. All non-reference interaction terms are
+    tested together with a group-stratified bootstrap Wald test.
+
+    This plot inherently combines all group levels, so ``combine`` is not
+    applicable. Use ``return_data=True`` to receive the plot-ready coefficient
+    and interaction tables, joint test, and bootstrap metadata with the figure.
+    Set ``show_values=False`` to hide the plotted coefficient labels.
+    """
+    from PyFLASH.association_coefficients import analyze, normalize_specs
+
+    by, factor, specificity = resolve_split_filter_aliases(
+        by=by,
+        factor=factor,
+        specificity=specificity,
+        split_by=split_by,
+        filter_by=filter_by,
+        default_by="conditions",
+    )
+    experiment = coerce_dataframe_input(
+        experiment,
+        condition_col=condition_col,
+        factor_cols=factor_cols,
+        animal_col=animal_col,
+        group_list=group_list,
+        groups=groups,
+        group_col=group_col,
+        group_cols=group_cols,
+        subject_col=subject_col,
+        dataframe_kwargs=dataframe_kwargs,
+    )
+    roi_bases = _resolve_roi_bases(roi, experiment)
+    if len(roi_bases) > 1:
+        return {
+            roi_base: plot_association_coefficients(
+                experiment,
+                associations=associations,
+                by=by,
+                factor=factor,
+                group_order=group_order,
+                reference=reference,
+                value=value,
+                ci_method=ci_method,
+                ci_alpha=ci_alpha,
+                bootstrap_resamples=bootstrap_resamples,
+                random_state=random_state,
+                min_n=min_n,
+                palette=palette,
+                column_labels=column_labels,
+                show_values=show_values,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
+                title=title,
+                subtitle=subtitle,
+                specificity=specificity,
+                roi=roi_base,
+                save=save,
+                return_data=return_data,
+            )
+            for roi_base in roi_bases
+        }
+    if is_specificity_queue(specificity):
+        return {
+            spec: plot_association_coefficients(
+                experiment,
+                associations=associations,
+                by=by,
+                factor=factor,
+                group_order=group_order,
+                reference=reference,
+                value=value,
+                ci_method=ci_method,
+                ci_alpha=ci_alpha,
+                bootstrap_resamples=bootstrap_resamples,
+                random_state=random_state,
+                min_n=min_n,
+                palette=palette,
+                column_labels=column_labels,
+                show_values=show_values,
+                show_stats_summary=show_stats_summary,
+                stats_summary_max_items=stats_summary_max_items,
+                title=title,
+                subtitle=subtitle,
+                specificity=spec,
+                roi=roi,
+                save=save,
+                return_data=return_data,
+            )
+            for spec in iter_specificities(specificity)
+        }
+
+    raw_specs = normalize_specs(associations)
+    requested_columns = list(
+        dict.fromkeys(
+            column
+            for spec in raw_specs
+            for column in [spec["x"], spec["y"], *spec["covariates"]]
+        )
+    )
+    roi_base, scope_df, _num_df, _numeric_cols, resolved_groups = _gc_plot_prepare(
+        experiment,
+        requested_columns,
+        None,
+        None,
+        "",
+        by,
+        factor,
+        specificity,
+        roi,
+    )
+    if len(resolved_groups) < 2:
+        raise ValueError("plot_association_coefficients: at least two groups are required.")
+    resolved_specs = _resolve_association_coefficient_specs(scope_df, associations)
+    display_columns = list(
+        dict.fromkeys(
+            column
+            for spec in resolved_specs
+            for column in [spec["x"], spec["y"], *spec["covariates"]]
+        )
+    )
+    with column_label_overrides(normalize_column_labels(display_columns, column_labels)):
+        display_specs = _association_coefficient_display_specs(resolved_specs)
+        available_groups = [str(group[0]) for group in resolved_groups]
+        if group_order is None:
+            ordered_groups = available_groups
+        else:
+            wanted = [str(group) for group in group_order]
+            missing = [group for group in wanted if group not in available_groups]
+            if missing:
+                raise ValueError(
+                    f"plot_association_coefficients: group_order levels not found: {missing}."
+                )
+            ordered_groups = wanted
+        reference_label = _match_group_label(
+            ordered_groups,
+            reference if reference is not None else ordered_groups[0],
+        )
+
+        internal_group = "__pyflash_association_group__"
+        while internal_group in scope_df.columns:
+            internal_group = "_" + internal_group
+        analysis_scope = scope_df.copy()
+        analysis_scope[internal_group] = _association_coefficient_group_series(
+            scope_df, resolved_groups
+        )
+        analysis_scope = analysis_scope.dropna(subset=[internal_group])
+        analysis_scope[internal_group] = analysis_scope[internal_group].astype(str)
+        analysis_scope = analysis_scope.loc[
+            analysis_scope[internal_group].isin(ordered_groups)
+        ].copy()
+        analysis = analyze(
+            analysis_scope,
+            group_col=internal_group,
+            specs=display_specs,
+            group_order=ordered_groups,
+            reference=reference_label,
+            value=value,
+            ci_method=ci_method,
+            ci_alpha=ci_alpha,
+            bootstrap_resamples=bootstrap_resamples,
+            random_state=random_state,
+            min_n=min_n,
+        )
+        fig = _association_coefficients_figure(
+            analysis["coefficients"],
+            analysis["interactions"],
+            analysis["joint_test"],
+            ordered_groups,
+            factor_name=factor,
+            value=str(value).lower(),
+            palette=palette,
+            show_values=show_values,
+            show_stats_summary=show_stats_summary,
+            stats_summary_max_items=stats_summary_max_items,
+            bootstrap=analysis["bootstrap"],
+            title=title,
+            subtitle=subtitle,
+        )
+        _emit_association_coefficients_report(
+            analysis["schemas"],
+            analysis["coefficients"],
+            analysis["interactions"],
+            analysis["joint_test"],
+            factor_name=factor,
+            value=str(value).lower(),
+        )
+
+    multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
+    subfolder, suffix = build_subfolder(
+        plot_type="Association Coefficients",
+        factor=factor,
+        specificity=specificity,
+        aliases=getattr(experiment, "aliases", None),
+        roi_base=roi_base,
+        multi_roi=multi_roi,
+    )
+    if save:
+        save_fig(
+            fig,
+            experiment.fig_path,
+            "Association Coefficients" + suffix,
+            subfolder=subfolder,
+            verbose=False,
+        )
+    result = {
+        "figure": fig,
+        "coefficients": analysis["coefficients"],
+        "interactions": analysis["interactions"],
+        "joint_test": {
+            key: item
+            for key, item in analysis["joint_test"].items()
+            if key != "covariance"
+        },
+        "bootstrap": analysis["bootstrap"],
+    }
+    return result if return_data else fig
+
+
 _RHYTHM_NIGHT = "#0b1e3b"
 
 
@@ -21433,6 +31157,71 @@ def _emit_rhythm_record(kind, headline, payload):
             report.emit(rec)
     except Exception:
         pass
+
+
+def _annotate_cosinor_stats_summary(ax, fits, *, period, period_free=False,
+                                    max_items=None):
+    """Draw cosinor fit details in the removable side panel."""
+    detail = []
+    for group, fit in (fits or {}).items():
+        if not fit:
+            detail.append(f"{group}: fit failed")
+            continue
+        detail.append(
+            f"{group}: n={fit.get('n', 'n/a')}, "
+            f"amp={_format_side_stats_value(fit.get('amplitude'), 3)}, "
+            f"peak={_format_side_stats_value(fit.get('acrophase'), 3)}, "
+            f"R2={_format_side_stats_value(fit.get('r_squared'), 3)}, "
+            f"p={_format_side_stats_pvalue(fit.get('p'))}"
+        )
+    if not detail:
+        return None
+    lines = [
+        "Test: cosinor rhythmicity",
+        f"Period: {period:g}{' (free)' if period_free else ''}",
+        *_limit_stats_detail_lines(detail, max_items=max_items),
+    ]
+    return _annotate_stats_detail_text(ax, lines)
+
+
+def _annotate_acrophase_stats_summary(ax, stats, *, max_items=None):
+    """Draw circular phase-test details in the removable side panel."""
+    if not isinstance(stats, Mapping):
+        return None
+    lines = ["Test: circular phase"]
+    ww = stats.get("watson_williams")
+    rayleigh = stats.get("rayleigh")
+    if isinstance(ww, Mapping):
+        lines.extend([
+            "Between groups: Watson-Williams",
+            (
+                f"F={_format_side_stats_value(ww.get('F'), 3)}, "
+                f"p={_format_side_stats_pvalue(ww.get('p'))}, "
+                f"n={ww.get('n', 'n/a')}"
+            ),
+        ])
+    elif isinstance(rayleigh, Mapping):
+        lines.extend([
+            "Single group: Rayleigh",
+            (
+                f"z={_format_side_stats_value(rayleigh.get('z'), 3)}, "
+                f"p={_format_side_stats_pvalue(rayleigh.get('p'))}, "
+                f"n={rayleigh.get('n', 'n/a')}"
+            ),
+        ])
+    detail = []
+    for group, payload in (stats.get("groups") or {}).items():
+        if not isinstance(payload, Mapping):
+            continue
+        detail.append(
+            f"{group}: n={payload.get('n', 'n/a')}, "
+            f"mean={_format_side_stats_value(payload.get('mean'), 3)}, "
+            f"r={_format_side_stats_value(payload.get('r'), 3)}, "
+            f"Rayleigh p={_format_side_stats_pvalue(payload.get('rayleigh_p'))}"
+        )
+    if detail:
+        lines.extend(["Groups:", *_limit_stats_detail_lines(detail, max_items=max_items)])
+    return _annotate_stats_detail_text(ax, lines, x=1.18)
 
 
 def _cosinor_axes(ax, df, value, time_col, group_col, period, period_free,
@@ -21491,9 +31280,11 @@ def _cosinor_axes(ax, df, value, time_col, group_col, period, period_free,
     return fits
 
 
+@column_label_scope
 def plot_cosinor(experiment, column, time_col="Time", group_col=None, period=24.0,
                  period_free=False, specificity=None, filter_by=None,
-                 time_map=None, palette=None, show_points=True,
+                 time_map=None, palette=None, show_points=True, column_labels=None,
+                 show_stats_summary=True, stats_summary_max_items=8,
                  night_shade="auto", title=None, save=True, save_path=None,
                  save_name=None, subfolder=None, montage=False, dpi=600,
                  return_data=False):
@@ -21517,6 +31308,8 @@ def plot_cosinor(experiment, column, time_col="Time", group_col=None, period=24.
             experiment, column, time_col=time_col, group_col=group_col, period=period,
             period_free=period_free, specificity=spec, time_map=time_map, palette=palette,
             show_points=show_points, night_shade=night_shade, title=title, save=save,
+            show_stats_summary=show_stats_summary,
+            stats_summary_max_items=stats_summary_max_items,
             save_path=save_path, save_name=save_name, subfolder=subfolder,
             montage=montage, dpi=dpi, return_data=return_data)
             for spec in iter_specificities(specificity)}
@@ -21532,6 +31325,15 @@ def plot_cosinor(experiment, column, time_col="Time", group_col=None, period=24.
     fits = _cosinor_axes(ax, df, column, time_col, group_col, float(period), period_free,
                          palette, show_points, time_map, night_shade)
     ax.set_title(title or f"Cosinor rhythm — {column}")
+
+    if show_stats_summary:
+        _annotate_cosinor_stats_summary(
+            ax,
+            fits,
+            period=float(period),
+            period_free=period_free,
+            max_items=stats_summary_max_items,
+        )
 
     _emit_rhythm_record("cosinor", f"Cosinor {column} (period={period})", {
         "column": str(column), "period": float(period), "time_col": str(time_col),
@@ -21624,9 +31426,12 @@ def _acrophase_clock_axes(ax, df, phase_col, group_col, period, radius_col, pale
     return stats
 
 
+@column_label_scope
 def plot_acrophase_clock(experiment, phase_col="Acrophase (h)", group_col=None,
                          period=24.0, radius_col=None, group_order=None,
                          specificity=None, filter_by=None, palette=None,
+                         column_labels=None,
+                         show_stats_summary=True, stats_summary_max_items=8,
                          title=None, save=True, save_path=None, save_name=None,
                          subfolder=None, montage=False, dpi=600, return_data=False):
     """Circular clock plot of per-subject peak phase, grouped and tested.
@@ -21652,6 +31457,8 @@ def plot_acrophase_clock(experiment, phase_col="Acrophase (h)", group_col=None,
             experiment, phase_col=phase_col, group_col=group_col, period=period,
             radius_col=radius_col, group_order=group_order, specificity=spec,
             palette=palette, title=title, save=save, save_path=save_path,
+            show_stats_summary=show_stats_summary,
+            stats_summary_max_items=stats_summary_max_items,
             save_name=save_name, subfolder=subfolder,
             montage=montage, dpi=dpi, return_data=return_data)
             for spec in iter_specificities(specificity)}
@@ -21671,6 +31478,12 @@ def plot_acrophase_clock(experiment, phase_col="Acrophase (h)", group_col=None,
         ttl += f"\nWatson–Williams p={ww['p']:.3f}"
     ax.set_title(ttl, pad=24, fontsize=13)
     ax.legend(loc="lower right", bbox_to_anchor=(1.18, -0.04), fontsize=9)
+    if show_stats_summary:
+        _annotate_acrophase_stats_summary(
+            ax,
+            stats,
+            max_items=stats_summary_max_items,
+        )
 
     _emit_rhythm_record("circular_phase", f"Acrophase clock: {phase_col}", {
         "phase_col": str(phase_col), "period": float(period),

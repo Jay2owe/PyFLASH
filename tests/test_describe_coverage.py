@@ -42,6 +42,36 @@ def test_describe_sets_are_disjoint():
     assert not (e & u), f"exempt & unreviewed overlap: {sorted(e & u)}"
 
 
+def test_every_public_plot_function_is_registered():
+    import PyFLASH.plotting as plotting
+
+    public_plotters = {
+        name for name, obj in vars(plotting).items()
+        if (
+            name.startswith("plot_")
+            and callable(obj)
+            and getattr(obj, "__module__", None) == plotting.__name__
+        )
+    }
+    registry_targets = {
+        str(target).rsplit(".", 1)[-1]
+        for target in spec.PLOT_REGISTRY.values()
+    }
+    missing = public_plotters - registry_targets
+    assert not missing, (
+        f"Public plot function(s) {sorted(missing)} are not reachable through "
+        "spec.PLOT_REGISTRY. Add each reusable plot with a stable short-name, "
+        "or rename private/internal helpers so they do not use the public plot_* "
+        "prefix."
+    )
+
+
+def test_every_registry_target_resolves():
+    for short_name, target in spec.PLOT_REGISTRY.items():
+        resolved = spec._resolve_func(target)
+        assert callable(resolved), f"{short_name} target {target!r} did not resolve"
+
+
 def test_describe_status_helper():
     assert spec.describe_status('mean_bars') == 'covered'
     assert spec.describe_status('images') == 'exempt'

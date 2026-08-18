@@ -564,7 +564,8 @@ _AUDIT_COLUMNS = {
 
 # The exact test-name strings PyFLASH.stats.multipleComparisons returns.
 _AUDIT_TESTS = {
-    "Independent T-Test", "Mann-Whitney U", "One-Way ANOVA", "Kruskal-Wallis",
+    "Independent T-Test", "Student's T-Test", "Welch's T-Test",
+    "Mann-Whitney U", "One-Way ANOVA", "Welch ANOVA", "Kruskal-Wallis",
 }
 
 
@@ -616,18 +617,27 @@ def test_significance_audit_frame_shape_and_annotation(tmp_path):
         row = rows.iloc[0]
         assert row["contrast"] == "KO vs WT"
         assert row["left_group"] == "KO" and row["right_group"] == "WT"
-        # Auto-selected 2-group parametric test, annotated with the exact string.
+        # Auto-selected 2-group test: normal data get the exact Student/Welch
+        # label selected by the variance screen; non-normal data get MWU.
         assert row["test"] in _AUDIT_TESTS
-        assert row["test"] == "Independent T-Test"
         assert np.isfinite(row["p"])
-        # Partner family (non-parametric) run so a concordance flag can be formed.
-        assert row["test_partner"] == "Mann-Whitney U"
+        # Partner family run so a concordance flag can be formed.
+        if row["test"] == "Mann-Whitney U":
+            assert row["test_partner"] == "Welch's t-test"
+        else:
+            assert row["test"] in {"Student's T-Test", "Welch's T-Test"}
+            assert row["test_partner"] == "Mann-Whitney U"
         assert np.isfinite(row["p_partner"])
         assert bool(row["concordant"]) in (True, False)
-        # Matched effect size + bootstrap CI.
-        assert row["effect_metric"] == "hedges_g"
+        # Matched effect size: Hedges g for parametric rows, rank-biserial for
+        # non-parametric rows.
+        if row["test"] == "Mann-Whitney U":
+            assert row["effect_metric"] == "rank_biserial"
+        else:
+            assert row["effect_metric"] == "hedges_g"
         assert np.isfinite(row["effect_value"])
-        assert np.isfinite(row["effect_ci_low"]) and np.isfinite(row["effect_ci_high"])
+        if row["effect_metric"] == "hedges_g":
+            assert np.isfinite(row["effect_ci_low"]) and np.isfinite(row["effect_ci_high"])
         assert float(row["alpha"]) == 0.05
         assert bool(row["significant"]) in (True, False)
 

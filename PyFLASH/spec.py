@@ -23,6 +23,9 @@ from PyFLASH.aliases import _same_value
 # Lazy string references to avoid circular imports
 PLOT_REGISTRY = {
     'mean_bars': 'plot_mean_bars',
+    'paired_ratio': 'plot_paired_ratio',
+    'baseline_characteristics': 'plot_baseline_characteristics',
+    'significance_audit_table': 'plot_significance_audit_table',
     'condition_key': 'plot_condition_key',
     'histograms': 'plot_histograms',
     'matrices': 'plot_matrices',
@@ -35,11 +38,15 @@ PLOT_REGISTRY = {
     'scatter_3d': 'plot_scatter_3d',
     'pie_charts': 'plot_pie_charts',
     'combo_pies': 'plot_combo_pies',
+    'category_counts': 'plot_category_counts',
     'locations': 'plot_locations',
     'images': 'plot_images',
     'representative_images': 'plot_representative_images',
     'rect_matrices': 'plot_rect_matrices',
     'multivariable_regression_matrix': 'plot_multivariable_regression_matrix',
+    'model_result_matrix': 'plot_model_result_matrix',
+    'linear_model_adjusted_means': 'plot_linear_model_adjusted_means',
+    'linear_model_coefficient_forest': 'plot_linear_model_coefficient_forest',
     'coloc_upset': 'plot_coloc_upset',
     'coloc_sankey': 'plot_coloc_sankey',
     'power_curve': 'plot_power_curve',
@@ -48,9 +55,13 @@ PLOT_REGISTRY = {
     'superplot': 'plot_superplot',
     'effect_forest': 'plot_effect_forest',
     'group_matrix': 'plot_group_matrix',
+    'correlation_contrast': 'plot_correlation_contrast',
+    'coefficient_contrast': 'plot_coefficient_contrast',
+    'association_correlations': 'plot_association_correlations',
+    'association_coefficients': 'plot_association_coefficients',
     'cosinor': 'plot_cosinor',
     'acrophase_clock': 'plot_acrophase_clock',
-    'correlation_pipeline': 'PyFLASH.pipeline.correlation',
+    'correlation_pipeline': 'plot_correlation_pipeline',
     'adjusted_correlation_pipeline': 'PyFLASH.pipeline.adjusted_correlation',
     'data_overview_pipeline': 'PyFLASH.pipeline.data_overview',
     'group_comparison_pipeline': 'PyFLASH.pipeline.group_comparison',
@@ -82,8 +93,17 @@ PLOT_REGISTRY = {
 # with intent. See CLAUDE.md and the pyflash-add-plot skill.
 DESCRIBE_COVERED = {
     'mean_bars',
+    'paired_ratio',
+    'significance_audit_table',
     'regressions',
+    'correlation_contrast',
+    'coefficient_contrast',
+    'association_correlations',
+    'association_coefficients',
     'multivariable_regression_matrix',
+    'model_result_matrix',
+    'linear_model_adjusted_means',
+    'linear_model_coefficient_forest',
     'correlation_pipeline',
     'adjusted_correlation_pipeline',
     'group_comparison_pipeline',
@@ -104,9 +124,13 @@ DESCRIBE_EXEMPT = {
     'coloc_upset', 'coloc_sankey', 'pie_charts', 'combo_pies',
     'histograms', 'ridgeline', 'ecdf', 'radar', 'power_curve',
     'scatter_3d',
+    # Descriptive participant-level baseline table; no inferential statistic.
+    'baseline_characteristics',
     # Descriptive group-comparison views (raw points / effect sizes, no test).
     # The inferential capture lives in the group_comparison pipeline (COVERED).
     'superplot', 'effect_forest', 'group_matrix',
+    # Descriptive categorical frequency counts / proportions; no inferential test.
+    'category_counts',
 }
 DESCRIBE_UNREVIEWED = {
     'matrices', 'rect_matrices', 'matrix_differences',

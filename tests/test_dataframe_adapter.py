@@ -10,6 +10,7 @@ import pytest
 import PyFLASH.plotting as plotting
 from PyFLASH import ConditionBuilder, from_dataframe, group, groupList, run_spec
 from PyFLASH.aliases import normalize_filter_by
+from PyFLASH.aesthetics import pyflash_style_context
 from PyFLASH.exclusions import exclude_subjects
 from PyFLASH.pipeline import correlation
 from PyFLASH.plotting import (
@@ -90,6 +91,51 @@ def test_from_dataframe_supports_summary_plot_and_pipeline(tmp_path):
         montage=False,
     )
     assert {group["group"] for group in result["groups"]} == {"Control", "AD"}
+
+
+def test_mean_bars_preserve_group_scaled_width_under_fixed_global_canvas(
+    tmp_path, monkeypatch,
+):
+    df = pd.DataFrame({
+        "Subject": [f"{group}{i}" for group in ("Control", "MCI", "AD") for i in range(3)],
+        "Diagnosis": [group for group in ("Control", "MCI", "AD") for _ in range(3)],
+        "Crossings": [7.0, 7.5, 8.0, 8.0, 8.5, 9.0, 9.0, 9.5, 10.0],
+    })
+    conditions = (
+        ConditionBuilder("Diagnosis")
+        .add("Control", color="black")
+        .add("MCI", color="blue")
+        .add("AD", color="orange")
+        .build()
+    )
+    exp = from_dataframe(
+        df,
+        conditions=conditions,
+        condition_col="Diagnosis",
+        animal_col="Subject",
+        fig_path=tmp_path / "figures",
+        data_path=tmp_path / "data",
+    )
+
+    real_save_fig = plotting.save_fig
+    saved_sizes = []
+
+    def capture_size_after_save(fig, *args, **kwargs):
+        output = real_save_fig(fig, *args, **kwargs)
+        saved_sizes.append(tuple(fig.get_size_inches()))
+        return output
+
+    monkeypatch.setattr(plotting, "save_fig", capture_size_after_save)
+    with pyflash_style_context(figure_size=(7.0, 5.0), save_bbox="fixed"):
+        plotting.plot_mean_bars(
+            exp,
+            data_cols=["Crossings"],
+            points=False,
+            save=True,
+            save_normality=False,
+        )
+
+    assert saved_sizes == [pytest.approx((2.0, 5.0))]
 
 
 def test_from_dataframe_derives_crossed_condition_from_factor_columns(tmp_path):

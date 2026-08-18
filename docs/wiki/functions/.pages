@@ -19,9 +19,12 @@ nav:
       - run_linear_model_pipeline.md
   - Plotting:
       - plot_mean_bars.md
+      - plot_baseline_characteristics.md
+      - plot_significance_audit_table.md
       - plot_superplot.md
       - plot_effect_forest.md
       - plot_group_matrix.md
+      - plot_category_counts.md
       - plot_radar.md
       - plot_condition_key.md
       - plot_histograms.md
@@ -32,8 +35,12 @@ nav:
       - plot_matrices.md
       - plot_rect_matrices.md
       - plot_matrix_differences.md
+      - plot_correlation_pipeline.md
       - plot_regressions.md
+      - plot_correlation_contrast.md
+      - plot_coefficient_contrast.md
       - plot_multivariable_regression_matrix.md
+      - plot_model_result_matrix.md
       - plot_scatter_3d.md
       - plot_marker_pca.md
       - plot_volcano.md

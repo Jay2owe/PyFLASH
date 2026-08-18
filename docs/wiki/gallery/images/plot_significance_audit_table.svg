@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="590.4pt" height="281.52pt" viewBox="0 0 590.4 281.52" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:date>2026-07-17T22:50:55.842679</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.0, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 281.52 
+L 590.4 281.52 
+L 590.4 0 
+L 0 0 
+L 0 281.52 
+z
+" style="fill: none"/>
+  </g>
+  <g id="axes_1">
+   <g id="line2d_1">
+    <path d="M 33.12 59.2884 
+L 563.04 59.2884 
+" clip-path="url(#p8929410367)" style="fill: none; stroke: #000000; stroke-width: 2.6"/>
+   </g>
+   <g id="line2d_2">
+    <path d="M 33.12 86.0004 
+L 563.04 86.0004 
+" clip-path="url(#p8929410367)" style="fill: none; stroke: #000000; stroke-width: 1.4"/>
+   </g>
+   <g id="line2d_3">
+    <path d="M 33.12 208.8756 
+L 563.04 208.8756 
+" clip-path="url(#p8929410367)" style="fill: none; stroke: #000000; stroke-width: 1.4"/>
+   </g>
+   <g id="text_1">
+    <text style="font-weight: 700; font-size: 18px; font-family: 'Arial'; text-anchor: start; fill: #20242a" x="33.12" y="32.323837" transform="rotate(-0 33.12 32.323837)">Significance audit</text>
+   </g>
+   <g id="text_2">
+    <text style="font-weight: 700; font-size: 12.5px; font-family: 'Arial'; text-anchor: start; fill: #20242a" x="33.12" y="75.884634" transform="rotate(-0 33.12 75.884634)">Metric</text>
+   </g>
+   <g id="text_3">
+    <text style="font-weight: 700; font-size: 12.5px; font-family: 'Arial'; text-anchor: middle; fill: #20242a" x="303.84" y="75.960806" transform="rotate(-0 303.84 75.960806)">Group</text>
+   </g>
+   <g id="text_4">
+    <text style="font-weight: 700; font-size: 12.5px; font-family: 'Arial'; text-anchor: middle; fill: #20242a" x="407.52" y="75.884634" transform="rotate(-0 407.52 75.884634)">Cohort</text>
+   </g>
+   <g id="text_5">
+    <text style="font-weight: 700; font-size: 12.5px; font-family: 'Arial'; text-anchor: middle; fill: #20242a" x="511.2" y="75.884634" transform="rotate(-0 511.2 75.884634)">Interaction</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: start; fill: #20242a" x="33.12" y="106.465387" transform="rotate(-0 33.12 106.465387)">Marker1 Count</text>
+   </g>
+   <g id="text_7">
+    <text style="font-weight: 700; font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #20242a" x="303.84" y="106.473825" transform="rotate(-0 303.84 106.473825)">0.018</text>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #68707a" x="407.52" y="106.465387" transform="rotate(-0 407.52 106.465387)">0.310</text>
+   </g>
+   <g id="text_9">
+    <text style="font-weight: 700; font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #20242a" x="511.2" y="106.473825" transform="rotate(-0 511.2 106.473825)">0.049</text>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: start; fill: #20242a" x="33.12" y="133.177388" transform="rotate(-0 33.12 133.177388)">Marker2 Count</text>
+   </g>
+   <g id="text_11">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #68707a" x="303.84" y="133.177388" transform="rotate(-0 303.84 133.177388)">0.420</text>
+   </g>
+   <g id="text_12">
+    <text style="font-weight: 700; font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #20242a" x="407.52" y="133.185825" transform="rotate(-0 407.52 133.185825)">0.026</text>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #68707a" x="511.2" y="133.177388" transform="rotate(-0 511.2 133.177388)">0.660</text>
+   </g>
+   <g id="text_14">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: start; fill: #20242a" x="33.12" y="159.836887" transform="rotate(-0 33.12 159.836887)">Marker3 Intensity</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #68707a" x="303.84" y="159.889387" transform="rotate(-0 303.84 159.889387)">0.073</text>
+   </g>
+   <g id="text_16">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #68707a" x="407.52" y="159.889387" transform="rotate(-0 407.52 159.889387)">0.580</text>
+   </g>
+   <g id="text_17">
+    <text style="font-weight: 700; font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #20242a" x="511.2" y="159.897825" transform="rotate(-0 511.2 159.897825)">0.009</text>
+   </g>
+   <g id="text_18">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: start; fill: #20242a" x="33.12" y="186.6042" transform="rotate(-0 33.12 186.6042)">Signal</text>
+   </g>
+   <g id="text_19">
+    <text style="font-weight: 700; font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #20242a" x="303.84" y="186.609825" transform="rotate(-0 303.84 186.609825)">0.004</text>
+   </g>
+   <g id="text_20">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #68707a" x="407.52" y="186.601387" transform="rotate(-0 407.52 186.601387)">0.140</text>
+   </g>
+   <g id="text_21">
+    <text style="font-size: 12px; font-family: 'Arial'; text-anchor: middle; fill: #68707a" x="511.2" y="186.601387" transform="rotate(-0 511.2 186.601387)">0.210</text>
+   </g>
+   <g id="text_22">
+    <text style="font-size: 10.5px; font-family: 'Arial'; text-anchor: start; fill: #68707a" x="33.12" y="240.463275" transform="rotate(-0 33.12 240.463275)">Bold values are raw p &lt; 0.05.</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p8929410367">
+   <rect x="7.2" y="7.2" width="576" height="267.12"/>
+  </clipPath>
+ </defs>
+</svg>

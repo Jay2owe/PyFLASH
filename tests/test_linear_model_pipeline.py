@@ -11,7 +11,11 @@ from PyFLASH.modelling import run_linear_model_pipeline
 from PyFLASH.pipeline import linear_model
 from PyFLASH import pipeline_montage as pm
 from PyFLASH import report
-from PyFLASH.plotting import _linear_model_adjusted_means_figure
+from PyFLASH.plotting import (
+    _linear_model_adjusted_means_figure,
+    plot_linear_model_adjusted_means,
+    plot_linear_model_coefficient_forest,
+)
 from PyFLASH.spec import PLOT_REGISTRY, _resolve_func, describe_status
 
 
@@ -91,6 +95,10 @@ def test_linear_model_pipeline_registered_and_covered():
     assert "linear_model_pipeline" in PLOT_REGISTRY
     assert _resolve_func(PLOT_REGISTRY["linear_model_pipeline"]) is linear_model
     assert describe_status("linear_model_pipeline") == "covered"
+    assert _resolve_func(PLOT_REGISTRY["linear_model_adjusted_means"]) is plot_linear_model_adjusted_means
+    assert describe_status("linear_model_adjusted_means") == "covered"
+    assert _resolve_func(PLOT_REGISTRY["linear_model_coefficient_forest"]) is plot_linear_model_coefficient_forest
+    assert describe_status("linear_model_coefficient_forest") == "covered"
 
 
 def test_linear_model_pipeline_saves_adjusted_means_and_plots(tmp_path):
@@ -151,6 +159,10 @@ def test_linear_model_pipeline_saves_adjusted_means_and_plots(tmp_path):
     assert "Test: Linear model" in svg_text
     assert "Post-hoc: Adjusted mean contrasts" in svg_text
     assert "Control vs MCI" in svg_text
+    assert "Left slot: raw subject values with mean +/- SEM" in svg_text
+    assert "right slot: adjusted mean with 95% CI" in svg_text
+    assert "Bracket labels: adjusted p" in svg_text
+    assert "Correction: Holm across" in svg_text
 
     fig = _linear_model_adjusted_means_figure(
         result["adjusted_means_table"],
@@ -160,7 +172,15 @@ def test_linear_model_pipeline_saves_adjusted_means_and_plots(tmp_path):
         comparisons=result["adjusted_mean_comparisons"],
     )
     try:
-        assert not fig.axes[0].patches
+        # Adjusted means render as points, not bars, so there must be no visible
+        # bar/background patch. The comparison-line renderer adds one invisible,
+        # gid-tagged sizing anchor (reserves a fixed tight-SVG height across
+        # ns/star glyphs); that is not a data mark, so exclude it.
+        visible_patches = [
+            p for p in fig.axes[0].patches
+            if p.get_gid() != "pyflash-comparison-height-anchor"
+        ]
+        assert not visible_patches
     finally:
         import matplotlib.pyplot as plt
         plt.close(fig)
@@ -322,11 +342,295 @@ def test_linear_model_adjusted_means_plot_prefers_adjusted_p_values():
     try:
         text = "\n".join(t.get_text() for ax in fig.axes for t in ax.texts)
         assert "Post-hoc: Adjusted mean contrasts (holm)" in text
-        assert "Control vs AD: p=0.5" in text
+        assert "Bracket labels: adjusted p" in text
+        assert "Correction: Holm across 1 contrast" in text
+        assert "Control vs AD: adj p=0.5 (raw p=0.001)" in text
         assert "Control vs AD: p=0.001" not in text
     finally:
         import matplotlib.pyplot as plt
         plt.close(fig)
+
+
+def test_public_linear_model_plots_accept_result_dict_and_csv(tmp_path):
+    batch = _model_batch(tmp_path)
+    result = linear_model(
+        batch,
+        dependent_variables=["Total counts", "Amplitude"],
+        group="Diagnosis",
+        predictors=["Sex", "Age"],
+        categorical=["Sex"],
+        reference_levels={"Diagnosis": "Control"},
+        save=False,
+        verbose=False,
+    )
+
+    adjusted = plot_linear_model_adjusted_means(
+        result,
+        dependent_variable="Totalcounts",
+        save=True,
+        save_path=tmp_path,
+        save_name="Adjusted Public",
+        return_data=True,
+    )
+    assert Path(adjusted["paths"]["Totalcounts"]).exists()
+
+    coeff = plot_linear_model_coefficient_forest(
+        result,
+        dependent_variables=["Totalcounts"],
+        save=True,
+        save_path=tmp_path,
+        save_name="Coefficient Public",
+        return_data=True,
+    )
+    assert Path(coeff["path"]).exists()
+
+    fig = plot_linear_model_adjusted_means(
+        result,
+        dependent_variable="Totalcounts",
+        show_stats_summary=True,
+        save=False,
+    )
+    try:
+        text = "\n".join(t.get_text() for ax in fig.axes for t in ax.texts)
+        assert "Adjusted for: Sex, Age" in text
+    finally:
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+    means_csv = tmp_path / "adjusted_means.csv"
+    comparisons_csv = tmp_path / "adjusted_comparisons.csv"
+    result["adjusted_means_table"].to_csv(means_csv, index=False)
+    result["adjusted_mean_comparisons"].to_csv(comparisons_csv, index=False)
+    csv_path = plot_linear_model_adjusted_means(
+        path=means_csv,
+        comparisons_path=comparisons_csv,
+        dependent_variable="Amplitude",
+        group="Diagnosis",
+        group_order=["Control", "MCI", "AD"],
+        save=True,
+        save_path=tmp_path,
+        save_name="Adjusted From CSV",
+    )
+    assert Path(csv_path).exists()
+
+
+def test_linear_model_coefficient_forest_groups_terms_by_dependent_variable():
+    coefficients = pd.DataFrame([
+        {
+            "dependent_variable": "First",
+            "term": "C(Diagnosis, Treatment(reference='Control'))[T.MCI]",
+            "estimate": 1.0,
+            "ci_low": 0.2,
+            "ci_high": 1.8,
+            "p_value": 0.2,
+        },
+        {
+            "dependent_variable": "Second",
+            "term": "C(Diagnosis, Treatment(reference='Control'))[T.MCI]",
+            "estimate": -2.0,
+            "ci_low": -3.0,
+            "ci_high": -1.0,
+            "p_value": 0.01,
+        },
+        {
+            "dependent_variable": "First",
+            "term": "Age",
+            "estimate": 0.5,
+            "ci_low": -0.1,
+            "ci_high": 1.1,
+            "p_value": 0.4,
+        },
+        {
+            "dependent_variable": "Second",
+            "term": "C(Sex)[T.Male]",
+            "estimate": 0.1,
+            "ci_low": -0.3,
+            "ci_high": 0.5,
+            "p_value": 0.8,
+        },
+    ])
+
+    fig = plot_linear_model_coefficient_forest(
+        coefficients=coefficients,
+        title="Linear model coefficients",
+        save=False,
+    )
+    try:
+        ax = fig.axes[0]
+        top_to_bottom = [t.get_text() for t in ax.get_yticklabels()][::-1]
+        assert top_to_bottom == [
+            "First: Diagnosis: MCI",
+            "First: Age",
+            "Second: Diagnosis: MCI",
+            "Second: Sex: Male",
+        ]
+        assert all("C(" not in label for label in top_to_bottom)
+        assert all("Treatment(" not in label for label in top_to_bottom)
+        assert ax.title.get_fontweight() == "normal"
+        assert ax.xaxis.label.get_fontweight() == "normal"
+        assert ax.title.get_position()[1] >= 1.0
+    finally:
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+
+def test_linear_model_adjusted_means_plot_overlays_raw_model_rows(tmp_path):
+    batch = _model_batch(tmp_path)
+    result = linear_model(
+        batch,
+        dependent_variables=["Total counts"],
+        group="Diagnosis",
+        predictors=["Sex", "Age"],
+        categorical=["Sex"],
+        reference_levels={"Diagnosis": "Control"},
+        save=False,
+        verbose=False,
+    )
+
+    fig = plot_linear_model_adjusted_means(
+        result,
+        dependent_variable="Totalcounts",
+        show_stats_summary=True,
+        save=False,
+    )
+    try:
+        ax = fig.axes[0]
+        raw_collections = [
+            collection for collection in ax.collections
+            if collection.get_gid() == "pyflash-linear-model-raw-points"
+        ]
+        raw_n = sum(len(collection.get_offsets()) for collection in raw_collections)
+        assert raw_n == len(result["model_data"]["Totalcounts"])
+        assert len(raw_collections) == 3
+        adjusted_collections = [
+            collection for collection in ax.collections
+            if collection.get_gid() == "pyflash-linear-model-adjusted-mean"
+        ]
+        assert len(adjusted_collections) == 3
+        raw_mean_markers = [
+            collection for collection in ax.collections
+            if collection.get_gid() == "pyflash-linear-model-raw-mean-sem"
+        ]
+        assert len(raw_mean_markers) == 3
+        raw_centers = [
+            float(collection.get_offsets()[:, 0].mean())
+            for collection in raw_collections
+        ]
+        raw_edge_colors = [
+            tuple(np.round(collection.get_edgecolors()[0], 4))
+            for collection in raw_collections
+        ]
+        assert len(set(raw_edge_colors)) == 3
+        adjusted_centers = [
+            float(collection.get_offsets()[:, 0].mean())
+            for collection in adjusted_collections
+        ]
+        assert all(adj > raw for raw, adj in zip(raw_centers, adjusted_centers))
+        adjusted_ci_lines = [
+            line for line in ax.lines
+            if line.get_gid() == "pyflash-linear-model-adjusted-ci"
+        ]
+        assert len(adjusted_ci_lines) == 3
+        adjusted_ci_caps = [
+            line for line in ax.lines
+            if line.get_gid() == "pyflash-linear-model-adjusted-ci-cap"
+        ]
+        assert len(adjusted_ci_caps) == 6
+        raw_sem_lines = [
+            line for line in ax.lines
+            if line.get_gid() == "pyflash-linear-model-raw-sem"
+        ]
+        raw_sem_caps = [
+            line for line in ax.lines
+            if line.get_gid() == "pyflash-linear-model-raw-sem-cap"
+        ]
+        assert len(raw_sem_lines) == 3
+        assert len(raw_sem_caps) == 6
+        raw_sem_centers = [
+            float(line.get_xdata()[0])
+            for line in raw_sem_lines
+        ]
+        assert np.diff(adjusted_centers) == pytest.approx([0.78, 0.78])
+        assert [
+            adjusted - raw
+            for raw, adjusted in zip(raw_sem_centers, adjusted_centers)
+        ] == pytest.approx([0.32, 0.32, 0.32])
+        separators = [
+            line for line in ax.lines
+            if line.get_gid() == "pyflash-linear-model-condition-separator"
+        ]
+        assert len(separators) == 2
+        separator_centers = [float(line.get_xdata()[0]) for line in separators]
+        for idx, sep_x in enumerate(separator_centers):
+            assert adjusted_centers[idx] < sep_x < raw_sem_centers[idx + 1]
+            assert separators[idx].get_color() == "#C7C7C7"
+            assert separators[idx].get_linestyle() == "--"
+        x_left, x_right = ax.get_xlim()
+        panel_widths = [
+            separator_centers[0] - x_left,
+            separator_centers[1] - separator_centers[0],
+            x_right - separator_centers[1],
+        ]
+        assert panel_widths == pytest.approx([0.78, 0.78, 0.78])
+        assert [line.get_linewidth() for line in adjusted_ci_caps] == pytest.approx(
+            [adjusted_ci_lines[0].get_linewidth()] * len(adjusted_ci_caps)
+        )
+        assert [line.get_linewidth() for line in raw_sem_caps] == pytest.approx(
+            [raw_sem_lines[0].get_linewidth()] * len(raw_sem_caps)
+        )
+        cap_spans = [
+            abs(float(line.get_xdata()[1]) - float(line.get_xdata()[0]))
+            for line in [*adjusted_ci_caps, *raw_sem_caps]
+        ]
+        assert cap_spans == pytest.approx([0.13] * len(cap_spans))
+        ci_centers = [float(line.get_xdata()[0]) for line in adjusted_ci_lines]
+        assert adjusted_centers == pytest.approx(ci_centers)
+        text = "\n".join(t.get_text() for axis in fig.axes for t in axis.texts)
+        assert "Left slot: raw subject values with mean +/- SEM" in text
+        assert "right slot: adjusted mean with 95% CI" in text
+        assert "Bracket labels: adjusted p" in text
+        legend_labels = [t.get_text() for t in ax.get_legend().get_texts()]
+        assert "Raw subject values" in legend_labels
+        assert "Raw mean +/- SEM" in legend_labels
+        assert "Adjusted mean +/- 95% CI" in legend_labels
+    finally:
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+
+def test_public_linear_model_plots_emit_report_records(tmp_path):
+    batch = _model_batch(tmp_path)
+    result = linear_model(
+        batch,
+        dependent_variables=["Total counts"],
+        group="Diagnosis",
+        predictors=["Sex", "Age"],
+        categorical=["Sex"],
+        reference_levels={"Diagnosis": "Control"},
+        save=False,
+        verbose=False,
+    )
+
+    report.start()
+    try:
+        fig = plot_linear_model_adjusted_means(
+            result,
+            dependent_variable="Totalcounts",
+            save=False,
+        )
+        records = report.collect()
+    finally:
+        if report.is_active():
+            report.collect()
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["kind"] == "linear_model"
+    assert rec["dependent_variable"] == "Totalcounts"
+    assert rec["group"] == "Diagnosis"
+    assert set(rec["adjusted_means"]) == {"Control", "MCI", "AD"}
 
 
 def test_linear_model_pipeline_emits_report_records(tmp_path):

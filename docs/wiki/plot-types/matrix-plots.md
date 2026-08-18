@@ -50,6 +50,10 @@ differences resolve one filter context per call.
 matrix rendering. `share_columns_across_panels=True` keeps comparable axes
 across panels by dropping columns that are not valid in every panel.
 
+Use `cmap` for a Matplotlib colormap or `palette` for a seaborn-friendly
+palette name such as `"Greens"`. Matrix colorbars use the shared PyFLASH matrix
+renderer, including the slim matrix-height colorbar.
+
 ## Outputs
 
 The square and rectangular plot functions return dictionaries containing

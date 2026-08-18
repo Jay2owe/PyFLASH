@@ -6,6 +6,8 @@ import os
 import re
 import math
 import time
+import threading
+from contextlib import contextmanager
 from collections.abc import Mapping
 import numpy as np
 import pandas as pd
@@ -43,6 +45,111 @@ def _notify_fig_save_observers(figure, full_path, image_name, subfolder, key):
             cb(figure, full_path, image_name, subfolder, key)
         except Exception:
             pass  # an observer must never break a figure save
+
+
+# ── Column display-label overrides ────────────────────────────────────
+# A thread-local stack of ``{raw_column: display_label}`` mappings. The single
+# display-name resolver ``PyFLASH.plotting.get_display_name`` consults the active
+# mapping *before* its house rewrites, so a user-supplied ``column_labels`` renames
+# any column's legend / axis / annotation text everywhere a plot routes text
+# through ``get_display_name`` — with no per-call plumbing. The shared ``run()``
+# harness (``PyFLASH.iteration``) and individual plot wrappers push a mapping for
+# the duration of a render via ``column_label_overrides(...)``. Overrides affect
+# *displayed text only*: the underlying column identity (palette keys, describe
+# records, saved data) is unchanged.
+_LABEL_OVERRIDES = threading.local()
+
+
+def _label_override_stack():
+    stack = getattr(_LABEL_OVERRIDES, "stack", None)
+    if stack is None:
+        stack = []
+        _LABEL_OVERRIDES.stack = stack
+    return stack
+
+
+def active_column_label(*names):
+    """Return the user override for the first of ``names`` present in the active
+    mapping (innermost push wins), or ``None`` when no override is in effect.
+
+    Callers pass the candidate keys in priority order — typically the raw column
+    name and its ``.expN``-cleaned form — so either spelling of a key matches.
+    """
+    stack = _label_override_stack()
+    if not stack:
+        return None
+    for mapping in reversed(stack):
+        for name in names:
+            if name in mapping:
+                return mapping[name]
+    return None
+
+
+def normalize_column_labels(columns, column_labels):
+    """Return the *user overrides only* as ``{str(column): str(label)}``.
+
+    ``column_labels`` accepts either a ``{column: label}`` mapping (its items are
+    taken verbatim) or a positional list matching ``columns`` one-for-one (zipped
+    against them). ``None``/empty yields ``{}``. Columns with no override are left
+    out so the house ``get_display_name`` logic still handles them.
+    """
+    if not column_labels:
+        return {}
+    if isinstance(column_labels, Mapping):
+        return {str(k): str(v) for k, v in column_labels.items()}
+    labels = list(column_labels)
+    cols = list(columns) if columns is not None else []
+    if len(cols) != len(labels):
+        raise ValueError(
+            f"column_labels list length ({len(labels)}) must match the number of "
+            f"plotted columns ({len(cols)})."
+        )
+    return {str(c): str(lbl) for c, lbl in zip(cols, labels)}
+
+
+@contextmanager
+def column_label_overrides(mapping):
+    """Push a ``{raw_column: display_label}`` mapping for the duration of the block.
+
+    ``mapping`` is a plain dict (usually the output of
+    :func:`normalize_column_labels`); ``None``/empty is a no-op. Nested pushes
+    shadow outer ones and are always popped, even on error.
+    """
+    normalized = {str(k): str(v) for k, v in mapping.items()} if mapping else None
+    if not normalized:
+        yield
+        return
+    stack = _label_override_stack()
+    stack.append(normalized)
+    try:
+        yield
+    finally:
+        stack.pop()
+
+
+def resolve_column_labels(columns, column_labels, display=None):
+    """Return a full ``{column: display_label}`` for every column in ``columns``.
+
+    Unlike :func:`normalize_column_labels` (user entries only), this fills every
+    column: an explicit override when present, otherwise ``display(column)`` — by
+    default the house ``get_display_name(col, minimal=True)``. Use it when a plot
+    needs labels as *data* (matrix column headers, an x-tick list) rather than via
+    the ``get_display_name`` text path. Accepts the same dict-or-list forms.
+    """
+    cols = list(columns)
+    if display is None:
+        from PyFLASH.plotting import get_display_name
+        display = lambda c: get_display_name(c, minimal=True)
+    overrides = normalize_column_labels(cols, column_labels)
+    out = {}
+    for c in cols:
+        if c in overrides:
+            out[c] = overrides[c]
+        elif str(c) in overrides:
+            out[c] = overrides[str(c)]
+        else:
+            out[c] = display(c)
+    return out
 
 
 # ── Analysis-exclusion sentinels ──────────────────────────────────────
@@ -972,7 +1079,7 @@ def filter_dict(my_dict, key_substring):
 
 def rc_params(line_width=2, tick_major_width=2, tick_major_size=11,
               tick_label_size=20, font_weight='normal', font_family='Arial',
-              labelsize=22, labelweight='bold',
+              labelsize=22, labelweight='normal',
               title_size=20, title_weight='bold',
               despine=True, legend_frame=False, legend_fontsize=15,
               tick_direction='out', figure_size=(7.0, 5.0),
@@ -1067,7 +1174,8 @@ def rasterize_data_artists(figure, threshold=50):
 
 def save_fig(figure, save_path, image_name, extra_artist=None,
              pad_inches=None, subfolder=None, verbose=True,
-             skip_existing=None, rasterize=True, montage=False):
+             skip_existing=None, rasterize=True, montage=False,
+             save_bbox=None):
     """Save a figure as SVG with optional subfolder creation.
 
     Parameters
@@ -1081,6 +1189,11 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         figure for the pipeline montage layer. Has no effect on the saved file;
         it only flags the figure as one of a run's most important graphs so
         ``PyFLASH.pipeline_montage`` puts it on the overview montage.
+    save_bbox : {"fixed", "tight"}, optional
+        Per-figure override for the active PyFLASH export geometry. ``None``
+        keeps the global style. Use ``"tight"`` for figures whose authored
+        width carries meaning, such as compact mean bars with one slot per
+        group.
     """
     from matplotlib import pyplot as plt
     from PyFLASH.config import Config, apply_matplotlib_fast_path
@@ -1146,7 +1259,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         if getattr(Config, "USE_PYFLASH_LAYOUT", True):
             from PyFLASH.layout import apply_pyflash_layout
             apply_pyflash_layout(figure)
-        apply_pyflash_figure_geometry(figure)
+        apply_pyflash_figure_geometry(figure, save_bbox=save_bbox)
 
         # Guarantee editable text at the single figure choke point regardless of
         # what rcParams the caller left active: every string stays a real <text>
@@ -1155,12 +1268,13 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             figure.savefig(
                 save_full_path,
                 **pyflash_savefig_kwargs(
+                    bbox_inches=save_bbox,
                     pad_inches=pad_inches,
                     bbox_extra_artists=extra_artist,
                     transparent=True,
                 ),
             )
-            normalize_pyflash_svg_canvas(save_full_path)
+            normalize_pyflash_svg_canvas(save_full_path, save_bbox=save_bbox)
 
     if verbose:
         _log.confirm(f"Figure saved to {full_path}")

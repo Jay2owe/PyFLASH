@@ -190,6 +190,7 @@ def test_build_linear_model_record():
         formula="Totalcounts ~ Diagnosis + Age + Sex",
         group="Diagnosis",
         predictors=["Diagnosis", "Age", "Sex"],
+        covariates=["Age", "Sex"],
         n=42,
         r2=0.62,
         adj_r2=0.58,
@@ -197,10 +198,19 @@ def test_build_linear_model_record():
         p=0.004,
         coefficients={"Age": {"estimate": 1.2, "p": 0.01}},
         adjusted_means={"AD": {"adjusted_mean": 180.0, "ci_low": 170.0, "ci_high": 190.0}},
+        component_models=[
+            {
+                "association": "activity",
+                "formula": "Totalcounts ~ Diagnosis + Age + Sex",
+                "covariates": ["Age", "Sex"],
+            }
+        ],
     )
     assert rec["kind"] == "linear_model"
     assert rec["dependent_variable"] == "Totalcounts"
     assert rec["group"] == "Diagnosis"
+    assert rec["covariates"] == ["Age", "Sex"]
+    assert rec["component_models"][0]["covariates"] == ["Age", "Sex"]
     assert rec["adjusted_means"]["AD"]["adjusted_mean"] == pytest.approx(180.0)
     assert "Totalcounts by Diagnosis" in rec["headline"]
 

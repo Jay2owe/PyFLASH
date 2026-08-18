@@ -34,7 +34,10 @@ from typing import Any, Optional, Callable, Literal
 import numpy as np
 import pandas as pd
 
-from PyFLASH.utils import filter_df_by_specificity, flatten_specificity_values
+from PyFLASH.utils import (
+    filter_df_by_specificity, flatten_specificity_values,
+    column_label_overrides, normalize_column_labels,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -318,6 +321,7 @@ def run(experiment, over, action,
         columns=None, factor=None, specificity=None,
         roi_base=None,
         setup=None, teardown=None,
+        column_labels=None,
         **action_kwargs) -> dict:
     """
     Iterate over one or more levels and apply an action at the innermost level.
@@ -344,6 +348,11 @@ def run(experiment, over, action,
         Called at the start of each outermost iteration.
     teardown : callable(ctx, state, results) -> None
         Called at the end of each outermost iteration.
+    column_labels : dict | list | None
+        Optional per-column display-label override ({column: label} mapping, or a
+        positional list matching ``columns``). Active for the whole run so every
+        ``get_display_name`` call in the action honours it. Affects displayed text
+        only, not column identity.
     **action_kwargs
         Passed through to the action function.
 
@@ -399,7 +408,8 @@ def run(experiment, over, action,
                 teardown(child_ctx, state, all_results)
 
     try:
-        _recurse(root, over)
+        with column_label_overrides(normalize_column_labels(columns, column_labels)):
+            _recurse(root, over)
     finally:
         # Always restore summary, even if plotting/stats raises.
         if _orig_summaries is not None:

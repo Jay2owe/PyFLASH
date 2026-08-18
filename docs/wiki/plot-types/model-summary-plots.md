@@ -5,9 +5,10 @@
 Use these plots when you want a compact numeric-analysis summary rather than a
 standard group bar chart or relationship matrix.
 
-This family covers power curves, PCA biplots, volcano plots, and timecourse
-growth curves. They help summarize design strength, multicolumn structure,
-group-vs-control marker changes, or longitudinal trends.
+This family covers power curves, PCA biplots, volcano plots, timecourse growth
+curves, and precomputed model-result matrices. They help summarize design
+strength, multicolumn structure, group-vs-control marker changes, longitudinal
+trends, or already-fitted model screens.
 
 ## Input Data
 
@@ -15,6 +16,12 @@ group-vs-control marker changes, or longitudinal trends.
 summary table from a `Batch` or experiment-like object. They also accept raw
 `pandas.DataFrame` input through the DataFrame adapter when grouping and subject
 columns are provided.
+
+`plot_model_result_matrix` reads a long-form precomputed result table from a
+`Batch`, `Experiment`, `MiniExperiment`, `DataFrameExperiment`, raw
+`pandas.DataFrame`, table-like object, or CSV path. PyFLASH objects can provide
+the table through `.summary`, a named `.summaries` entry, `.data`, or a named
+attribute.
 
 `plot_power_curve` does not need a data table. Its optional `batch` argument is
 used only to resolve a default save folder.
@@ -26,6 +33,7 @@ used only to resolve a default save folder.
 | [`plot_volcano`](../functions/plot_volcano.md) | `volcano` | Group-vs-control effect and p-value screen across many columns. |
 | [`plot_marker_pca`](../functions/plot_marker_pca.md) | `marker_pca` | PCA biplot of subject-level marker profiles. |
 | [`plot_timecourse`](../functions/plot_timecourse.md) | `timecourse` | Growth-curve fit by group across an ordered time variable. |
+| [`plot_model_result_matrix`](../functions/plot_model_result_matrix.md) | `model_result_matrix` | Heatmap of precomputed model values across outcomes, groups, and profiles. |
 | [`plot_power_curve`](../functions/plot_power_curve.md) | `power_curve` | Statistical power as sample size changes. |
 
 ## Common Options
@@ -46,6 +54,12 @@ large-magnitude measurements from dominating the components.
 For timecourse plots, `time_map` maps labels such as `"WeekEight"` to numeric
 times, and `model` is `"auto"`, `"linear"`, `"exponential"`, or `"logistic"`.
 
+For model-result matrices, map the long-form table columns with `row_col`,
+`group_col`, `profile_col`, and `value_col`. Optional `p_col` and `q_col` add
+raw/FDR significance markers to the editable in-cell text. R2-like values use a
+green sequential palette by default and scale from `0` to the observed maximum
+rounded up to the nearest `0.1`; override colours with `cmap` or `palette`.
+
 ## Outputs
 
 Volcano returns a plotting-run result and saves one SVG per non-control group
@@ -53,11 +67,14 @@ when `save=True`.
 
 PCA, timecourse, and power plots return Matplotlib figures by default. With
 `return_data=True`, they also return reusable numeric data: PCA scores/loadings,
-timecourse fit dictionaries, or a power table.
+timecourse fit dictionaries, or a power table. `plot_model_result_matrix`
+returns the filtered source table, value matrix, p/q matrices, cell annotations,
+and one structured record per cell.
 
-`power_curve` is describe-layer `exempt`. `volcano`, `marker_pca`, and
-`timecourse` are currently describe-layer `unreviewed`: use their returned
-objects or saved figures until structured report records are added.
+`plot_model_result_matrix` is describe-layer `covered`. `power_curve` is
+describe-layer `exempt`. `volcano`, `marker_pca`, and `timecourse` are currently
+describe-layer `unreviewed`: use their returned objects or saved figures until
+structured report records are added.
 
 ## Examples
 
@@ -101,6 +118,21 @@ fig, power = plot_power_curve(
 )
 ```
 
+Precomputed model-result matrix:
+
+```python
+from PyFLASH.plotting import plot_model_result_matrix
+
+out = plot_model_result_matrix(
+    path="model_results.csv",
+    row_label_col="label",
+    group_col="Diagnosis",
+    profile_col="predictor",
+    value_col="r2",
+    palette="Greens",
+)
+```
+
 ## Interpretation
 
 Volcano plots are screening plots. They show percent change and unadjusted
@@ -118,6 +150,9 @@ marker or model.
 Timecourse fits depend on the chosen numeric time mapping and available points.
 Check returned fit dictionaries before quoting model parameters.
 
+Model-result matrices are renderers, not model fitters. Check the upstream
+pipeline or CSV provenance before interpreting the displayed values.
+
 ## See Also
 
 - [Statistics options](../parameters/statistics-options.md)
@@ -125,3 +160,4 @@ Check returned fit dictionaries before quoting model parameters.
 - [Power statistics](../statistics/power.md)
 - [Multiple testing](../statistics/multiple-testing.md)
 - [Linear models](../statistics/linear-models.md)
+- [Structured results](../statistics/structured-results.md)

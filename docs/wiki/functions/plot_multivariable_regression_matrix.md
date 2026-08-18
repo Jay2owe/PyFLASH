@@ -32,7 +32,7 @@ P.plot_multivariable_regression_matrix(
 ## Signature
 
 ```python
-plot_multivariable_regression_matrix(experiment, filtered_columns=None, data_cols=None, predictors=None, by='conditions', factor=None, specificity=None, split_by=None, filter_by=None, roi=None, save=True, column_strings=None, regex_string=None, exclude='', data_col_contains=None, data_col_regex=None, data_col_exclude=None, min_n=None, value='r2', correction='fdr', alpha=0.05, tick_label_size=20, conditions=None, condition_col='Condition', factor_cols=None, animal_col='AnimalName', group_list=None, groups=None, group_col=None, group_cols=None, subject_col=None, dataframe_kwargs=None, combine_conditions=True, column_order=None, predictor_order=None, share_columns_across_panels=True, blank_panel_on_nan=False)
+plot_multivariable_regression_matrix(experiment, filtered_columns=None, data_cols=None, predictors=None, by='conditions', factor=None, specificity=None, split_by=None, filter_by=None, roi=None, save=True, column_strings=None, regex_string=None, exclude='', data_col_contains=None, data_col_regex=None, data_col_exclude=None, min_n=None, value='r2', correction='fdr', alpha=0.05, tick_label_size=20, cmap=None, palette=None, conditions=None, condition_col='Condition', factor_cols=None, animal_col='AnimalName', group_list=None, groups=None, group_col=None, group_cols=None, subject_col=None, dataframe_kwargs=None, combine_conditions=True, column_order=None, predictor_order=None, share_columns_across_panels=True, blank_panel_on_nan=False)
 ```
 
 ## Input Object Types
@@ -59,6 +59,7 @@ plot_multivariable_regression_matrix(experiment, filtered_columns=None, data_col
 | `value` | string | `'r2'` | Heatmap value. |
 | `correction` | string | `'fdr'` | Star annotation basis: `'fdr'` for q-values or `'none'`/`'p'` for raw p-values. |
 | `alpha` | float | `0.05` | Threshold for star annotations. |
+| `cmap`, `palette` | colormap or string | inferred | Heatmap colours. R2-like values default to a green sequential map; `palette` accepts seaborn names. |
 | `column_order`, `predictor_order` | list-like or `None` | `None` | Reorder outcome rows or predictor-set columns. |
 | `share_columns_across_panels` | bool | `True` | Keep only outcome/predictor combinations valid in every panel. |
 | `blank_panel_on_nan` | bool | `False` | Keep invalid cells as NaN instead of dropping empty axes. |
@@ -74,6 +75,10 @@ plot_multivariable_regression_matrix(experiment, filtered_columns=None, data_col
 | `'adj_r2'` | Plot adjusted R-squared. |
 | `'p'` | Plot raw model p-values. |
 | `'q'` | Plot corrected q-values. |
+
+R2-like colorbars use the observed maximum rounded up to the nearest `0.1`
+instead of always spanning `0` to `1`, so weak and moderate effects do not
+collapse into the low end of the palette.
 
 ### `correction` options
 

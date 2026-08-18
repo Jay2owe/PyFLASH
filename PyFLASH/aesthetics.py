@@ -24,7 +24,7 @@ DEFAULT_PYFLASH_STYLE = {
     "font_weight": "normal",
     "font_family": "Arial",
     "labelsize": 22,
-    "labelweight": "bold",
+    "labelweight": "normal",
     "title_size": 20,
     "title_weight": "bold",
     "despine": True,

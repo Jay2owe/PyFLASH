@@ -36,7 +36,7 @@ P.plot_matrices(
 ## Signature
 
 ```python
-plot_matrices(experiment, filtered_columns=None, data_cols=None, by='conditions', factor=None, split_by=None, correlation='pearsonr', first_columns=None, tick_label_size=20, leading_data_cols=None, marker=None, specificity=None, filter_by=None, roi=None, save=True, column_strings=None, regex_string=None, exclude='', data_col_contains=None, data_col_regex=None, data_col_exclude=None, prefix_order=None, marker_order=None, share_columns_across_panels=True, triangle=None, show_diagonal=True, show_values=False, value_format='.2f', conditions=None, condition_col='Condition', factor_cols=None, animal_col='AnimalName', group_list=None, groups=None, group_col=None, group_cols=None, subject_col=None, dataframe_kwargs=None)
+plot_matrices(experiment, filtered_columns=None, data_cols=None, by='conditions', factor=None, split_by=None, correlation='pearsonr', first_columns=None, tick_label_size=20, leading_data_cols=None, marker=None, specificity=None, filter_by=None, roi=None, save=True, column_strings=None, regex_string=None, exclude='', data_col_contains=None, data_col_regex=None, data_col_exclude=None, prefix_order=None, marker_order=None, share_columns_across_panels=True, triangle=None, show_diagonal=True, show_values=False, value_format='.2f', cmap=None, palette=None, conditions=None, condition_col='Condition', factor_cols=None, animal_col='AnimalName', group_list=None, groups=None, group_col=None, group_cols=None, subject_col=None, dataframe_kwargs=None)
 ```
 
 ## Input Object Types
@@ -67,6 +67,7 @@ plot_matrices(experiment, filtered_columns=None, data_cols=None, by='conditions'
 | `show_diagonal` | bool | `True` | Show self-correlation cells. |
 | `show_values` | bool | `False` | Write formatted numeric coefficients inside visible cells. |
 | `value_format` | string or callable | `'.2f'` | Format for `show_values`. |
+| `cmap`, `palette` | colormap or string | inferred | Heatmap colours. `palette` accepts seaborn names and maps to the shared matrix colormap helper. |
 | `save` | bool | `True` | Write SVG figures to disk. |
 | `group_col`, `group_cols`, `subject_col` | strings/list or `None` | `None` | Raw DataFrame adapter group, crossed-group, and subject columns. |
 

@@ -489,6 +489,7 @@ def build_linear_model_record(
     formula=None,
     group=None,
     predictors=None,
+    covariates=None,
     n=None,
     r2=None,
     adj_r2=None,
@@ -496,6 +497,7 @@ def build_linear_model_record(
     p=None,
     coefficients=None,
     adjusted_means=None,
+    component_models=None,
 ):
     """Build a Tier-1 record for one adjusted linear model."""
     coeffs = {}
@@ -505,12 +507,19 @@ def build_linear_model_record(
     if isinstance(adjusted_means, dict):
         means = {str(k): coerce(v) for k, v in adjusted_means.items()}
     pred_list = list(predictors or [])
+    if covariates is None:
+        covar_list = []
+    elif isinstance(covariates, str):
+        covar_list = [covariates]
+    else:
+        covar_list = list(covariates)
     record = {
         "kind": "linear_model",
         "dependent_variable": _s(dependent_variable),
         "formula": _s(formula),
         "group": _s(group),
         "predictors": [_s(v) for v in pred_list],
+        "covariates": [_s(v) for v in covar_list],
         "n": _i(n),
         "r2": _f(r2),
         "adj_r2": _f(adj_r2),
@@ -519,6 +528,8 @@ def build_linear_model_record(
         "coefficients": coeffs,
         "adjusted_means": means,
     }
+    if component_models is not None:
+        record["component_models"] = coerce(component_models)
     record["headline"] = _linear_model_headline(record)
     return coerce(record)
 

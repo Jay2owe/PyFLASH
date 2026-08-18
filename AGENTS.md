@@ -57,6 +57,13 @@ matplotlib.rcParams["mathtext.default"] = "regular"
 Do not convert SVG text to paths unless the user explicitly asks for outlined
 text.
 
+## Standalone Analysis Script Rule
+
+Before writing a custom or standalone analysis script, read and follow
+`.claude/skills/pyflash/reference/custom-analysis-scripts.md` (mirrored for
+Codex at `.codex/skills/pyflash/references/custom-analysis-scripts.md`). Ordinary
+registered PyFLASH runner calls do not require this reference.
+
 ## Before Broad Search: Query The Knowledge Graph
 
 A local graphify knowledge graph of the Python package and tests lives at

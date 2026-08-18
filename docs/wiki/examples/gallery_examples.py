@@ -26,6 +26,79 @@ GALLERY_EXAMPLES: tuple[GalleryExample, ...] = (
         """),
     ),
     GalleryExample(
+        "plot_baseline_characteristics",
+        _code("""
+        import numpy as np
+        from PyFLASH import from_dataframe
+
+        summary = ex.summary.copy()
+        summary["AgeYears"] = 70 + 3 * summary["x1"]
+        summary["Sex"] = np.where(np.arange(len(summary)) % 2, "Female", "Male")
+        summary["SleepTreatment"] = np.where(summary["Condition"].eq("C"), "Yes", "No")
+        baseline_exp = from_dataframe(
+            summary,
+            group_col="Condition",
+            subject_col="AnimalName",
+            fig_path=TMP,
+        )
+        P.plot_baseline_characteristics(
+            baseline_exp,
+            columns={
+                "age": "AgeYears",
+                "sex": "Sex",
+                "sleep_treatment": "SleepTreatment",
+            },
+            factor="Condition",
+            save=True,
+        )
+        """),
+    ),
+    GalleryExample(
+        "plot_significance_audit_table",
+        _code("""
+        import pandas as pd
+
+        audit = pd.DataFrame({
+            "metric": [
+                "Marker1 Count",
+                "Marker2 Count",
+                "Marker3 Intensity",
+                "Signal",
+            ],
+            "p_group": [0.018, 0.42, 0.073, 0.004],
+            "p_cohort": [0.31, 0.026, 0.58, 0.14],
+            "p_interaction": [0.049, 0.66, 0.009, 0.21],
+        })
+        P.plot_significance_audit_table(
+            exp,
+            audit_table=audit,
+            row_label_col="metric",
+            pvalue_cols=["p_group", "p_cohort", "p_interaction"],
+            column_labels={
+                "p_group": "Group",
+                "p_cohort": "Cohort",
+                "p_interaction": "Interaction",
+            },
+            aesthetic="table",
+            title="Significance audit",
+            save=True,
+        )
+        """),
+    ),
+    GalleryExample(
+        "plot_category_counts",
+        _code("""
+        P.plot_category_counts(
+            exp,
+            category="Cohort",
+            factor="Condition",
+            kind="stacked",
+            normalize=True,
+            save=True,
+        )
+        """),
+    ),
+    GalleryExample(
         "plot_matrices",
         _code("""
         P.plot_matrices(
@@ -87,6 +160,72 @@ GALLERY_EXAMPLES: tuple[GalleryExample, ...] = (
             filtered_columns=["Signal"],
             predictors={"Predictors": ["x1", "x2"]},
             by="all",
+            save=True,
+        )
+        """),
+    ),
+    GalleryExample(
+        "plot_model_result_matrix",
+        _code("""
+        import pandas as pd
+
+        model_results = pd.DataFrame({
+            "outcome": [
+                "Marker1_Count",
+                "Marker1_Count",
+                "Marker2_Count",
+                "Marker2_Count",
+                "Signal",
+                "Signal",
+                "Marker3_Count",
+                "Marker3_Count",
+            ],
+            "label": [
+                "Marker 1 count",
+                "Marker 1 count",
+                "Marker 2 count",
+                "Marker 2 count",
+                "Signal",
+                "Signal",
+                "Marker 3 count",
+                "Marker 3 count",
+            ],
+            "Diagnosis": [
+                "Control",
+                "Control",
+                "Control",
+                "Control",
+                "MCI",
+                "MCI",
+                "MCI",
+                "MCI",
+            ],
+            "predictor": [
+                "Month",
+                "Season",
+                "Month",
+                "Season",
+                "Month",
+                "Season",
+                "Month",
+                "Season",
+            ],
+            "r2": [0.80, 0.58, 0.35, 0.12, 0.66, 0.44, 0.27, 0.09],
+            "p": [0.012, 0.041, 0.18, 0.55, 0.026, 0.061, 0.21, 0.72],
+            "q": [0.036, 0.082, 0.24, 0.68, 0.052, 0.11, 0.30, 0.81],
+        })
+        exp.model_results = model_results
+        P.plot_model_result_matrix(
+            exp,
+            model_table="model_results",
+            row_col="outcome",
+            row_label_col="label",
+            group_col="Diagnosis",
+            profile_col="predictor",
+            group_order=["Control", "MCI"],
+            profile_order=["Month", "Season"],
+            title="Model result matrix",
+            palette="Greens",
             save=True,
         )
         """),
@@ -168,6 +307,20 @@ GALLERY_EXAMPLES: tuple[GalleryExample, ...] = (
             exp,
             filtered_columns=["Marker1_Count", "Marker2_Count", "Marker3_Count"],
             control="A",
+            save=True,
+        )
+        """),
+    ),
+    GalleryExample(
+        "plot_correlation_contrast",
+        _code("""
+        P.plot_correlation_contrast(
+            exp,
+            x="x1",
+            y=["Signal", "Marker1_Count", "Marker2_Count"],
+            factor="Condition",
+            reference="A",
+            significance="omnibus",
             save=True,
         )
         """),

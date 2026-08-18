@@ -67,9 +67,29 @@ def test_regression_marginals_default_off_keeps_single_axis(tmp_path, monkeypatc
     assert len(figures) == 2
     assert [len(fig.axes) for fig in figures] == [1, 1]
     for fig in figures:
-        stats_text = fig.axes[0].texts[-1]
-        assert stats_text.get_position() == (1.02, 1.0)
-        assert stats_text.get_horizontalalignment() == "left"
+        ax = fig.axes[0]
+        assert ax.get_box_aspect() == 1
+        texts = [t.get_text() for t in ax.texts]
+        # All regression stats live on-graph now: one colour-matched line per
+        # group (r + significance + p) plus a muted test caption. Nothing is
+        # stranded in an outside right-margin block, so every text is anchored
+        # to a left/right axes corner (x in {0.02, 0.98}).
+        assert any("r =" in t and "p =" in t for t in texts)
+        assert any(t.startswith("Test:") for t in texts)
+        assert all(t.get_position()[0] in (0.02, 0.98) for t in ax.texts)
+
+
+def test_regression_square_axes_can_be_disabled(tmp_path, monkeypatch):
+    experiment = _experiment(tmp_path)
+    figures = _capture_saved_figures(monkeypatch)
+
+    plotting.plot_regressions(
+        experiment, x="X", y="Y", combine=True, square=False,
+        normalize_x=False, normalize_y=False,
+    )
+
+    assert len(figures) == 1
+    assert figures[0].axes[0].get_box_aspect() is None
 
 
 def test_regression_marginals_add_shared_axes_per_group(tmp_path, monkeypatch):
@@ -89,9 +109,10 @@ def test_regression_marginals_add_shared_axes_per_group(tmp_path, monkeypatch):
         assert main_ax.get_shared_y_axes().joined(main_ax, right_ax)
         assert top_ax.patches
         assert right_ax.patches
-        stats_text = main_ax.texts[-1]
-        assert stats_text.get_position() == (0.98, 0.98)
-        assert stats_text.get_horizontalalignment() == "right"
+        texts = [t.get_text() for t in main_ax.texts]
+        assert any("r =" in t and "p =" in t for t in texts)
+        assert any(t.startswith("Test:") for t in texts)
+        assert all(t.get_position()[0] in (0.02, 0.98) for t in main_ax.texts)
 
 
 def test_combined_regression_marginals_use_group_colours(tmp_path, monkeypatch):
@@ -107,9 +128,9 @@ def test_combined_regression_marginals_use_group_colours(tmp_path, monkeypatch):
     main_ax, top_ax, right_ax = figures[0].axes
     assert main_ax.get_shared_x_axes().joined(main_ax, top_ax)
     assert main_ax.get_shared_y_axes().joined(main_ax, right_ax)
-    stats_text = main_ax.texts[-1]
-    assert stats_text.get_position() == (0.98, 0.98)
-    assert stats_text.get_horizontalalignment() == "right"
+    texts = [t.get_text() for t in main_ax.texts]
+    assert any("r =" in t and "p =" in t for t in texts)
+    assert any(t.startswith("Test:") for t in texts)
     expected = {mcolors.to_rgba(color)[:3] for color in GROUP_COLORS.values()}
     top_colors = {patch.get_facecolor()[:3] for patch in top_ax.patches}
     right_colors = {patch.get_facecolor()[:3] for patch in right_ax.patches}

@@ -131,6 +131,7 @@ plot launcher, and plot spec files.
 | `matrix_differences` | `plot_matrix_differences` | Compare correlation matrices between groups. |
 | `regressions` | `plot_regressions` | Regression plots. |
 | `multivariable_regression_matrix` | `plot_multivariable_regression_matrix` | Joint regression matrix heatmaps. |
+| `model_result_matrix` | `plot_model_result_matrix` | Precomputed model-result matrix heatmaps. |
 | `volcano` | `plot_volcano` | Effect-vs-significance plot. |
 | `radar` | `plot_radar` | Radar/spider plot over selected summary columns. |
 | `histograms` | `plot_histograms` | Marker-level histogram plots. |
@@ -259,6 +260,7 @@ tests, but are also useful for scripts.
 | [plot_matrices](functions/plot_matrices.md) |
 | [plot_matrix_differences](functions/plot_matrix_differences.md) |
 | [plot_mean_bars](functions/plot_mean_bars.md) |
+| [plot_model_result_matrix](functions/plot_model_result_matrix.md) |
 | [plot_multivariable_regression_matrix](functions/plot_multivariable_regression_matrix.md) |
 | [plot_pie_charts](functions/plot_pie_charts.md) |
 | [plot_power_curve](functions/plot_power_curve.md) |

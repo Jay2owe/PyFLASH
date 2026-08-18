@@ -134,11 +134,16 @@ def test_multivariable_regression_matrix_uses_matrix_tick_style(tmp_path, monkey
             save=False,
         )
 
-    fig = plotting.plt.gcf()
+        fig = plotting.plt.gcf()
     try:
         ax = fig.axes[0]
         assert ax.get_xticklabels()[0].get_rotation() == pytest.approx(25)
         assert ax.get_yticklabels()[0].get_rotation() == pytest.approx(10)
+        side_text = "\n".join(text.get_text() for text in ax.texts)
+        assert "Test: multivariable OLS" in side_text
+        assert "Signal ~ PairA" in side_text
+        assert "p=" in side_text
+        assert "q=" in side_text
     finally:
         real_close(fig)
 

@@ -31,7 +31,7 @@ P.plot_rect_matrices(
 ## Signature
 
 ```python
-plot_rect_matrices(experiment, filtered_columns=None, data_cols=None, against_columns=None, against_data_cols=None, by='conditions', factor=None, specificity=None, split_by=None, filter_by=None, roi=None, save=True, correlation='pearsonr', tick_label_size=20, column_strings=None, regex_string=None, exclude='', data_col_contains=None, data_col_regex=None, data_col_exclude=None, against_column_strings=None, against_regex_string=None, against_exclude='', against_data_col_contains=None, against_data_col_regex=None, against_data_col_exclude=None, conditions=None, condition_col='Condition', factor_cols=None, animal_col='AnimalName', group_list=None, groups=None, group_col=None, group_cols=None, subject_col=None, dataframe_kwargs=None, encode_x_categorical=True, combine_conditions=True, column_order=None, against_order=None, share_columns_across_panels=True, blank_panel_on_nan=False, triangle=None, show_diagonal=True, show_values=False, value_format='.2f')
+plot_rect_matrices(experiment, filtered_columns=None, data_cols=None, against_columns=None, against_data_cols=None, by='conditions', factor=None, specificity=None, split_by=None, filter_by=None, roi=None, save=True, correlation='pearsonr', tick_label_size=20, column_strings=None, regex_string=None, exclude='', data_col_contains=None, data_col_regex=None, data_col_exclude=None, against_column_strings=None, against_regex_string=None, against_exclude='', against_data_col_contains=None, against_data_col_regex=None, against_data_col_exclude=None, conditions=None, condition_col='Condition', factor_cols=None, animal_col='AnimalName', group_list=None, groups=None, group_col=None, group_cols=None, subject_col=None, dataframe_kwargs=None, encode_x_categorical=True, combine_conditions=True, column_order=None, against_order=None, share_columns_across_panels=True, blank_panel_on_nan=False, triangle=None, show_diagonal=True, show_values=False, value_format='.2f', cmap=None, palette=None)
 ```
 
 ## Input Object Types
@@ -60,6 +60,7 @@ plot_rect_matrices(experiment, filtered_columns=None, data_cols=None, against_co
 | `share_columns_across_panels` | bool | `True` | Keep a shared valid Y/X set across panels. |
 | `blank_panel_on_nan` | bool | `False` | Keep requested axes and mark invalid cells as `NaN` instead of dropping axes. |
 | `triangle`, `show_diagonal`, `show_values`, `value_format` | display options | `None`, `True`, `False`, `'.2f'` | Compact matrix rendering controls. |
+| `cmap`, `palette` | colormap or string | inferred | Heatmap colours. `palette` accepts seaborn names and maps to the shared matrix colormap helper. |
 | `filter_by` | mapping, tuple, list, or `None` | `None` | Row filter or filter queue. Alias: `specificity`. |
 | `roi` | string, list, or `None` | `None` | Select one ROI summary or run an ROI queue. |
 | `save` | bool | `True` | Write the combined heatmap figure to disk. |

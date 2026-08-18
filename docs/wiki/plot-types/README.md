@@ -3,6 +3,7 @@
 | Page | Purpose |
 |---|---|
 | [Mean Bars](mean-bars.md) | Compare group summaries for selected data columns. |
+| [Table And Categorical Summary Plots](table-and-categorical-summary-plots.md) | Build baseline tables, significance-audit tables, and categorical count summaries. |
 | [Distribution Plots](distribution-plots.md) | Inspect marker-level distributions with histograms, ridgeline plots, and ECDFs. |
 | [Group Comparison Plots](group-comparison-plots.md) | Show raw/group-level variation and effect-size summaries. |
 | [Matrix Plots](matrix-plots.md) | Show pairwise associations, rectangular correlation views, and matrix differences. |

@@ -19,6 +19,16 @@ Every plot below was rendered from one small, seeded, domain-neutral synthetic s
 </tr>
 </table>
 
+## Tables and categorical summaries
+
+<table>
+<tr>
+<td align="center" width="33%"><a href="../functions/plot_baseline_characteristics.md"><img src="images/plot_baseline_characteristics.svg" alt="plot_baseline_characteristics" width="240"><br><code>plot_baseline_characteristics</code></a></td>
+<td align="center" width="33%"><a href="../functions/plot_significance_audit_table.md"><img src="images/plot_significance_audit_table.svg" alt="plot_significance_audit_table" width="240"><br><code>plot_significance_audit_table</code></a></td>
+<td align="center" width="33%"><a href="../functions/plot_category_counts.md"><img src="images/plot_category_counts.svg" alt="plot_category_counts" width="240"><br><code>plot_category_counts</code></a></td>
+</tr>
+</table>
+
 ## Distributions
 
 <table>
@@ -55,6 +65,11 @@ Every plot below was rendered from one small, seeded, domain-neutral synthetic s
 <td align="center" width="33%"><a href="../functions/plot_marker_pca.md"><img src="images/plot_marker_pca.svg" alt="plot_marker_pca" width="240"><br><code>plot_marker_pca</code></a></td>
 <td align="center" width="33%"><a href="../functions/plot_volcano.md"><img src="images/plot_volcano.svg" alt="plot_volcano" width="240"><br><code>plot_volcano</code></a></td>
 <td align="center" width="33%"><a href="../functions/plot_power_curve.md"><img src="images/plot_power_curve.svg" alt="plot_power_curve" width="240"><br><code>plot_power_curve</code></a></td>
+</tr>
+<tr>
+<td align="center" width="33%"><a href="../functions/plot_model_result_matrix.md"><img src="images/plot_model_result_matrix.svg" alt="plot_model_result_matrix" width="240"><br><code>plot_model_result_matrix</code></a></td>
+<td align="center" width="33%"><a href="../functions/plot_correlation_contrast.md"><img src="images/plot_correlation_contrast.svg" alt="plot_correlation_contrast" width="240"><br><code>plot_correlation_contrast</code></a></td>
+<td align="center" width="33%"></td>
 </tr>
 </table>
 

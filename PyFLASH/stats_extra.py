@@ -148,7 +148,14 @@ def effect_ci(a, b, eftype="hedges", n_resamples=5000, confidence=0.95):
         return (float("nan"), float("nan"))
 
 
-_PARAMETRIC_TESTS = {"Independent T-Test", "One-Way ANOVA", "Two-Way ANOVA"}
+_PARAMETRIC_TESTS = {
+    "Independent T-Test",
+    "Student's T-Test",
+    "Welch's T-Test",
+    "One-Way ANOVA",
+    "Welch ANOVA",
+    "Two-Way ANOVA",
+}
 
 
 def effect_sizes_for_test(groups, test, comparisons, ci=True, n_resamples=5000) -> dict:

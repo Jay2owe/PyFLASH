@@ -162,8 +162,8 @@ def test_build_plot_kwargs_converts_direct_filter_by_to_tuple():
 
 def test_resolve_func_supports_pipeline_module_targets():
     func = _resolve_func(PLOT_REGISTRY["correlation_pipeline"])
-    assert func.__module__ == "PyFLASH.pipeline"
-    assert func.__name__ == "correlation"
+    assert func.__module__ == "PyFLASH.plotting"
+    assert func.__name__ == "plot_correlation_pipeline"
     adjusted = _resolve_func(PLOT_REGISTRY["adjusted_correlation_pipeline"])
     assert adjusted.__module__ == "PyFLASH.pipeline"
     assert adjusted.__name__ == "adjusted_correlation"
@@ -430,7 +430,7 @@ def test_pyflash_runner_discover_includes_registered_pipeline_signatures():
     sweep = discovered["registered_callables"]["iterative_model_sweep"]
     scatter = discovered["registered_callables"]["scatter_3d"]
 
-    assert corr["target"] == "PyFLASH.pipeline.correlation"
+    assert corr["target"] == "PyFLASH.plotting.plot_correlation_pipeline"
     assert "gate='p'" in corr["signature"]
     assert "value_matrices='p'" in corr["signature"]
     assert adjusted["target"] == "PyFLASH.pipeline.adjusted_correlation"
@@ -473,7 +473,7 @@ def test_cheat_sheet_accepts_pipeline_module_targets(capsys):
 
     cheat_sheet(PLOT_REGISTRY["correlation_pipeline"])
     out = capsys.readouterr().out
-    assert "PyFLASH.pipeline.correlation" in out
+    assert "plot_correlation_pipeline" in out
     assert "max_regressions" in out
 
 

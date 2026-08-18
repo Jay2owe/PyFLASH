@@ -184,6 +184,47 @@ def test_render_value_matrix_uses_pyflash_matrix_style():
             plt.close(fig)
 
 
+def test_render_value_matrix_palette_and_slim_colorbar():
+    matrix = pd.DataFrame([[0.1, 0.4], [0.2, 0.6]], index=["a", "b"], columns=["c", "d"])
+    fig, ax = plt.subplots()
+    try:
+        plotting._render_value_matrix(
+            matrix,
+            ax=ax,
+            fig=fig,
+            palette="Greens",
+            vmin=0,
+            vmax=0.6,
+        )
+        assert ax.collections[0].cmap.name.lower().startswith("greens")
+        assert len(fig.axes) == 2
+        assert fig.axes[1].get_position().width == pytest.approx(0.024)
+    finally:
+        plt.close(fig)
+
+
+def test_render_value_matrix_auto_contrasts_default_cell_text():
+    matrix = pd.DataFrame([[0.0, 1.0]], index=["row"], columns=["low", "high"])
+    annotations = pd.DataFrame([["low", "high"]], index=matrix.index, columns=matrix.columns)
+    fig, ax = plt.subplots()
+    try:
+        plotting._render_value_matrix(
+            matrix,
+            ax=ax,
+            fig=fig,
+            palette="Greens",
+            vmin=0,
+            vmax=1,
+            annotations=annotations,
+            show_colorbar=False,
+        )
+        colors = {text.get_text(): text.get_color() for text in ax.texts}
+        assert colors["low"] == "black"
+        assert colors["high"] == "white"
+    finally:
+        plt.close(fig)
+
+
 def test_matrix_action_uses_pyflash_matrix_cmap():
     ctx = SimpleNamespace(
         condition_df=pd.DataFrame({
@@ -289,6 +330,64 @@ def test_bar_chart_action_uses_pyflash_point_defaults(monkeypatch):
         plt.close(fig)
 
 
+def test_bar_chart_action_keeps_legacy_width_and_negative_gap(monkeypatch):
+    ctx = SimpleNamespace(
+        column="Metric",
+        condition_df=pd.DataFrame({"AnimalName": ["a", "b"], "Metric": [-1.0, 1.0]}),
+        factor_df=None,
+        factor_value=None,
+        condition="A",
+        condition_index=0,
+        factor_index=0,
+        color="#123456",
+        label="A",
+    )
+    fig, ax = plt.subplots()
+    calls = []
+
+    def fake_barplot(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return kwargs["ax"]
+
+    monkeypatch.setattr(plotting.sns, "barplot", fake_barplot)
+    try:
+        plotting.bar_chart_action(ctx, {"ax": ax}, points=False)
+        assert calls[-1]["width"] == pytest.approx(0.2)
+        assert calls[-1]["gap"] == pytest.approx(-2.5)
+    finally:
+        plt.close(fig)
+
+
+def test_mean_bar_axis_limits_keep_positive_baseline_and_round_signed_floor():
+    signed_groups = [
+        pd.Series([-1.6757, -0.3]),
+        pd.Series([0.0, 2.8749]),
+    ]
+    low, high = plotting._signed_mean_bar_limits(signed_groups, auto_ymax=3.0)
+    assert low == pytest.approx(-2.0)
+    assert high == pytest.approx(3.0)
+
+
+def test_mean_bar_axis_limits_allow_explicit_range_but_require_zero():
+    groups = [pd.Series([-1.0, 2.0])]
+    assert plotting._signed_mean_bar_limits(
+        groups, auto_ymax=2.0, y_range=(-2.5, 3.5), ymin=-3.0,
+    ) == (-3.0, 3.5)
+
+    with pytest.raises(ValueError, match="include zero"):
+        plotting._signed_mean_bar_limits(
+            groups, auto_ymax=2.0, ymin=0.5, ymax=3.0,
+        )
+
+
+def test_signed_mean_bar_limits_leave_positive_headroom_for_all_negative_data():
+    low, high = plotting._signed_mean_bar_limits(
+        [pd.Series([-2.0, -1.0])], auto_ymax=-1.0,
+    )
+    assert low < -2.0
+    assert high > 0.0
+
+
 def test_regression_action_uses_pyflash_scatter_defaults(monkeypatch):
     df = pd.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 3.0, 4.0]})
     ctx = SimpleNamespace(
@@ -327,6 +426,62 @@ def test_regression_action_uses_pyflash_scatter_defaults(monkeypatch):
         assert scatter_kws["edgecolors"] == "#123456"
         assert scatter_kws["linewidths"] == pytest.approx(2.5)
         assert calls[-1]["line_kws"]["lw"] == pytest.approx(4.0)
+    finally:
+        plt.close(fig)
+
+
+def test_regression_action_point_fill_overrides_hollow_style(monkeypatch):
+    df = pd.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 3.0, 4.0]})
+    ctx = SimpleNamespace(
+        condition_df=df,
+        factor_df=None,
+        factor_value=None,
+        condition="A",
+        condition_index=0,
+        factor_index=0,
+        factor=None,
+        color="#123456",
+        label="A",
+        experiment=SimpleNamespace(condition_list=[]),
+    )
+    fig, ax = plt.subplots()
+    monkeypatch.setattr(
+        plotting, "_resolved_condition_style",
+        lambda *_args, **_kwargs: "hollow",
+    )
+    try:
+        plotting.regression_action(
+            ctx, {"ax": ax}, x="x", y="y", point_fill="group")
+        facecolors = ax.collections[-1].get_facecolors()
+        assert len(facecolors) > 0
+        assert np.allclose(
+            facecolors[0][:3], matplotlib.colors.to_rgba("#123456")[:3])
+    finally:
+        plt.close(fig)
+
+
+def test_regression_annotation_reports_significance_per_group():
+    fig, ax = plt.subplots()
+    try:
+        entries = [
+            {"group": "Control", "color": "#000000", "r": -0.15, "p": 0.6118, "n": 12},
+            {"group": "Dementia-AD", "color": "#ff8000", "r": -0.74, "p": 0.0154, "n": 12},
+        ]
+        # Keep the graph compact, with exact p-values and n in the removable
+        # right-side stats block.
+        plotting._annotate_regression_coefficients(ax, entries, test="pearsonr")
+        assert ax.texts[0].get_text() == "Control: r = -0.15"
+        assert ax.texts[1].get_text() == "Dementia-AD: r = -0.74 *"
+        assert ax.texts[1].get_color() == "#ff8000"
+        plotting._annotate_regression_stats_summary(
+            ax,
+            entries,
+            test="pearsonr",
+        )
+        side_text = ax.texts[-1].get_text()
+        assert "Test: Pearson correlation" in side_text
+        assert "Control: n=12, r=-0.15, p=0.6118" in side_text
+        assert "Dementia-AD: n=12, r=-0.74, p=0.0154" in side_text
     finally:
         plt.close(fig)
 

@@ -62,3 +62,7 @@ tmp_*.txt
 
 # MkDocs build output (docs site is built by Read the Docs / CI, not committed)
 /site/
+
+# Pytest scratch output roots (preview PNG/SVG/CSV written by test runs).
+# Regenerated on every run; never an input.
+.pytest-tmp*/

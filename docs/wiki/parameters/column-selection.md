@@ -140,6 +140,7 @@ model.
 
 ## See Also
 
+- [Column labels (display-name overrides)](column-labels.md)
 - [Summary table](../data-structures/summary-table.md)
 - [Filter By and row filters](specificity.md)
 - [Model options](model-options.md)

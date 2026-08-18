@@ -64,11 +64,26 @@ from PyFLASH.plotting import (
     _ovw_scorecard_figure,
     _ovw_mde_figure,
     _ovw_readiness_figure,
+    _ovw_missingness_figure as _plot_ovw_missingness_figure,
+    _ovw_group_counts_figure as _plot_ovw_group_counts_figure,
+    _ovw_availability_figure as _plot_ovw_availability_figure,
+    _ovw_metric_distributions_figure as _plot_ovw_metric_distributions_figure,
+    _ovw_descriptives_figure as _plot_ovw_descriptives_figure,
+    _ovw_normality_figure as _plot_ovw_normality_figure,
+    _ovw_outlier_summary_figure as _plot_ovw_outlier_summary_figure,
+    _ovw_covariation_pairs_figure as _plot_ovw_covariation_pairs_figure,
+    _ovw_numeric_figure_columns as _plot_ovw_numeric_figure_columns,
+    _ovw_condition_distribution_figure as _plot_ovw_condition_distribution_figure,
+    _ovw_matrix_figure as _plot_ovw_matrix_figure,
+    _ovw_group_palette as _plot_ovw_group_palette,
+    _ovw_short_label as _plot_ovw_short_label,
     _volcano_table_figure,
     _resolve_marker_roi_long,
     _animal_group_map_from_groups,
     _linear_model_adjusted_means_figure,
     _linear_model_coefficient_forest_figure,
+    plot_linear_model_adjusted_means,
+    plot_linear_model_coefficient_forest,
     # Rhythm module: standalone plot functions the rhythm pipeline reuses (§8).
     _resolve_rhythm_frame,
     plot_cosinor,
@@ -3508,7 +3523,7 @@ def _ovw_audit_statistics(test, post_hoc, results_dict, tokens):
 
     omnibus = float("nan")
     stat_list = None
-    if test == "Independent T-Test":
+    if test in {"Independent T-Test", "Student's T-Test", "Welch's T-Test"}:
         entry = results_dict.get("Independent T Test")
         if entry is not None:
             omnibus = _f(entry[0])
@@ -3518,8 +3533,14 @@ def _ovw_audit_statistics(test, post_hoc, results_dict, tokens):
         if entry is not None and isinstance(entry[0], (list, tuple)):
             stat_list = [_f(s) for s in entry[0]]
             omnibus = stat_list[0] if stat_list else float("nan")
-    elif test == "One-Way ANOVA":
-        owa = results_dict.get("OWA")
+    elif test in {"One-Way ANOVA", "Welch ANOVA", "Linear Model"}:
+        owa = (
+            results_dict.get("OWA")
+            if test == "One-Way ANOVA"
+            else results_dict.get("Welch ANOVA")
+            if test == "Welch ANOVA"
+            else results_dict.get("Linear Model")
+        )
         if owa is not None:
             omnibus = _f(owa[0])
         ph = results_dict.get(str(post_hoc).replace(" ", "-"))
@@ -4936,11 +4957,11 @@ def data_overview(
             plot_significance_audit, plot_readiness,
         )):
             _corr_makedirs(fig_dir)
-        figure_numeric_cols = _ovw_numeric_figure_columns(numeric_cols, inventory)
-        distribution_numeric_cols = _ovw_numeric_figure_columns(
+        figure_numeric_cols = _plot_ovw_numeric_figure_columns(numeric_cols, inventory)
+        distribution_numeric_cols = _plot_ovw_numeric_figure_columns(
             numeric_cols, inventory)
         if plot_group_counts and include_group_counts and not group_counts.empty:
-            gfig = _ovw_group_counts_figure(
+            gfig = _plot_ovw_group_counts_figure(
                 group_counts, tick_label_size, max_plot_items)
             if gfig is not None:
                 save_fig(gfig, fig_dir, f"Group Counts{spec_tag}", montage=True)
@@ -4950,18 +4971,18 @@ def data_overview(
                 availability.loc[availability.index.intersection(figure_numeric_cols)]
                 if figure_numeric_cols else availability
             )
-            afig = _ovw_availability_figure(
+            afig = _plot_ovw_availability_figure(
                 plot_availability_df, tick_label_size, max_plot_items)
             if afig is not None:
                 save_fig(afig, fig_dir, f"Availability by Condition{spec_tag}", montage=True)
                 plt.close(afig)
         if plot_descriptives and include_descriptives and figure_numeric_cols:
-            dfig = _ovw_metric_distributions_figure(
+            dfig = _plot_ovw_metric_distributions_figure(
                 num_df, figure_numeric_cols, tick_label_size, max_plot_items)
             if dfig is not None:
                 save_fig(dfig, fig_dir, f"Metric Distributions{spec_tag}", montage=True)
                 plt.close(dfig)
-            sfig = _ovw_descriptives_figure(
+            sfig = _plot_ovw_descriptives_figure(
                 descriptives[descriptives["column"].isin(figure_numeric_cols)]
                 if not descriptives.empty and "column" in descriptives.columns
                 else descriptives,
@@ -4971,7 +4992,7 @@ def data_overview(
                 save_fig(sfig, fig_dir, f"Descriptive Summary{spec_tag}", montage=True)
                 plt.close(sfig)
         if plot_normality and include_normality and not normality.empty:
-            nfig = _ovw_normality_figure(
+            nfig = _plot_ovw_normality_figure(
                 normality[normality["column"].isin(figure_numeric_cols)]
                 if figure_numeric_cols and "column" in normality.columns
                 else normality,
@@ -4981,7 +5002,7 @@ def data_overview(
                 save_fig(nfig, fig_dir, f"Normality Summary{spec_tag}", montage=True)
                 plt.close(nfig)
         if plot_outliers and include_outliers:
-            ofig = _ovw_outlier_summary_figure(
+            ofig = _plot_ovw_outlier_summary_figure(
                 outliers, outlier_animals, tick_label_size, max_plot_items)
             if ofig is not None:
                 save_fig(ofig, fig_dir, f"Outlier Summary{spec_tag}", montage=True)
@@ -4993,14 +5014,14 @@ def data_overview(
                 keep = set(figure_numeric_cols)
                 plot_covarying = covarying[
                     covarying["x"].isin(keep) & covarying["y"].isin(keep)]
-            pfig = _ovw_covariation_pairs_figure(
+            pfig = _plot_ovw_covariation_pairs_figure(
                 plot_covarying, covariation_threshold, tick_label_size, max_plot_items)
             if pfig is not None:
                 save_fig(pfig, fig_dir, f"Covariation Pairs{spec_tag}", montage=True)
                 plt.close(pfig)
         if (plot_condition_distributions and include_condition_distributions
                 and distribution_numeric_cols):
-            rfig = _ovw_condition_distribution_figure(
+            rfig = _plot_ovw_condition_distribution_figure(
                 num_df, distribution_numeric_cols, distribution_groups,
                 tick_label_size, max_plot_items,
                 plot_kind=condition_distribution_plot,
@@ -5011,7 +5032,7 @@ def data_overview(
                 plt.close(rfig)
         if (plot_condition_distribution_zscores and include_condition_distributions
                 and distribution_numeric_cols):
-            zfig = _ovw_condition_distribution_figure(
+            zfig = _plot_ovw_condition_distribution_figure(
                 num_df, distribution_numeric_cols, distribution_groups,
                 tick_label_size, max_plot_items,
                 plot_kind=condition_distribution_plot,
@@ -5022,7 +5043,7 @@ def data_overview(
                 plt.close(zfig)
         if (plot_condition_fingerprint and include_condition_distributions
                 and not condition_fingerprint.empty):
-            ffig = _ovw_matrix_figure(
+            ffig = _plot_ovw_matrix_figure(
                 condition_fingerprint,
                 f"Condition fingerprint ({fingerprint_stat} z-score)",
                 tick_label_size,
@@ -5036,7 +5057,7 @@ def data_overview(
                 plt.close(ffig)
         if (plot_condition_variability and include_condition_distributions
                 and not condition_variability.empty):
-            vfig = _ovw_matrix_figure(
+            vfig = _plot_ovw_matrix_figure(
                 condition_variability,
                 f"Condition variability ({variability_stat})",
                 tick_label_size,
@@ -5052,15 +5073,15 @@ def data_overview(
             # Shared forest renderer; the overview variant colours each row by its
             # group (palette) and labels rows "<group> vs <control> | <column>".
             _es_groups = effect_sizes["group"].astype(str).tolist()
-            _es_palette = _ovw_group_palette(_es_groups)
+            _es_palette = _plot_ovw_group_palette(_es_groups)
             efig = _effect_forest_figure(
                 effect_sizes, value_col=None, tick_label_size=tick_label_size,
                 max_items=max_plot_items,
                 ci_cols=("hedges_g_ci_low", "hedges_g_ci_high"),
                 labels=[
-                    f"{_ovw_short_label(r['group'], 16)} vs "
-                    f"{_ovw_short_label(r['control'], 16)} | "
-                    f"{_ovw_short_label(r['column'], 32)}"
+                    f"{_plot_ovw_short_label(r['group'], 16)} vs "
+                    f"{_plot_ovw_short_label(r['control'], 16)} | "
+                    f"{_plot_ovw_short_label(r['column'], 32)}"
                     for _, r in effect_sizes.iterrows()
                 ],
                 colors=[_es_palette[g] for g in _es_groups],
@@ -5115,7 +5136,7 @@ def data_overview(
                 save_fig(rfig, fig_dir, f"Marker Readiness{spec_tag}", montage=True)
                 plt.close(rfig)
         if plot_missingness:
-            mfig = _ovw_missingness_figure(
+            mfig = _plot_ovw_missingness_figure(
                 scope_df, resolved_columns, tick_label_size,
                 "Data availability (animals x columns)")
             if mfig is not None:
@@ -5308,7 +5329,15 @@ def data_overview(
 # ONLY when the run is declared an exploratory screen. p is ALWAYS present; every
 # q-bearing figure has a p counterpart.
 
-_GC_PARAMETRIC_TESTS = {"Independent T-Test", "One-Way ANOVA", "Two-Way ANOVA"}
+_GC_PARAMETRIC_TESTS = {
+    "Independent T-Test",
+    "Student's T-Test",
+    "Welch's T-Test",
+    "One-Way ANOVA",
+    "Welch ANOVA",
+    "Two-Way ANOVA",
+    "Linear Model",
+}
 
 
 def _gc_run_dirs(experiment, run_label, if_exists, *, clear_overwrite=True):
@@ -5447,7 +5476,7 @@ def _gc_extract_auto(test, post_hoc, results_dict, tokens):
 
     omnibus = float("nan")
     pair_list = None
-    if test == "Independent T-Test":
+    if test in {"Independent T-Test", "Student's T-Test", "Welch's T-Test"}:
         entry = results_dict.get("Independent T Test")
         if entry is not None:
             omnibus = _f(entry[1])
@@ -5457,8 +5486,14 @@ def _gc_extract_auto(test, post_hoc, results_dict, tokens):
         if entry is not None and isinstance(entry[1], (list, tuple)):
             pair_list = [_f(p) for p in entry[1]]
             omnibus = pair_list[0] if pair_list else float("nan")
-    elif test == "One-Way ANOVA":
-        omn = results_dict.get("OWA")
+    elif test in {"One-Way ANOVA", "Welch ANOVA", "Linear Model"}:
+        omn = (
+            results_dict.get("OWA")
+            if test == "One-Way ANOVA"
+            else results_dict.get("Welch ANOVA")
+            if test == "Welch ANOVA"
+            else results_dict.get("Linear Model")
+        )
         if omn is not None:
             omnibus = _f(omn[1])
         ph = results_dict.get(str(post_hoc).replace(" ", "-"))
@@ -6343,6 +6378,26 @@ def _lm_group_colors(experiment, group_col):
     return colors
 
 
+def _lm_fit_model_frames(fit_result, dependent_variables=None):
+    frames = {}
+    fits = fit_result.get("fits") if isinstance(fit_result, Mapping) else None
+    if not isinstance(fits, Mapping):
+        return frames
+    wanted = (
+        [str(dep) for dep in dependent_variables]
+        if dependent_variables is not None else None
+    )
+    items = [(dep, fits.get(dep)) for dep in wanted] if wanted is not None else fits.items()
+    for dep, fit in items:
+        if fit is None:
+            continue
+        model_data = getattr(getattr(fit, "model", None), "data", None)
+        frame = getattr(model_data, "frame", None)
+        if isinstance(frame, pd.DataFrame):
+            frames[str(dep)] = frame.copy()
+    return frames
+
+
 def _lm_covariate_profile_key(covariate_profile):
     profile = str(covariate_profile).strip().lower().replace("-", "_")
     aliases = {
@@ -6900,6 +6955,7 @@ def linear_model(
     adjusted_mean_p_adjust="holm",
     adjusted_mean_p_family="dependent_variable",
     plot_adjusted_means=True,
+    plot_raw_values=True,
     plot_coefficients=True,
     coefficient_gate="p",
     max_coefficient_terms=60,
@@ -7023,6 +7079,7 @@ def linear_model(
             "adjusted_mean_weights": str(adjusted_mean_weights),
             "adjusted_mean_p_adjust": str(adjusted_mean_p_adjust),
             "adjusted_mean_p_family": str(adjusted_mean_p_family),
+            "plot_raw_values": bool(plot_raw_values),
         },
     )
     if _run_dirs is not None:
@@ -7071,6 +7128,7 @@ def linear_model(
     coefficients = fit_result["coefficients"]
     model_summaries = fit_result["model_summaries"]
     metadata = fit_result["metadata"]
+    model_frames = _lm_fit_model_frames(fit_result, dep_vars)
     adjusted_df = (
         _lm_adjusted_means_table(
             experiment, fit_result, dep_vars, group_col,
@@ -7127,35 +7185,44 @@ def linear_model(
             )
         _pio.makedirs(fig_dir)
         if plot_coefficients and not coefficients.empty:
-            cfig = _linear_model_coefficient_forest_figure(
-                coefficients,
+            plot_linear_model_coefficient_forest(
+                coefficients=coefficients,
                 alpha=alpha,
                 gate=coefficient_gate,
                 tick_label_size=tick_label_size,
                 max_terms=max_coefficient_terms,
+                save=True,
+                save_path=fig_dir,
+                save_name=f"Coefficient Forest{spec_tag}",
+                montage=True,
+                emit_report=False,
             )
-            if cfig is not None:
-                save_fig(cfig, fig_dir, f"Coefficient Forest{spec_tag}",
-                         montage=True)
-                plt.close(cfig)
         if plot_adjusted_means and not adjusted_df.empty:
             order = list(dict.fromkeys(adjusted_df["group"].astype(str)))
             for dep in dep_vars:
-                fig = _linear_model_adjusted_means_figure(
-                    adjusted_df,
-                    dep,
-                    group_col,
-                    group_order=order,
-                    group_color_map=group_colors,
+                plot_linear_model_adjusted_means(
+                    experiment=experiment,
+                    adjusted_means=adjusted_df,
                     comparisons=adjusted_comparisons_df,
-                    source=experiment,
+                    dependent_variable=dep,
+                    group=group_col,
+                    group_order=order,
+                    group_colors=group_colors,
+                    raw_data=model_frames.get(dep),
+                    raw_value_col=dep,
+                    raw_group_col=group_col,
+                    show_raw=plot_raw_values,
+                    covariates=adjustment_predictors,
                     alpha=alpha,
                     tick_label_size=tick_label_size,
+                    show_stats_summary=True,
+                    save=True,
+                    save_path=fig_dir,
+                    save_name=f"Adjusted Means {dep}{spec_tag}",
+                    subfolder="Adjusted Means",
+                    montage=True,
+                    emit_report=False,
                 )
-                if fig is not None:
-                    save_fig(fig, fig_dir, f"Adjusted Means {dep}{spec_tag}",
-                             subfolder="Adjusted Means", montage=True)
-                    plt.close(fig)
 
     manifest = {
         "run_label": resolved_label,
@@ -7189,6 +7256,7 @@ def linear_model(
         "adjusted_mean_p_adjust": str(adjusted_mean_p_adjust),
         "adjusted_mean_p_family": str(adjusted_mean_p_family),
         "plot_adjusted_means": bool(plot_adjusted_means),
+        "plot_raw_values": bool(plot_raw_values),
         "plot_coefficients": bool(plot_coefficients),
         "reused": False,
     }
@@ -7206,6 +7274,7 @@ def linear_model(
     result["coefficients"] = coefficients
     result["model_summaries"] = model_summaries
     result["metadata"] = metadata
+    result["model_data"] = model_frames
     result["adjusted_means_table"] = adjusted_df
     result["adjusted_mean_comparisons"] = adjusted_comparisons_df
     return result

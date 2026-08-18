@@ -8,6 +8,7 @@ import csv
 import math
 import os
 import unicodedata
+import warnings
 from typing import Iterable
 
 from PyFLASH._logging import logger as _log
@@ -18,6 +19,7 @@ import scikit_posthocs as sp
 import seaborn as sns
 import statsmodels.api as sm
 from matplotlib import pyplot as plt
+from matplotlib.patches import Rectangle
 from scipy import stats
 from scipy.stats import anderson, f_oneway, kstest, normaltest, ttest_ind_from_stats
 from statsmodels.formula.api import ols
@@ -115,6 +117,275 @@ def sidak_correction(p_value, n_tests):
     return 1 - (1 - float(p_value)) ** int(n_tests)
 
 
+# ── Correlation-difference inference (independent groups) ────────────────
+# Helpers for comparing a correlation coefficient BETWEEN groups (Fisher r-to-z,
+# Zou 2007 interval) and for combining several correlated tests into one omnibus
+# p-value (Cauchy / ACAT). Generic and pure-numeric; used by
+# plotting.plot_correlation_contrast but reusable anywhere.
+
+def _spearman_like(method) -> bool:
+    m = str(method).strip().lower()
+    return m in ("spearman", "spearmanr", "s")
+
+
+def fisher_z_se(r, n, method="pearson"):
+    """Standard error of the Fisher z-transform of a correlation coefficient.
+
+    Spearman uses the Bonett & Wright (2000) variance ``(1 + r**2 / 2) / (n - 3)``;
+    Pearson/Kendall use the classic ``1 / (n - 3)``. Returns NaN for ``n <= 3``.
+    """
+    n = int(n)
+    if n <= 3:
+        return float("nan")
+    r = float(np.clip(r, -0.999999, 0.999999))
+    var = (1.0 + r ** 2 / 2.0) / (n - 3) if _spearman_like(method) else 1.0 / (n - 3)
+    return math.sqrt(var)
+
+
+_TAILS = ("two", "less", "greater", "one")
+
+
+def _resolve_tail(tail):
+    """Normalise a tail/alternative spec to one of ``_TAILS``."""
+    t = str(tail if tail is not None else "two").strip().lower()
+    aliases = {
+        "2": "two", "two-sided": "two", "two_sided": "two", "twosided": "two",
+        "both": "two", "ne": "two", "!=": "two",
+        "1": "one", "one-sided": "one", "one_sided": "one", "onesided": "one",
+        "lt": "less", "<": "less", "smaller": "less",
+        "gt": "greater", ">": "greater", "larger": "greater",
+    }
+    t = aliases.get(t, t)
+    if t not in _TAILS:
+        raise ValueError(
+            f"tail must be one of {_TAILS} (or an alias); got {tail!r}."
+        )
+    return t
+
+
+def _tail_p_from_z(z, tail="two"):
+    """One- or two-sided normal p-value for a signed z statistic.
+
+    ``'greater'``/``'less'`` test a pre-specified direction for the underlying
+    difference; ``'one'`` halves the two-sided p in whichever direction was
+    observed and is only valid when that direction was predicted in advance.
+    """
+    t = _resolve_tail(tail)
+    z = float(z)
+    if not np.isfinite(z):
+        return float("nan")
+    if t == "two":
+        return float(2.0 * stats.norm.sf(abs(z)))
+    if t == "one":
+        return float(stats.norm.sf(abs(z)))
+    if t == "greater":
+        return float(stats.norm.sf(z))
+    return float(stats.norm.cdf(z))
+
+
+def fisher_z_correlation_difference(r1, n1, r2, n2, method="pearson", tail="two"):
+    """P-value that two INDEPENDENT correlations (r1, r2) differ.
+
+    Fisher r-to-z test with a method-appropriate SE (see :func:`fisher_z_se`).
+    Returns NaN when either sample is too small.
+
+    ``tail`` controls the alternative hypothesis about ``r1 - r2``:
+    ``'two'`` (default) for a two-sided test, ``'greater'`` for ``r1 > r2``,
+    ``'less'`` for ``r1 < r2``, and ``'one'`` to halve the two-sided p-value in
+    the observed direction. A one-sided test is only valid when the direction
+    was specified before seeing the data.
+    """
+    se1 = fisher_z_se(r1, n1, method)
+    se2 = fisher_z_se(r2, n2, method)
+    if not (np.isfinite(se1) and np.isfinite(se2)):
+        return float("nan")
+    r1c = float(np.clip(r1, -0.999999, 0.999999))
+    r2c = float(np.clip(r2, -0.999999, 0.999999))
+    z = (np.arctanh(r1c) - np.arctanh(r2c)) / math.sqrt(se1 ** 2 + se2 ** 2)
+    return _tail_p_from_z(z, tail)
+
+
+def zou_correlation_difference_ci(r1, n1, r2, n2, method="pearson", alpha=0.05):
+    """Zou (2007) confidence interval for the difference of two independent
+    correlations (``r1 - r2``).
+
+    Returns ``(delta, lower, upper)`` in correlation units. Uses each
+    correlation's own asymmetric Fisher-z interval, so it stays accurate for
+    large ``|r|`` and small ``n`` where the symmetric variance-sum interval is
+    biased. Returns NaNs when either sample is too small.
+    """
+    se1 = fisher_z_se(r1, n1, method)
+    se2 = fisher_z_se(r2, n2, method)
+    if not (np.isfinite(se1) and np.isfinite(se2)):
+        return float("nan"), float("nan"), float("nan")
+    zc = float(stats.norm.ppf(1.0 - alpha / 2.0))
+    r1c = float(np.clip(r1, -0.999999, 0.999999))
+    r2c = float(np.clip(r2, -0.999999, 0.999999))
+    l1, u1 = math.tanh(np.arctanh(r1c) - zc * se1), math.tanh(np.arctanh(r1c) + zc * se1)
+    l2, u2 = math.tanh(np.arctanh(r2c) - zc * se2), math.tanh(np.arctanh(r2c) + zc * se2)
+    d = r1c - r2c
+    lower = d - math.sqrt((r1c - l1) ** 2 + (u2 - r2c) ** 2)
+    upper = d + math.sqrt((u1 - r1c) ** 2 + (r2c - l2) ** 2)
+    return float(d), float(lower), float(upper)
+
+
+def cauchy_combination_test(pvalues):
+    """Cauchy combination test (ACAT): combine p-values into one omnibus p-value.
+
+    Valid under arbitrary dependence among the individual tests, so it is the
+    right tool for combining several correlated measures. Returns NaN when no
+    finite p-value is supplied.
+    """
+    ps = [float(p) for p in pvalues if p is not None and np.isfinite(p)]
+    if not ps:
+        return float("nan")
+    ps = np.clip(np.asarray(ps, dtype=float), 1e-15, 1.0 - 1e-15)
+    t = float(np.mean(np.tan((0.5 - ps) * np.pi)))
+    return float(0.5 - math.atan(t) / math.pi)
+
+
+def _design_from_covariates(cov_df, n_rows):
+    """Encode covariates into float design columns: numeric as-is, categorical
+    one-hot with the first level dropped. Returns an ``(n_rows, k)`` array."""
+    if cov_df is None:
+        return np.zeros((n_rows, 0), dtype=float)
+    parts = []
+    for column in cov_df.columns:
+        col = cov_df[column]
+        num = pd.to_numeric(col, errors="coerce")
+        if col.notna().sum() > 0 and int(num.notna().sum()) == int(col.notna().sum()):
+            parts.append(num.to_numpy(dtype=float).reshape(-1, 1))
+        else:
+            dummies = pd.get_dummies(col.astype("object"), drop_first=True, dtype=float)
+            if dummies.shape[1]:
+                parts.append(dummies.to_numpy(dtype=float))
+    if not parts:
+        return np.zeros((n_rows, 0), dtype=float)
+    return np.column_stack(parts)
+
+
+def interaction_slope_difference(x, y, group, *, reference=None, covariates=None,
+                                 tail="two", standardize=False, rank=False):
+    """P-value that the ``y ~ x`` slope differs between two independent groups.
+
+    Fits ``y ~ x + g + x:g`` (plus any covariates as additive terms) by least
+    squares over the two groups combined, where ``g`` is an indicator for the
+    non-reference group, and tests the ``x:g`` interaction coefficient with a
+    t-test. This is the regression counterpart to
+    :func:`fisher_z_correlation_difference`: that one compares *correlations*
+    (scale-free, estimated within each group), this one compares *slopes* (in
+    y-per-x units, pooling the residual variance across both groups). The two
+    can disagree when the groups differ in spread.
+
+    Parameters
+    ----------
+    x, y : array-like
+        Predictor and outcome, same length.
+    group : array-like
+        Group labels, same length as ``x``. Exactly two distinct non-missing
+        levels must remain after dropping incomplete rows.
+    reference : hashable | None
+        Level treated as the baseline. Defaults to the first level encountered.
+        The reported estimate is ``slope(other) - slope(reference)``.
+    covariates : pandas.DataFrame | None
+        Optional additive adjustment columns. Numeric columns are used as-is,
+        categorical ones are one-hot encoded. Unlike the partial-correlation
+        path, these enter the model rather than residualising the inputs.
+    tail : {'two', 'less', 'greater', 'one'}
+        Alternative hypothesis about the slope difference. See
+        :func:`fisher_z_correlation_difference`.
+    standardize : bool
+        Z-score ``x`` and ``y`` over the combined sample first, so the estimate
+        is a standardized slope difference.
+    rank : bool
+        Rank-transform ``x`` and ``y`` over the combined sample first, giving a
+        Spearman-flavoured (monotonic) version of the test.
+
+    Returns
+    -------
+    dict
+        ``{'p', 'estimate', 'se', 't', 'df', 'n', 'reference', 'other',
+        'slope_reference', 'slope_other'}``. Numeric entries are NaN when the
+        model cannot be fitted (too few rows, singular design, no variance).
+    """
+    nan = float("nan")
+    empty = {"p": nan, "estimate": nan, "se": nan, "t": nan, "df": 0, "n": 0,
+             "reference": None, "other": None,
+             "slope_reference": nan, "slope_other": nan}
+
+    frame = pd.DataFrame({"x": pd.to_numeric(pd.Series(x).reset_index(drop=True), errors="coerce"),
+                          "y": pd.to_numeric(pd.Series(y).reset_index(drop=True), errors="coerce"),
+                          "g": pd.Series(group).reset_index(drop=True)})
+    cov = None
+    if covariates is not None:
+        cov = pd.DataFrame(covariates).reset_index(drop=True)
+        if len(cov) != len(frame):
+            raise ValueError("interaction_slope_difference: covariates length must match x/y.")
+        frame = pd.concat([frame, cov.add_prefix("cov_")], axis=1)
+    frame = frame.dropna()
+    if frame.empty:
+        return empty
+
+    levels = list(dict.fromkeys(frame["g"].astype(object)))
+    if len(levels) != 2:
+        raise ValueError(
+            "interaction_slope_difference: need exactly two groups after dropping "
+            f"missing rows; got {len(levels)}."
+        )
+    ref = levels[0] if reference is None else reference
+    if ref not in levels:
+        raise ValueError(f"interaction_slope_difference: reference {reference!r} not among {levels}.")
+    other = [lv for lv in levels if lv != ref][0]
+
+    xv = frame["x"].to_numpy(dtype=float)
+    yv = frame["y"].to_numpy(dtype=float)
+    if rank:
+        xv = stats.rankdata(xv)
+        yv = stats.rankdata(yv)
+    if standardize:
+        xs, ys = np.std(xv), np.std(yv)
+        if xs > 0:
+            xv = (xv - np.mean(xv)) / xs
+        if ys > 0:
+            yv = (yv - np.mean(yv)) / ys
+    gv = (frame["g"].astype(object) != ref).to_numpy(dtype=float)
+
+    cov_cols = [c for c in frame.columns if str(c).startswith("cov_")]
+    cov_design = _design_from_covariates(frame[cov_cols] if cov_cols else None, len(frame))
+    design = np.column_stack([np.ones(len(frame)), xv, gv, xv * gv, cov_design])
+
+    n, k = design.shape
+    df_resid = n - k
+    if df_resid <= 0 or np.std(xv) == 0 or np.std(yv) == 0:
+        return {**empty, "n": int(n), "reference": ref, "other": other}
+    try:
+        xtx_inv = np.linalg.pinv(design.T @ design)
+        beta = xtx_inv @ design.T @ yv
+        resid = yv - design @ beta
+        sigma2 = float(resid @ resid) / df_resid
+        se = math.sqrt(max(sigma2 * float(xtx_inv[3, 3]), 0.0))
+    except (np.linalg.LinAlgError, ValueError):
+        return {**empty, "n": int(n), "reference": ref, "other": other}
+    if not np.isfinite(se) or se == 0:
+        return {**empty, "n": int(n), "reference": ref, "other": other}
+
+    t_stat = float(beta[3]) / se
+    t = _resolve_tail(tail)
+    if t == "two":
+        p = float(2.0 * stats.t.sf(abs(t_stat), df_resid))
+    elif t == "one":
+        p = float(stats.t.sf(abs(t_stat), df_resid))
+    elif t == "greater":
+        p = float(stats.t.sf(t_stat, df_resid))
+    else:
+        p = float(stats.t.cdf(t_stat, df_resid))
+
+    return {"p": p, "estimate": float(beta[3]), "se": float(se), "t": t_stat,
+            "df": int(df_resid), "n": int(n), "reference": ref, "other": other,
+            "slope_reference": float(beta[1]),
+            "slope_other": float(beta[1] + beta[3])}
+
+
 def modified_anderson(data):
     ad_stat, _, _ = anderson(data)
     ad_stat = ad_stat * (1 + (0.75 / 50) + 2.25 / (50**2))
@@ -136,6 +407,134 @@ def _coerce_groups(df_list: Iterable) -> list[pd.Series]:
         if not s.empty:
             groups.append(s)
     return groups
+
+
+def _normalize_group_stats_test(value):
+    key = _normalize_kw_correction_key("auto" if value is None else value)
+    aliases = {
+        "": "auto",
+        "default": "auto",
+        "automatic": "auto",
+        "auto": "auto",
+        "t": "auto_t",
+        "ttest": "auto_t",
+        "t_test": "auto_t",
+        "independent_t": "auto_t",
+        "independent_t_test": "auto_t",
+        "student": "student_t",
+        "students": "student_t",
+        "student_t": "student_t",
+        "students_t": "student_t",
+        "student_t_test": "student_t",
+        "welch": "welch_t",
+        "welchs": "welch_t",
+        "welch_t": "welch_t",
+        "welchs_t": "welch_t",
+        "welch_t_test": "welch_t",
+        "mann_whitney": "mannwhitney",
+        "mann_whitney_u": "mannwhitney",
+        "mwu": "mannwhitney",
+        "wilcoxon_rank_sum": "mannwhitney",
+        "wilcoxon_rank_sum_test": "mannwhitney",
+        "anova": "anova",
+        "one_way": "anova",
+        "one_way_anova": "anova",
+        "owa": "anova",
+        "welch_anova": "welch_anova",
+        "welchs_anova": "welch_anova",
+        "welch_one_way": "welch_anova",
+        "welch_one_way_anova": "welch_anova",
+        "kruskal": "kruskal",
+        "kruskal_wallis": "kruskal",
+        "kw": "kruskal",
+        "two_way": "two_way",
+        "two_way_anova": "two_way",
+        "twa": "two_way",
+        "linear": "linear_model",
+        "linear_model": "linear_model",
+        "lm": "linear_model",
+        "ols": "linear_model",
+    }
+    if key in aliases:
+        return aliases[key]
+    valid = (
+        "'auto', 'student_t', 'welch_t', 'mannwhitney', 'anova', "
+        "'welch_anova', 'kruskal', 'two_way', or 'linear_model'"
+    )
+    raise ValueError(f"stats_test must be one of: {valid}")
+
+
+def _normalize_variance_test(value):
+    if value is None or value is False:
+        return "none", "Not checked"
+    key = _normalize_kw_correction_key(value)
+    if key in _KW_UNCORRECTED_ALIASES or key in {"skip", "disabled"}:
+        return "none", "Not checked"
+    if key in {"auto", "default", "brown_forsythe", "brown_forsyth", "bf",
+               "levene_median", "median"}:
+        return "brown_forsythe", "Brown-Forsythe"
+    if key in {"levene", "levene_mean", "mean"}:
+        return "levene", "Levene"
+    if key in {"levene_trimmed", "trimmed", "trimmed_mean"}:
+        return "levene_trimmed", "Levene trimmed"
+    if key in {"bartlett", "bartletts"}:
+        return "bartlett", "Bartlett"
+    if key in {"fligner", "fligner_killeen", "fligner_killeen_test"}:
+        return "fligner", "Fligner-Killeen"
+    valid = (
+        "'Brown-Forsythe', 'Levene', 'Levene trimmed', 'Bartlett', "
+        "'Fligner-Killeen', or 'none'"
+    )
+    raise ValueError(f"variance_test must be one of: {valid}")
+
+
+def test_equal_variance(df_list, results_dict=None, *, method="brown-forsythe", alpha=0.05):
+    """Run a k-group equal-variance screen used by the auto stats selector.
+
+    Brown-Forsythe (Levene with median centre) is the default because it is more
+    robust than Bartlett when the normality screen is imperfect.
+    """
+    groups = _coerce_groups(df_list)
+    results_dict = results_dict if results_dict is not None else {}
+    method_key, label = _normalize_variance_test(method)
+    out = {
+        "method": label,
+        "statistic": float("nan"),
+        "pvalue": float("nan"),
+        "equal_var": None,
+        "alpha": float(alpha),
+    }
+    if method_key == "none":
+        out["equal_var"] = True
+        results_dict["Variance check"] = [label, np.nan]
+        return out
+    if len(groups) < 2 or any(len(g) < 2 for g in groups):
+        results_dict[f"Variance {label}"] = [float("nan"), float("nan")]
+        results_dict["Equal variance"] = ["insufficient data", np.nan]
+        return out
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            if method_key == "brown_forsythe":
+                statistic, pvalue = stats.levene(*groups, center="median")
+            elif method_key == "levene":
+                statistic, pvalue = stats.levene(*groups, center="mean")
+            elif method_key == "levene_trimmed":
+                statistic, pvalue = stats.levene(*groups, center="trimmed")
+            elif method_key == "bartlett":
+                statistic, pvalue = stats.bartlett(*groups)
+            elif method_key == "fligner":
+                statistic, pvalue = stats.fligner(*groups)
+            else:  # pragma: no cover - guarded by normalizer
+                statistic, pvalue = float("nan"), float("nan")
+        out["statistic"] = float(statistic)
+        out["pvalue"] = float(pvalue)
+        out["equal_var"] = bool(np.isfinite(pvalue) and float(pvalue) >= float(alpha))
+    except Exception as exc:
+        results_dict["Variance_error"] = [str(exc), np.nan]
+    results_dict[f"Variance {label}"] = [out["statistic"], out["pvalue"]]
+    results_dict["Equal variance"] = [out["equal_var"], out["pvalue"]]
+    return out
 
 
 def _run_tukey(*groups):
@@ -162,7 +561,16 @@ def _run_tukey(*groups):
     return TukeyResult()
 
 
-def runITTest(group1, group2, results_dict, ns="ns"):
+def runITTest(
+    group1,
+    group2,
+    results_dict,
+    ns="ns",
+    *,
+    equal_var=None,
+    variance_test="brown-forsythe",
+    variance_alpha=0.05,
+):
     g1 = pd.to_numeric(pd.Series(group1), errors="coerce").dropna()
     g2 = pd.to_numeric(pd.Series(group2), errors="coerce").dropna()
     n1, n2 = len(g1), len(g2)
@@ -172,9 +580,18 @@ def runITTest(group1, group2, results_dict, ns="ns"):
     mean1, mean2 = g1.mean(), g2.mean()
     var1, var2 = np.var(g1, ddof=1), np.var(g2, ddof=1)
     std1, std2 = np.sqrt(var1), np.sqrt(var2)
-    f_stat = var1 / var2 if var2 > 0 else np.inf
-    fp_value = stats.f.cdf(f_stat, n1 - 1, n2 - 1) if np.isfinite(f_stat) else 0.0
-    equal_var = fp_value >= 0.05
+    if equal_var is None:
+        variance = test_equal_variance(
+            [g1, g2],
+            results_dict,
+            method=variance_test,
+            alpha=variance_alpha,
+        )
+        equal_var = variance.get("equal_var")
+    if equal_var is None:
+        # If the variance screen is indeterminate, Welch is the safer default.
+        equal_var = False
+    equal_var = bool(equal_var)
     statistic, pvalue = ttest_ind_from_stats(
         mean1=mean1,
         std1=std1,
@@ -184,9 +601,13 @@ def runITTest(group1, group2, results_dict, ns="ns"):
         nobs2=n2,
         equal_var=equal_var,
     )
+    method_label = "Student's t-test" if equal_var else "Welch's t-test"
+    method_key = "Student's T Test" if equal_var else "Welch's T Test"
+    results_dict[method_key] = [float(statistic), float(pvalue)]
+    # Legacy key kept for old report/pipeline parsers.
     results_dict["Independent T Test"] = [float(statistic), float(pvalue)]
     annotation = [get_annotation(pvalue, ns)]
-    return [float(pvalue)], annotation, (float(statistic), float(pvalue)), results_dict, "Independent T Test"
+    return [float(pvalue)], annotation, (float(statistic), float(pvalue)), results_dict, method_label
 
 
 def mwu_multiple_comparisons(df_list, comparisons, results_dict, ns="ns"):
@@ -373,6 +794,82 @@ def runOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tukey", posthoc
     results_dict[posthoc_label.replace(" ", "-")] = [statistics, pvalues]
     annotations = [get_annotation(p, ns) for p in pvalues]
     return pvalues, annotations, (float(f_stat), float(pvalue)), results_dict, posthoc_label
+
+
+def _normalize_welch_owa_posthoc(posthoc):
+    key = _normalize_kw_correction_key("auto" if posthoc is None else posthoc)
+    if key in {"", "auto", "default", "tamhane", "tamhanes", "tamhane_t2",
+               "tamhanes_t2"}:
+        return "tamhane", "Tamhane T2"
+    if key in {"games_howell", "games_howells", "gh"}:
+        return "games_howell", "Games-Howell"
+    valid = "'Tamhane T2' or 'Games-Howell'"
+    raise ValueError(f"posthoc for Welch ANOVA must be one of: {valid}")
+
+
+def _run_games_howell(groups, comparisons):
+    statistics = []
+    pvalues = []
+    k = len(groups)
+    for comp in comparisons:
+        first, second = [int(part) - 1 for part in comp.split("-")]
+        a = pd.to_numeric(pd.Series(groups[first]), errors="coerce").dropna().astype(float)
+        b = pd.to_numeric(pd.Series(groups[second]), errors="coerce").dropna().astype(float)
+        if len(a) < 2 or len(b) < 2:
+            statistics.append(float("nan"))
+            pvalues.append(float("nan"))
+            continue
+        mean_diff = float(a.mean() - b.mean())
+        va = float(a.var(ddof=1))
+        vb = float(b.var(ddof=1))
+        na = float(len(a))
+        nb = float(len(b))
+        se2 = va / na + vb / nb
+        if not np.isfinite(se2) or se2 <= 0:
+            statistics.append(float("nan"))
+            pvalues.append(float("nan"))
+            continue
+        denom = ((va / na) ** 2 / (na - 1.0)) + ((vb / nb) ** 2 / (nb - 1.0))
+        df = (se2 ** 2 / denom) if denom > 0 else np.inf
+        q_stat = abs(mean_diff) / math.sqrt(0.5 * se2)
+        try:
+            pvalue = float(stats.studentized_range.sf(q_stat, k, df))
+        except Exception:
+            pvalue = float("nan")
+        statistics.append(float(q_stat))
+        pvalues.append(pvalue)
+    return statistics, pvalues
+
+
+def runWelchOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tamhane T2"):
+    groups = _coerce_groups(df_list)
+    posthoc_method, posthoc_label = _normalize_welch_owa_posthoc(posthoc)
+    if len(groups) < 2 or any(len(g) <= 1 for g in groups):
+        return [], [], (float("nan"), float("nan")), results_dict, posthoc_label
+    try:
+        from statsmodels.stats.oneway import anova_oneway
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = anova_oneway(groups, use_var="unequal", welch_correction=True)
+        f_stat = float(result.statistic)
+        pvalue = float(result.pvalue)
+    except Exception as exc:
+        results_dict["Welch_ANOVA_error"] = [str(exc), np.nan]
+        return [], [], (float("nan"), float("nan")), results_dict, posthoc_label
+    results_dict["Welch ANOVA"] = [f_stat, pvalue]
+    try:
+        if posthoc_method == "games_howell":
+            statistics, pvalues = _run_games_howell(groups, comparisons)
+        else:
+            pvalues = _extract_posthoc_matrix_pvalues(sp.posthoc_tamhane(groups), comparisons)
+            statistics = [1] * len(pvalues)
+    except Exception as exc:
+        results_dict["Welch_posthoc_error"] = [str(exc), np.nan]
+        return [], [], (f_stat, pvalue), results_dict, f"{posthoc_label} (error: {exc})"
+    results_dict[posthoc_label.replace(" ", "-")] = [statistics, pvalues]
+    annotations = [get_annotation(p, ns) for p in pvalues]
+    return pvalues, annotations, (f_stat, pvalue), results_dict, posthoc_label
 
 
 def _normalize_kw_posthoc(posthoc):
@@ -569,6 +1066,171 @@ def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", postho
     posthoc_string = f"{posthoc} {correction}"
     annotations = [get_annotation(result, ns) for result in posthoc_result]
     return posthoc_result, annotations, (float(kw_statistic), float(kw_pvalue)), results_dict, posthoc_string
+
+
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        return [str(value)]
+    try:
+        return [str(v) for v in value]
+    except TypeError:
+        return [str(value)]
+
+
+def _linear_model_covariate_frame(df, covariates, categorical_covariates):
+    covariates = _as_list(covariates)
+    categorical = {str(c) for c in _as_list(categorical_covariates)}
+    out = {}
+    terms = []
+    reference_values = {}
+    raw_to_internal = {}
+    for i, cov in enumerate(covariates):
+        if cov not in df.columns:
+            raise ValueError(f"Linear-model covariate {cov!r} was not found.")
+        internal = f"__cov_{i}__"
+        raw_to_internal[cov] = internal
+        if cov in categorical:
+            series = df[cov].astype("category")
+            out[internal] = series
+            mode = series.dropna().mode()
+            reference_values[internal] = mode.iloc[0] if len(mode) else np.nan
+            terms.append(f"C({internal})")
+        else:
+            series = pd.to_numeric(df[cov], errors="coerce")
+            out[internal] = series
+            reference_values[internal] = float(series.mean()) if series.notna().any() else np.nan
+            terms.append(internal)
+    return out, terms, reference_values, raw_to_internal
+
+
+def runLinearModel(
+    model_df,
+    outcome_col,
+    group_col,
+    comparisons,
+    results_dict,
+    ns="ns",
+    *,
+    covariates=None,
+    categorical_covariates=None,
+    posthoc_correction="auto",
+    cov_type="HC3",
+    cov_kwds=None,
+    group_order=None,
+):
+    """Group effect from an OLS model, with pairwise adjusted group contrasts."""
+    if model_df is None:
+        raise ValueError("Linear-model stats need model_df from the plotting wrapper.")
+    if outcome_col not in model_df.columns:
+        raise ValueError(f"Linear-model outcome column {outcome_col!r} was not found.")
+    if group_col not in model_df.columns:
+        raise ValueError(f"Linear-model group column {group_col!r} was not found.")
+
+    df = pd.DataFrame(model_df).copy()
+    order = [str(g) for g in (group_order or df[group_col].dropna().astype(str).unique().tolist())]
+    if len(order) < 2:
+        return [], [], (float("nan"), float("nan")), results_dict, "model contrasts"
+
+    model_data = pd.DataFrame({
+        "__outcome__": pd.to_numeric(df[outcome_col], errors="coerce"),
+        "__group__": pd.Categorical(df[group_col].astype(str), categories=order),
+    })
+    cov_frame, cov_terms, reference_values, _ = _linear_model_covariate_frame(
+        df,
+        covariates,
+        categorical_covariates,
+    )
+    for key, values in cov_frame.items():
+        model_data[key] = values
+    model_data = model_data.dropna(subset=["__outcome__", "__group__", *cov_frame.keys()])
+    if model_data["__group__"].nunique(dropna=True) < 2:
+        return [], [], (float("nan"), float("nan")), results_dict, "model contrasts"
+
+    formula = "__outcome__ ~ C(__group__)"
+    if cov_terms:
+        formula += " + " + " + ".join(cov_terms)
+    fit_kwargs = {}
+    if cov_type is not None:
+        fit_kwargs["cov_type"] = str(cov_type)
+        if cov_kwds:
+            fit_kwargs["cov_kwds"] = dict(cov_kwds)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fitted = ols(formula, data=model_data).fit(**fit_kwargs)
+
+    params = list(fitted.params.index)
+    group_terms = [name for name in params if name.startswith("C(__group__)")]
+    overall_stat = float("nan")
+    overall_p = float("nan")
+    if group_terms:
+        contrast = np.zeros((len(group_terms), len(params)), dtype=float)
+        for row_idx, name in enumerate(group_terms):
+            contrast[row_idx, params.index(name)] = 1.0
+        try:
+            wald = fitted.wald_test(contrast, scalar=True)
+            overall_stat = float(np.asarray(wald.statistic).squeeze())
+            overall_p = float(np.asarray(wald.pvalue).squeeze())
+        except Exception as exc:
+            results_dict["Linear_Model_overall_error"] = [str(exc), np.nan]
+    results_dict["Linear Model"] = [overall_stat, overall_p]
+
+    try:
+        from patsy import build_design_matrices
+
+        pred_rows = []
+        for group in order:
+            row = {"__group__": group}
+            row.update(reference_values)
+            pred_rows.append(row)
+        pred_df = pd.DataFrame(pred_rows)
+        pred_df["__group__"] = pd.Categorical(pred_df["__group__"], categories=order)
+        design = build_design_matrices(
+            [fitted.model.data.design_info],
+            pred_df,
+            return_type="dataframe",
+        )[0]
+        exog_by_group = {
+            order[i]: np.asarray(design.iloc[i, :], dtype=float)
+            for i in range(len(order))
+        }
+        beta = np.asarray(fitted.params, dtype=float)
+        cov = np.asarray(fitted.cov_params(), dtype=float)
+    except Exception as exc:
+        results_dict["Linear_Model_prediction_error"] = [str(exc), np.nan]
+        return [], [], (overall_stat, overall_p), results_dict, "model contrasts"
+
+    statistics = []
+    raw_pvalues = []
+    for comparison in comparisons:
+        first, second = [int(part) - 1 for part in comparison.split("-")]
+        if not (0 <= first < len(order) and 0 <= second < len(order)):
+            statistics.append(float("nan"))
+            raw_pvalues.append(float("nan"))
+            continue
+        contrast = exog_by_group[order[second]] - exog_by_group[order[first]]
+        estimate = float(np.dot(contrast, beta))
+        variance = float(np.dot(contrast, np.dot(cov, contrast)))
+        if not np.isfinite(variance) or variance <= 0:
+            statistics.append(float("nan"))
+            raw_pvalues.append(float("nan"))
+            continue
+        se = math.sqrt(variance)
+        t_stat = estimate / se
+        df_resid = float(getattr(fitted, "df_resid", np.nan))
+        pvalue = 2.0 * stats.t.sf(abs(t_stat), df_resid) if np.isfinite(df_resid) else 2.0 * stats.norm.sf(abs(t_stat))
+        statistics.append(float(t_stat))
+        raw_pvalues.append(float(pvalue))
+
+    correction_method, correction = _normalize_kw_correction(posthoc_correction, len(comparisons))
+    pvalues = _apply_kw_correction(raw_pvalues, correction_method)
+    results_dict["Linear-Model-Contrasts-Uncorrected"] = [statistics, raw_pvalues]
+    results_dict[f"Linear-Model-Contrasts-{correction}"] = [statistics, pvalues]
+    annotations = [get_annotation(p, ns) for p in pvalues]
+    cov_label = f" {cov_type}" if cov_type else ""
+    posthoc_string = f"model contrasts{cov_label} {correction}".strip()
+    return pvalues, annotations, (overall_stat, overall_p), results_dict, posthoc_string
 
 
 def runTWA(experiment, column, factors=None, comparisons=None, results_dict=None, ns="ns"):
@@ -805,6 +1467,100 @@ def print_comparison_results(comparisons, condition_list, individual_results, ov
     return group_comparison_string, comparison_strings
 
 
+def draw_comparison_brackets(ax, centers, comparisons, annotations, *,
+                             base_height, pad_height, handles, visible_y_span,
+                             lw=2, offset=0.1, floor=None, color="black",
+                             star_y_offset_frac=None):
+    """Draw PyFLASH's house comparison brackets on ``ax``.
+
+    This is the single bracket renderer shared by every plot that marks
+    between-group comparisons (``plot_mean_bars`` via
+    :func:`plot_comparison_lines_from_figdata`, and the ``*_contrast``
+    slopegraphs), so the geometry cannot drift between them.
+
+    ``centers`` are the x positions of the groups; ``comparisons`` are
+    ``"<start>-<end>"`` strings using **1-based** group indices; ``annotations``
+    are the matching labels (stars, ``ns``, or numeric p-values).
+
+    Brackets are tiered: one is lifted above an earlier bracket only when their
+    horizontal spans genuinely overlap, so adjacent comparisons that merely
+    share an endpoint stay on the same tier. Non-significant / numeric labels sit
+    **above** the line while stars sit tight against it, which is what keeps an
+    ``ns`` from colliding with its own bracket.
+
+    Returns ``(top_drawn, top_line_height)``; ``top_line_height`` is ``None``
+    when nothing was drawn.
+    """
+    n = len(centers)
+    annotations = list(annotations or [])
+    comparisons = list(comparisons or [])
+    line_kws = {"lw": lw, "color": color, "zorder": 1, "clip_on": False}
+    updated_x_heights = {}
+    top_drawn = float(floor) if floor is not None else float(base_height)
+    top_line_height = None
+
+    for i, comparison in enumerate(comparisons):
+        if i >= len(annotations):
+            break
+        try:
+            start_index, end_index = [int(v) - 1 for v in str(comparison).split("-")]
+        except (TypeError, ValueError):
+            continue
+        if start_index < 0 or end_index < 0 or start_index >= n or end_index >= n:
+            continue
+        lo, hi = min(start_index, end_index), max(start_index, end_index)
+        xs_cov = centers[lo:hi + 1]
+        present = [x for x in xs_cov if x in updated_x_heights]
+        height = (
+            max(updated_x_heights[x] for x in present)
+            if len(present) >= 2
+            else base_height
+        )
+
+        x_left = centers[lo] + offset
+        x_right = centers[hi] - offset
+        ax.plot([x_left, x_left], [height, height + handles], **line_kws)
+        ax.plot([x_right, x_right], [height, height + handles], **line_kws)
+        line_height = height + handles
+        ax.plot([x_left, x_right], [line_height, line_height], **line_kws)
+        top_line_height = (
+            line_height if top_line_height is None
+            else max(top_line_height, line_height)
+        )
+        x_mid = (x_left + x_right) / 2
+        annot = annotations[i]
+        # Keep text-to-line spacing fixed in axes-relative visual units.  These
+        # fractions reproduce the original 0..20 Acrophase placement exactly.
+        text_lift = visible_y_span * 0.022
+        is_nonsig = _is_nonsignificant_annotation(annot)
+        if is_nonsig:
+            annot_y = line_height + visible_y_span * 0.0165 + text_lift
+        else:
+            if star_y_offset_frac is None:
+                star_offset = 0.0022
+            else:
+                try:
+                    star_offset = float(star_y_offset_frac)
+                except (TypeError, ValueError):
+                    star_offset = 0.0022
+            annot_y = line_height + visible_y_span * star_offset
+        ax.text(
+            x_mid, annot_y, annot,
+            ha="center",
+            va="center",
+            size=18 if is_nonsig else 35,
+            clip_on=False,
+            weight="normal" if is_nonsig else "bold",
+            color=color,
+        )
+
+        new_height = height + pad_height + handles
+        updated_x_heights.update({x: new_height for x in xs_cov})
+        top_drawn = max(top_drawn, new_height + handles)
+
+    return top_drawn, top_line_height
+
+
 def plot_comparison_lines_from_figdata(
     scatter, bar, ax,
     annotations=None, comparisons=None,
@@ -875,20 +1631,40 @@ def plot_comparison_lines_from_figdata(
         for x in centers_with_data
     ]
     max_height = max(float(np.max(y_by_center[x])) for x in centers_with_data)
-    error_heights = np.add(means, sems)
-    max_all = max(max_height, float(np.max(error_heights)))
+    upper_error_heights = np.add(means, sems)
+    # Preserve the original one-sided SEM glyph for positive bars. For negative
+    # bars only, point the same glyph downward so it remains outside the bar.
+    error_heights = np.asarray([
+        mean + sem if mean >= 0 else mean - sem
+        for mean, sem in zip(means, sems)
+    ], dtype=float)
+    max_all = max(max_height, float(np.max(upper_error_heights)))
     if max_override is not None:
         max_all = max(max_all, float(max_override))
 
-    # Ensure axis range can always contain error bars (comparisons are drawn above via clip_on=False).
+    # Preserve the original upper-limit behavior and extend the lower limit only
+    # when a signed bar's outward SEM would otherwise be clipped.
     cur_ymin, cur_ymax = ax.get_ylim()
-    min_required_top = float(np.max(error_heights)) * 1.03 if len(error_heights) > 0 else cur_ymax
+    min_required_top = float(np.max(upper_error_heights)) * 1.03 if len(upper_error_heights) > 0 else cur_ymax
     if cur_ymax < min_required_top:
         ax.set_ylim(cur_ymin, min_required_top)
+        cur_ymin, cur_ymax = ax.get_ylim()
+    if len(error_heights) > 0 and float(np.min(error_heights)) < cur_ymin:
+        ax.set_ylim(float(np.min(error_heights)) * 1.03, cur_ymax)
 
-    pad_height = max_all / pad if max_all > 0 else 1.0
+    # Comparison geometry must be independent of the metric's numeric scale.
+    # The axes have a fixed visual height, so express the first-tier gap and
+    # handle height as fractions of the visible y span.  With the historical
+    # 0..20 Acrophase axis this is numerically identical to the original code
+    # (pad_height=2, handles=0.6), while signed axes now render at the same
+    # physical size instead of shrinking their brackets.
+    cur_ymin, cur_ymax = ax.get_ylim()
+    visible_y_span = float(cur_ymax - cur_ymin)
+    if not np.isfinite(visible_y_span) or visible_y_span <= 0:
+        visible_y_span = max(abs(float(cur_ymax)), abs(float(cur_ymin)), 1.0)
+    pad_height = visible_y_span / pad
     handles = pad_height * handles_fraction
-    base_height = max_all + pad_height
+    base_height = float(cur_ymax) + pad_height
     line_kws = {"lw": lw, "color": "black", "zorder": 1, "clip_on": False}
 
     # Plot SEM lines at each bar center. Callers that already draw their own
@@ -907,49 +1683,32 @@ def plot_comparison_lines_from_figdata(
         comparisons = [f"{a}-{b}" for a, b in sorted_pairs]
 
     # Plot comparison brackets.
-    updated_x_heights = {}
-    offset = 0.1
-    top_drawn = max_all
-    for i, comparison in enumerate(comparisons):
-        if i >= len(annotations):
-            break
-        start_index, end_index = [int(v) - 1 for v in comparison.split("-")]
-        if start_index < 0 or end_index < 0 or start_index >= n or end_index >= n:
-            continue
-        lo, hi = min(start_index, end_index), max(start_index, end_index)
-        xs_cov = centers_with_data[lo:hi + 1]
-        present = [x for x in xs_cov if x in updated_x_heights]
-        # Comparisons sharing even one group need a new tier; otherwise adjacent
-        # bracket labels such as A-B and B-C can merge into one star string.
-        height = max([updated_x_heights[x] for x in present]) if present else base_height
+    top_drawn, top_line_height = draw_comparison_brackets(
+        ax, centers_with_data, comparisons, annotations,
+        base_height=base_height, pad_height=pad_height, handles=handles,
+        visible_y_span=visible_y_span, lw=lw, floor=max_all,
+    )
 
-        x_left = centers_with_data[lo] + offset
-        x_right = centers_with_data[hi] - offset
-        ax.plot([x_left, x_left], [height, height + handles], **line_kws)
-        ax.plot([x_right, x_right], [height, height + handles], **line_kws)
-        ax.plot([x_left, x_right], [height + handles, height + handles], **line_kws)
-        x_mid = (x_left + x_right) / 2
-        annot = annotations[i]
-        # Lift all annotation text slightly for better separation from bracket lines.
-        text_lift = base_height * 0.02
-        # Keep non-significant and numeric p text above the line; keep stars near the line.
-        is_nonsig = _is_nonsignificant_annotation(annot)
-        if is_nonsig:
-            annot_y = (height + handles) + base_height * 0.015 + text_lift
-        else:
-            annot_y = (height + handles) - base_height * 0.018 + text_lift
-        ax.text(
-            x_mid, annot_y, annot,
-            ha="center",
-            va="center",
-            size=18 if is_nonsig else 35,
+    if top_line_height is not None:
+        # Tight SVG export normally sizes itself to the exact glyph bounds, so
+        # an ``ns`` top label and a larger ``*`` top label produce slightly
+        # different outer canvas heights.  Reserve one fixed visual envelope
+        # above the highest tier.  The patch is fully transparent but remains
+        # part of Matplotlib's tight-bounding-box calculation.
+        x_min, x_max = ax.get_xlim()
+        x_epsilon = max(abs(float(x_max - x_min)), 1.0) * 1e-9
+        y_epsilon = visible_y_span * 1e-9
+        height_anchor = Rectangle(
+            (centers_with_data[0], top_line_height + visible_y_span * 0.07),
+            x_epsilon,
+            y_epsilon,
+            facecolor="none",
+            edgecolor="none",
+            linewidth=0,
             clip_on=False,
-            weight="normal" if is_nonsig else "bold",
         )
-
-        new_height = height + pad_height + handles
-        updated_x_heights.update({x: new_height for x in xs_cov})
-        top_drawn = max(top_drawn, new_height + handles)
+        height_anchor.set_gid("pyflash-comparison-height-anchor")
+        ax.add_patch(height_anchor)
 
     return max_all
 
@@ -1081,6 +1840,17 @@ def multipleComparisons(
     force_nonparametric=False,
     posthoc="Conover",
     posthoc_correction="auto",
+    stats_test="auto",
+    variance_test="brown-forsythe",
+    variance_alpha=0.05,
+    auto_welch=True,
+    model_df=None,
+    model_group_col=None,
+    model_value_col=None,
+    covariates=None,
+    categorical_covariates=None,
+    cov_type="HC3",
+    cov_kwds=None,
     max_override=None,
     ns="ns",
     annotate_summary=True,
@@ -1186,24 +1956,87 @@ def multipleComparisons(
         plt.close(norm_fig)
     if force_nonparametric:
         normal = False
+    variance_info = test_equal_variance(
+        valid_groups,
+        results_dict,
+        method=variance_test,
+        alpha=variance_alpha,
+    )
+    equal_variance = variance_info.get("equal_var")
+    selected_test = _normalize_group_stats_test(stats_test)
 
     try:
-        if len(valid_groups) == 2:
+        if selected_test == "linear_model":
+            if model_df is None:
+                raise ValueError("stats_test='linear_model' requires model_df/model_group_col/model_value_col.")
+            model_group_col = model_group_col or "Condition"
+            model_value_col = model_value_col or pd.Series(valid_groups[0]).name
+            results, annotations, overall, results_dict, post_hoc = runLinearModel(
+                model_df,
+                model_value_col,
+                model_group_col,
+                comparisons,
+                results_dict,
+                ns=ns,
+                covariates=covariates,
+                categorical_covariates=categorical_covariates,
+                posthoc_correction=posthoc_correction,
+                cov_type=cov_type,
+                cov_kwds=cov_kwds,
+                group_order=[
+                    _name_of(g) if not isinstance(g, str) else g
+                    for g in (group_labels or [])
+                ] or None,
+            )
+            test = "Linear Model"
+        elif len(valid_groups) == 2:
             # If either group is too small for t-test assumptions, fall back to MWU.
-            if any(len(g) <= 1 for g in valid_groups):
+            if selected_test in {"anova", "welch_anova", "kruskal", "two_way"}:
+                raise ValueError(f"stats_test={stats_test!r} needs at least three groups.")
+            if selected_test == "mannwhitney" or (
+                selected_test in {"auto", "auto_t"} and ((not normal) or any(len(g) <= 1 for g in valid_groups))
+            ):
                 results, annotations, overall, results_dict, post_hoc = mwu_multiple_comparisons(
                     valid_groups, ["1-2"], results_dict, ns
                 )
                 test = "Mann-Whitney U"
                 comparisons = ["1-2"]
             else:
+                if selected_test == "student_t":
+                    t_equal_var = True
+                elif selected_test == "welch_t":
+                    t_equal_var = False
+                else:
+                    t_equal_var = True if equal_variance is True else False
                 results, annotations, overall, results_dict, post_hoc = runITTest(
-                    valid_groups[0], valid_groups[1], results_dict, ns
+                    valid_groups[0],
+                    valid_groups[1],
+                    results_dict,
+                    ns,
+                    equal_var=t_equal_var,
+                    variance_test=variance_test,
+                    variance_alpha=variance_alpha,
                 )
-                test = "Independent T-Test"
+                test = "Student's T-Test" if t_equal_var else "Welch's T-Test"
                 comparisons = ["1-2"]
         else:
-            if (not normal) or any(len(g) <= 1 for g in valid_groups):
+            if selected_test in {"student_t", "welch_t", "mannwhitney", "auto_t"}:
+                raise ValueError(f"stats_test={stats_test!r} supports exactly two groups.")
+            use_nonparametric = (
+                selected_test == "kruskal"
+                or (selected_test == "auto" and ((not normal) or any(len(g) <= 1 for g in valid_groups)))
+            )
+            use_welch_anova = (
+                selected_test == "welch_anova"
+                or (
+                    selected_test == "auto"
+                    and normal
+                    and bool(auto_welch)
+                    and equal_variance is False
+                    and multiple_comparison == "One-Way"
+                )
+            )
+            if use_nonparametric:
                 results, annotations, overall, results_dict, post_hoc = runKW(
                     valid_groups,
                     comparisons,
@@ -1213,7 +2046,22 @@ def multipleComparisons(
                     ns=ns,
                 )
                 test = "Kruskal-Wallis"
-            elif multiple_comparison == "One-Way":
+            elif use_welch_anova:
+                welch_posthoc = posthoc
+                if _normalize_kw_correction_key(posthoc or "auto") in {
+                    "auto", "default", "conover", "conover_test", "dunn", "dunns",
+                    "dunns_test", "dunn_test", "tukey", "tukey_hsd", "hsd",
+                }:
+                    welch_posthoc = "Tamhane T2"
+                results, annotations, overall, results_dict, post_hoc = runWelchOWA(
+                    valid_groups,
+                    comparisons,
+                    results_dict,
+                    ns=ns,
+                    posthoc=welch_posthoc,
+                )
+                test = "Welch ANOVA"
+            elif selected_test == "anova" or (selected_test == "auto" and multiple_comparison == "One-Way"):
                 results, annotations, overall, results_dict, post_hoc = runOWA(
                     valid_groups,
                     comparisons,
@@ -1267,6 +2115,11 @@ def multipleComparisons(
         "Post-Hoc Test Used": post_hoc,
         "Comparisons": comp_strings,
     }
+    if isinstance(variance_info, dict) and variance_info.get("method") != "Not checked":
+        results_strings["Variance Test"] = (
+            f"{variance_info.get('method')}: p={_fmt_p(variance_info.get('pvalue'))}; "
+            f"equal_var={variance_info.get('equal_var')}"
+        )
 
     # ── Effect sizes ────────────────────────────────────────────────
     effects = {}
