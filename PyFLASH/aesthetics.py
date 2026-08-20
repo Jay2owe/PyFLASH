@@ -4,6 +4,11 @@
 applies both Matplotlib-level defaults (fonts, ticks, spines, legends, editable
 SVG text) and PyFLASH semantic defaults (condition style cycles, shared marker
 sizes, significance annotations, matrix colour maps, and overview colours).
+
+Colours are named, never spelled: every value below comes from
+:mod:`PyFLASH.palette`, which is the one module allowed to write a hex literal.
+Override a condition's colour with ``palette.declare_conditions``; override a
+figure's look with ``set_pyflash_style``.
 """
 
 from __future__ import annotations
@@ -11,6 +16,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from collections.abc import Mapping
+
+from PyFLASH import palette as _palette
+
+_matrix = _palette.matrix_colors()
 
 
 DEFAULT_PYFLASH_STYLE = {
@@ -75,9 +84,9 @@ DEFAULT_PYFLASH_STYLE = {
 
     # Shared matrix defaults.
     "matrix_cmap": "coolwarm",
-    "matrix_annotation_color": "black",
-    "matrix_value_color": "black",
-    "matrix_nan_text_color": "#7A7A7A",
+    "matrix_annotation_color": _matrix["annotation"],
+    "matrix_value_color": _matrix["value"],
+    "matrix_nan_text_color": _matrix["nan_text"],
     "x_tick_label_rotation": 60,
     "x_tick_label_ha": "right",
     "matrix_x_tick_rotation": 60,
@@ -95,18 +104,8 @@ DEFAULT_PYFLASH_STYLE = {
     "significance_ns": "ns",
 
     # Overview/status colours. Integer keys are status codes from plotting.py.
-    "audit_status_colors": {
-        0: "#e6e6e6",
-        1: "#c0392b",
-        2: "#0e8f8f",
-        3: "#d98a17",
-    },
-    "scorecard_grade_colors": {
-        "green": "#2e7d32",
-        "amber": "#d98a17",
-        "red": "#c0392b",
-        "grey": "#9e9e9e",
-    },
+    "audit_status_colors": _palette.audit_status_colors(),
+    "scorecard_grade_colors": _palette.scorecard_grade_colors(),
 }
 
 _PYFLASH_STYLE = deepcopy(DEFAULT_PYFLASH_STYLE)

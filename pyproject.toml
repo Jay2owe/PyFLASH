@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "PyFLASH-analysis"
-version = "0.1.4"
+version = "0.2.0"
 description = "ImageJ confocal microscopy data processing and analysis pipeline"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     { name = "Jamie Malcolm", email = "jamiemalcolm12@gmail.com" },
 ]
@@ -25,7 +25,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -51,6 +50,13 @@ windows = ["pywin32"]
 ui = ["streamlit>=1.36", "pyyaml>=6"]   # pyyaml needed by run_spec for YAML specs
 spatial = ["pointpats>=2.4"]            # Ripley's K / spatial point-pattern stats
 estimation = ["dabest>=2024.3"]         # Gardner-Altman estimation plots
+# The agent chassis behind the /pyflash skill: run records, the resident
+# caching worker, the reproducibility notebook, the two-write audit index.
+# Optional on purpose. PyFLASH itself never imports it -- the package must
+# stay installable from PyPI by someone who has never heard of the kit, and
+# the house style lives in PyFLASH.aesthetics rather than being borrowed from
+# it. tests/test_style_conformance.py pins the two together where both exist.
+agent = ["analysis-kit>=0.1.0"]
 
 [project.scripts]
 pyflash-ui = "PyFLASH.ui:main"

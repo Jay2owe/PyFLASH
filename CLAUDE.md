@@ -10,23 +10,30 @@ PyFLASH has an agentify-pattern control layer so an agent can make any plot from
 natural-language request, and extend the package when a request needs a plot that
 doesn't exist yet. Eight layers:
 
-1. **Registry** — `PyFLASH/spec.py::PLOT_REGISTRY` (YAML short-name → `plot_*`).
-2. **Runner** — `.claude/skills/pyflash/scripts/pyflash_runner.py`: a thin JSON CLI
+1. **Registry** — `PyFLASH/spec.py::PLOT_REGISTRY` (YAML short-name → `plot_*`),
+   with `PyFLASH/param_docs.py` supplying what a signature cannot say. Declared
+   entries carry units and meanings for the ~90 arguments that recur across the
+   registry; everything else is derived from the live signature by
+   `param_docs.describe_all`, so a new argument is documented the moment it
+   exists. `describe` and the generated reference both read from there.
+2. **Runner** — `~/.claude/skills/pyflash/scripts/pyflash_runner.py` (global, runnable
+   from any directory): a thin JSON CLI
    (`submit`/`run`/`inspect`/`discover`/`script`/`status`/`shutdown`). Dispatches to any
    `plot_*` in `PyFLASH.plotting` by name; keeps the 288 MB `batch1.pkl` cached in a
    resident worker. Always returns the `equivalent_script`.
    Registry aliases may also point to module-qualified pipeline callables such as
    `PyFLASH.pipeline.adjusted_correlation`; the runner resolves those through
    `PyFLASH.spec.PLOT_REGISTRY`.
-3. **Control skill** — `.claude/skills/pyflash/` (`SKILL.md` + `reference/*.md`): the
+3. **Control skill** — `~/.claude/skills/pyflash/` (`SKILL.md` + `references/*.md`): the
    loop that turns a request into a call, runs it, shows the PNG preview, prints the code.
    Drive it with **`/pyflash`**.
 4. **Reference refresh hook** — `.claude/settings.json` runs
    `python scripts/update_pyflash_references.py --if-needed --quiet` after Claude
    write/edit tools. The script refreshes the generated live-signature block in
-   `.claude/skills/pyflash/reference/plot-functions.md` and mirrors the Claude reference
-   files to `.codex/skills/pyflash/references/`. Agents still maintain the hand-written
-   teaching prose and catalog rows.
+   `~/.claude/skills/pyflash/references/plot-functions.md`. There is no longer a Codex
+   mirror to keep in step: `~/.codex/skills` and `~/.claude/skills` are the same shared
+   folder, and `.codex/skills/pyflash/references/` is a junction into it. Agents still
+   maintain the hand-written teaching prose and catalog rows.
 5. **Self-extension skill** — `.claude/skills/pyflash-extend/`: how to add a capability
    when `/pyflash` can't (register/document an existing function, or add a new `plot_*`).
    Use **`/pyflash-extend`**. The detailed plot-implementation contract lives in the global
@@ -71,6 +78,46 @@ doesn't exist yet. Eight layers:
 
 `discover` is the source of truth for "what plots exist" — the generated reference block
 self-heals against it through `scripts/update_pyflash_references.py`.
+
+## PyFLASH owns its own style, and stands alone
+
+**PyFLASH must stay installable by someone who has never heard of this lab.** It
+is published — PyPI as `PyFLASH-analysis`, BSD-3, a readthedocs site — so it
+imports nothing from `analysis-kit`, the internal shared package. The kit is an
+optional `agent` extra because the `/pyflash` *skill* needs it; the *package*
+never does. Adding a hard dependency on an unpublished package breaks
+`pip install` for every outside user, silently and completely.
+
+- **`PyFLASH/palette.py` is the only module allowed to write a hex literal.**
+  Four tables: `HOUSE` (figure furniture), `PIPELINE` (the saturated palette a
+  condition is named from, exposed as `Config.COLORS`), `AUTO` (Okabe-Ito,
+  colourblind-safe, for a condition nobody named), and whatever the project
+  declares at run time.
+- **A project overrides the house rules for its conditions**, not for the
+  figure: `palette.declare_conditions(WT="teal", KO="#ff00aa")` then
+  `condition_colour("WT")`. Reachable only through `condition_colour`, so a
+  condition named `black` cannot repaint every axis label.
+- **Lookup order differs on purpose.** `colour("red")` is the muted house red;
+  `condition_colour("red")` is the loud pipeline red, because that is what
+  `condition(..., color="red")` has always meant. Four names collide — `red`,
+  `orange`, `blue`, `black` — and `palette._CONDITION_ORDER` is why they can.
+- **A pickled condition's colour must never move. This outranks everything
+  else in this section.** A condition's colour is resolved once, when the
+  condition is built, and pickled onto the object. Across Jamie's five batches,
+  26 of 27 are frozen `#rrggbb` and no palette change can reach them — but
+  `CK1I.pkl` stores the *name* `"black"`, and a name is re-resolved every time
+  that batch is plotted. So the rule is not "never change the palette"; it is
+  **a name a pickle may hold must always resolve to the value it had when that
+  pickle was written**. `PICKLED_CONDITION_COLOURS` in
+  `tests/test_style_conformance.py` pins the whole `PIPELINE` table by value,
+  one test per name, and asserts the house palette can never capture a name out
+  from under it. Do not "tidy" `PIPELINE`.
+- **`tests/test_style_conformance.py` pins PyFLASH to the shared kit** where the
+  kit is installed, and skips cleanly where it is not. Two copies of a palette
+  drift; that test is what makes the copy safe.
+- `plotting.py` still holds ~109 per-plot decoration colours. They are
+  deliberately not swept — a bulk substitution inside f-strings is its own job
+  with its own regression risk, and the conformance test's scope says so.
 Keep the registry in the package and the runner dumb; new `plot_*` functions are usable the
 moment they exist, no runner edit.
 Registered pipeline callables are supported the same way through `PLOT_REGISTRY`.

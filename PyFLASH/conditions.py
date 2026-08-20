@@ -6,18 +6,13 @@ import difflib
 from collections import OrderedDict
 from functools import reduce
 
+from PyFLASH import palette as _palette
 
-# Okabe-Ito colorblind-safe palette for auto-assignment
-_AUTO_PALETTE = [
-    '#E69F00',  # orange
-    '#56B4E9',  # sky blue
-    '#009E73',  # bluish green
-    '#F0E442',  # yellow
-    '#0072B2',  # blue
-    '#D55E00',  # vermilion
-    '#CC79A7',  # reddish purple
-    '#000000',  # black
-]
+
+# Okabe-Ito colorblind-safe palette for auto-assignment. The values live in
+# PyFLASH.palette; this name is kept because it is what the tests and a few
+# scripts reach for.
+_AUTO_PALETTE = list(_palette.AUTO_CYCLE)
 
 # A condition's *style* is its second visual channel, alongside ``color``.
 # ``"fill"`` is the default solid bar; ``"hollow"`` draws an outline only; any
@@ -47,27 +42,15 @@ def _resolve_color(color, index=0):
     """Resolve a color name, hex string, or None to a hex color.
 
     - None → auto-assign from ``_AUTO_PALETTE`` by *index*
+    - A name this project declared via ``palette.declare_conditions`` → its value
     - A key in ``Config.COLORS`` (e.g. ``"red"``, ``"dark_cyan"``) → its hex value
     - A CSS/matplotlib color name (e.g. ``"steelblue"``) → converted to hex
     - An existing hex string (e.g. ``"#ff0000"``) → passed through unchanged
+
+    The lookup itself lives in :func:`PyFLASH.palette.condition_colour`, which
+    is the public form of this and the one a project overrides.
     """
-    if color is None:
-        return _AUTO_PALETTE[index % len(_AUTO_PALETTE)]
-
-    if isinstance(color, str) and not color.startswith('#'):
-        # Try Config.COLORS first (pipeline-specific palette)
-        from PyFLASH.config import Config
-        resolved = Config.COLORS.get(color)
-        if resolved is not None:
-            return resolved
-        # Fall back to matplotlib CSS names
-        try:
-            import matplotlib.colors as mcolors
-            return mcolors.to_hex(color)
-        except (ImportError, ValueError):
-            pass
-
-    return color
+    return _palette.condition_colour(color, index)
 
 
 class condition:

@@ -9,6 +9,8 @@ import warnings
 import logging
 from collections import defaultdict
 
+from PyFLASH.palette import PIPELINE as PIPELINE_COLORS
+
 warnings.filterwarnings('ignore')
 logging.basicConfig(level=logging.ERROR)
 logging.getLogger('matplotlib').setLevel(logging.ERROR)
@@ -43,25 +45,10 @@ class Config:
     CUBED = '³'
 
     # ── Hex color palette ──────────────────────────────────────────────
-    COLORS = {
-        'red': '#ff0000',
-        'cyan': '#42f5f5',
-        'dark_cyan': '#0e3231',
-        'dark_red': '#240004',
-        'orange': '#ff8400',
-        'blue': '#40ffff',
-        'dark_blue': '#03358c',
-        'magenta': '#ff47f0',
-        'dark_magenta': '#8a2481',
-        'green': '#00ff00',
-        'dark_green': '#002404',
-        'yellow': '#FFFB83',
-        'dark_yellow': '#414100',
-        'grey': '#d4d4d4',
-        'dark_grey': '#d4d4d4',
-        'black': '#000000',
-        'purple': '#4d0254',
-    }
+    # The values live in PyFLASH.palette, which is the one module allowed to
+    # spell a colour out. This name stays because scripts going back years
+    # write `Config.COLORS['dark_cyan']`, and it is the same dict either way.
+    COLORS = PIPELINE_COLORS
 
     # ── Save mode ──────────────────────────────────────────────────────
     SAVE_MODE = True   # False to skip saving figures

@@ -36,12 +36,38 @@ from PyFLASH.spec import (
 from PyFLASH.ui import figures, services
 
 
-def _load_local_pyflash_runner(module_name):
-    runner_path = (
+def _pyflash_runner_path():
+    """Where the /pyflash runner lives.
+
+    The skill is global now — one copy in the shared-skills folder, used from
+    any directory — so look there first. The in-repo path is kept as a fallback
+    for a checkout that still has its own copy, and both missing means a public
+    clone with no skill at all.
+    """
+    for candidate in (
+        Path.home() / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py",
         Path(__file__).resolve().parents[1]
-        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
-    )
-    if not runner_path.exists():
+        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py",
+    ):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _pyflash_reference_dir():
+    for candidate in (
+        Path.home() / ".claude" / "skills" / "pyflash" / "references",
+        Path(__file__).resolve().parents[1]
+        / ".claude" / "skills" / "pyflash" / "reference",
+    ):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _load_local_pyflash_runner(module_name):
+    runner_path = _pyflash_runner_path()
+    if runner_path is None:
         pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
     spec = importlib.util.spec_from_file_location(module_name, runner_path)
     runner = importlib.util.module_from_spec(spec)
@@ -176,11 +202,8 @@ def test_resolve_func_supports_pipeline_module_targets():
 
 
 def test_pyflash_runner_resolves_pipeline_registry_aliases():
-    runner_path = (
-        Path(__file__).resolve().parents[1]
-        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
-    )
-    if not runner_path.exists():
+    runner_path = _pyflash_runner_path()
+    if runner_path is None:
         pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
     spec = importlib.util.spec_from_file_location("pyflash_runner_test", runner_path)
     runner = importlib.util.module_from_spec(spec)
@@ -197,11 +220,8 @@ def test_pyflash_runner_resolves_pipeline_registry_aliases():
 
 
 def test_pyflash_runner_safe_run_id_cannot_escape_store():
-    runner_path = (
-        Path(__file__).resolve().parents[1]
-        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
-    )
-    if not runner_path.exists():
+    runner_path = _pyflash_runner_path()
+    if runner_path is None:
         pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
     spec = importlib.util.spec_from_file_location("pyflash_runner_safeid", runner_path)
     runner = importlib.util.module_from_spec(spec)
@@ -228,11 +248,8 @@ def test_pyflash_runner_safe_run_id_cannot_escape_store():
 
 
 def test_pyflash_runner_appends_reproducibility_notebook(tmp_path):
-    runner_path = (
-        Path(__file__).resolve().parents[1]
-        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
-    )
-    if not runner_path.exists():
+    runner_path = _pyflash_runner_path()
+    if runner_path is None:
         pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
     spec = importlib.util.spec_from_file_location("pyflash_runner_notebook", runner_path)
     runner = importlib.util.module_from_spec(spec)
@@ -385,11 +402,8 @@ def test_pyflash_runner_run_request_fails_on_notebook_error(tmp_path, monkeypatc
 
 
 def test_pyflash_runner_describe_status_for_func():
-    runner_path = (
-        Path(__file__).resolve().parents[1]
-        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
-    )
-    if not runner_path.exists():
+    runner_path = _pyflash_runner_path()
+    if runner_path is None:
         pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
     spec_mod = importlib.util.spec_from_file_location("pyflash_runner_dsf", runner_path)
     runner = importlib.util.module_from_spec(spec_mod)
@@ -413,11 +427,8 @@ def test_pyflash_runner_describe_status_for_func():
 
 
 def test_pyflash_runner_discover_includes_registered_pipeline_signatures():
-    runner_path = (
-        Path(__file__).resolve().parents[1]
-        / ".claude" / "skills" / "pyflash" / "scripts" / "pyflash_runner.py"
-    )
-    if not runner_path.exists():
+    runner_path = _pyflash_runner_path()
+    if runner_path is None:
         pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
     spec_mod = importlib.util.spec_from_file_location("pyflash_runner_discover", runner_path)
     runner = importlib.util.module_from_spec(spec_mod)
@@ -454,7 +465,8 @@ def test_pyflash_runner_discover_includes_registered_pipeline_signatures():
 def test_pyflash_reference_updater_is_current():
     root = Path(__file__).resolve().parents[1]
     script = root / "scripts" / "update_pyflash_references.py"
-    if not (root / ".claude" / "skills" / "pyflash" / "reference" / "plot-functions.md").exists():
+    reference_dir = _pyflash_reference_dir()
+    if reference_dir is None or not (reference_dir / "plot-functions.md").exists():
         pytest.skip("pyflash skill references are local to this project")
 
     result = subprocess.run(
