@@ -239,6 +239,45 @@ def test_the_status_and_grade_tables_match_the_kits():
     assert palette.matrix_colors() == kit_palette.matrix_colors()
 
 
+def test_a_figure_drawn_through_this_project_passes_the_kits_conformance_check():
+    """Check the output, not just the constants.
+
+    Every other test here asks whether two tables of numbers still agree. None
+    of them asks whether a figure PyFLASH actually draws *comes out* right —
+    and that is the failure somebody would notice, because it is the one you
+    can see.
+
+    The route matters: the style is applied through PyFLASH's own front door,
+    ``apply_pyflash_matplotlib_style``, not through the kit's ``apply``. That
+    is what makes this a test of this project rather than of the kit. If
+    PyFLASH's application path ever stops setting what its own style declares,
+    this goes red even though every value in both tables is still correct.
+
+    Borrowed from PyMicroglia, which had this and the other two consumers did
+    not.
+    """
+
+    from analysis_kit.style import conformance
+
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    from PyFLASH.aesthetics import apply_pyflash_matplotlib_style
+
+    with plt.rc_context():
+        apply_pyflash_matplotlib_style()
+        figure, axes = plt.subplots()
+        try:
+            axes.plot([0, 1, 2], [0, 1, 0], color=palette.colour("teal"))
+            axes.set_xlabel("weeks")
+            axes.set_ylabel("IntDen / 0.1mm3")
+            axes.set_title("conformance probe")
+            conformance.assert_conformant(figure=figure, name="pyflash")
+        finally:
+            plt.close(figure)
+
+
 def test_the_shared_style_is_conformant_in_its_own_right():
     """The kit's own check, run from here so a drift in the shared package
     fails PyFLASH's suite rather than being noticed in a figure months later."""
