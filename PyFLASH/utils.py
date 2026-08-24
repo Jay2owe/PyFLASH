@@ -39,6 +39,36 @@ def unregister_fig_save_observer(callback):
         pass
 
 
+_FIG_SAVED_OBSERVERS = []
+
+
+def register_fig_saved_observer(callback):
+    """Register a post-write observer, called once the file exists (idempotent).
+
+    Distinct from ``register_fig_save_observer``, which fires with the live
+    figure *before* the write so a montage can capture it. Anything that needs
+    to read, hash or annotate the written file belongs here instead.
+    """
+    if callback not in _FIG_SAVED_OBSERVERS:
+        _FIG_SAVED_OBSERVERS.append(callback)
+
+
+def unregister_fig_saved_observer(callback):
+    """Remove a previously-registered post-write observer (no-op if absent)."""
+    try:
+        _FIG_SAVED_OBSERVERS.remove(callback)
+    except ValueError:
+        pass
+
+
+def _notify_fig_saved_observers(full_path, image_name, subfolder, key):
+    for cb in list(_FIG_SAVED_OBSERVERS):
+        try:
+            cb(full_path, image_name, subfolder, key)
+        except Exception:
+            pass
+
+
 def _notify_fig_save_observers(figure, full_path, image_name, subfolder, key):
     for cb in list(_FIG_SAVE_OBSERVERS):
         try:
@@ -1276,6 +1306,9 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             )
             normalize_pyflash_svg_canvas(save_full_path, save_bbox=save_bbox)
 
+        if _FIG_SAVED_OBSERVERS:
+            _notify_fig_saved_observers(full_path, image_name, subfolder, bool(montage))
+
     if verbose:
         _log.confirm(f"Figure saved to {full_path}")
     return full_path
@@ -1318,3 +1351,22 @@ def replace_week_int(s):
         return f"Week{word_map.get(num, num)}"
 
     return re.sub(r"(?i)week\s*([248])(?!\d)", _repl, value)
+
+
+def _register_provenance_observer():
+    """Record what produced every saved figure.
+
+    Registered here rather than in ``PyFLASH/__init__`` so the package keeps its
+    lazy submodule loading: anything that can call ``save_fig`` has already
+    imported this module. ``provenance`` imports nothing from here at module
+    level, so there is no cycle.
+    """
+    try:
+        from PyFLASH import provenance
+
+        register_fig_saved_observer(provenance._observer)
+    except Exception:
+        pass
+
+
+_register_provenance_observer()
