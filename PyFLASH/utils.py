@@ -1294,9 +1294,20 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         # Guarantee editable text at the single figure choke point regardless of
         # what rcParams the caller left active: every string stays a real <text>
         # element and mathtext renders in the body font (not vectorised glyphs).
+        # Carry the producing call inside the file as well as in the folder's
+        # figures.json: a manifest is keyed by filename, so a renamed or copied
+        # figure loses the entry but keeps what is embedded in the SVG.
+        try:
+            from PyFLASH import provenance
+
+            _svg_metadata = provenance.svg_metadata(full_path, image_name)
+        except Exception:
+            _svg_metadata = {}
+
         with plt.rc_context({'svg.fonttype': 'none', 'mathtext.default': 'regular'}):
             figure.savefig(
                 save_full_path,
+                metadata=_svg_metadata or None,
                 **pyflash_savefig_kwargs(
                     bbox_inches=save_bbox,
                     pad_inches=pad_inches,

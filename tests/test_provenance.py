@@ -149,3 +149,60 @@ def test_summarise_bounds_every_kind_of_argument():
     assert provenance.summarise([1, "a"]) == [1, "a"]
     assert provenance.summarise(pd.Series([1, 2, 3])) == "Series(3)"
     assert provenance.summarise({"a": 1}) == {"a": 1}
+
+
+def test_the_producer_is_embedded_in_the_svg_itself(tmp_path, plotting_module, figure):
+    plotting_module.plot_marker_counts(figure, str(tmp_path), "embedded", marker="CK1d", by="genotype")
+
+    svg = tmp_path / "embedded.svg"
+    assert "<dc:description>" in svg.read_text(encoding="utf-8"), (
+        "the canvas normaliser must not strip the metadata element"
+    )
+    record = provenance.embedded_record(svg)
+    assert record["function"].endswith(".plot_marker_counts")
+    assert record["args"] == {"marker": "CK1d", "by": "genotype"}
+    assert record["pyflash_version"] != "unknown"
+    assert "sha256" not in record, "a file cannot carry its own hash"
+
+
+def test_embedded_and_manifest_records_agree(tmp_path, plotting_module, figure):
+    plotting_module.plot_marker_counts(figure, str(tmp_path), "both", marker="Iba1")
+    svg = tmp_path / "both.svg"
+    embedded = provenance.embedded_record(svg)
+    listed = provenance.record_for(svg)
+    assert embedded["function"] == listed["function"]
+    assert embedded["args"] == listed["args"]
+
+
+def test_column_names_stay_out_of_the_figure_file(tmp_path, plotting_module, figure):
+    data = pd.DataFrame({"count": [1, 2], "unpublished_marker": [3, 4]})
+    plotting_module.plot_marker_counts(figure, str(tmp_path), "leaky", data=data)
+
+    svg = (tmp_path / "leaky.svg").read_text(encoding="utf-8")
+    assert "unpublished_marker" not in svg, "column names are data and must not travel inside a figure"
+    assert provenance.embedded_record(tmp_path / "leaky.svg")["args"]["data"] == "DataFrame(2x2)"
+    listed = _manifest(tmp_path)["figures"]["leaky.svg"]["args"]["data"]
+    assert "unpublished_marker" in listed, "the manifest sits beside the data, so it keeps the detail"
+
+
+def test_a_renamed_figure_keeps_its_embedded_producer(tmp_path, plotting_module, figure):
+    plotting_module.plot_marker_counts(figure, str(tmp_path), "before", marker="GFAP")
+    moved = tmp_path / "presentation"
+    moved.mkdir()
+    (tmp_path / "before.svg").rename(moved / "Figure 3b.svg")
+
+    assert provenance.record_for(moved / "Figure 3b.svg") is None
+    assert provenance.embedded_record(moved / "Figure 3b.svg")["args"] == {"marker": "GFAP"}
+
+
+def test_embedded_record_ignores_a_file_without_provenance(tmp_path):
+    plain = tmp_path / "plain.svg"
+    plain.write_text("<svg xmlns='http://www.w3.org/2000/svg'></svg>", encoding="utf-8")
+    assert provenance.embedded_record(plain) is None
+    assert provenance.embedded_record(tmp_path / "absent.svg") is None
+
+
+def test_embedding_survives_special_characters(tmp_path, plotting_module, figure):
+    plotting_module.plot_marker_counts(figure, str(tmp_path), "greek", marker="CK1<d> & β")
+    record = provenance.embedded_record(tmp_path / "greek.svg")
+    assert record["args"]["marker"] == "CK1<d> & β"

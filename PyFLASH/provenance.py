@@ -47,6 +47,10 @@ _PLUMBING = {
 
 _STATE: dict = {"active": False, "request": None, "batch": None}
 
+# Described once before the write so the copy embedded in the SVG and the copy in
+# figures.json can never disagree, then consumed by the post-write observer.
+_PENDING: dict = {}
+
 
 def is_active() -> bool:
     """True when a caller has armed an exact request for the plots it is about to make."""
@@ -65,13 +69,26 @@ def disarm() -> None:
     _STATE.update({"active": False, "request": None, "batch": None})
 
 
+_VERSION_CACHE: list = []
+
+
 def _version() -> str:
+    """The installed distribution version; the package exposes no ``__version__``."""
+    if _VERSION_CACHE:
+        return _VERSION_CACHE[0]
+    found = "unknown"
     try:
         import PyFLASH
 
-        return str(getattr(PyFLASH, "__version__", "") or "unknown")
+        found = str(getattr(PyFLASH, "__version__", "") or "")
+        if not found:
+            from importlib.metadata import version
+
+            found = str(version("PyFLASH-analysis"))
     except Exception:
-        return "unknown"
+        found = found or "unknown"
+    _VERSION_CACHE.append(found or "unknown")
+    return _VERSION_CACHE[0]
 
 
 def summarise(value):
@@ -237,6 +254,101 @@ def record(full_path, *, function=None, args=None, batch=None) -> None:
         pass
 
 
+def describe_save(full_path, image_name=None):
+    """Describe the call now, for embedding, and hold it for the manifest.
+
+    Called before the write so the description can go inside the file; the
+    post-write observer reuses the same description rather than walking the
+    stack a second time and risking a different answer.
+    """
+    called = describe_caller() or {}
+    batch = _STATE["batch"]
+    if batch is None:
+        batch = (called.get("args") or {}).get("batch")
+    described = {
+        "function": called.get("function"),
+        "args": called.get("args"),
+        "batch": batch,
+    }
+    try:
+        _PENDING[os.path.normcase(str(full_path))] = described
+    except Exception:
+        pass
+    return described
+
+
+def _without_column_names(args):
+    """Drop ``columns=[...]`` from a summarised argument.
+
+    Column names are data. ``figures.json`` sits in the analysis folder beside
+    the data itself, so listing them there reveals nothing new - but a figure
+    travels, and its text is searchable, so the embedded copy carries the shape
+    only. It also keeps the file's text to what the picture shows: a test
+    asserting a column was not plotted should not be defeated by metadata.
+    """
+    if not isinstance(args, dict):
+        return args
+    trimmed = {}
+    for key, value in args.items():
+        if isinstance(value, str) and " columns=[" in value:
+            value = value.split(" columns=[", 1)[0]
+        trimmed[key] = value
+    return trimmed
+
+
+def svg_metadata(full_path, image_name=None):
+    """``savefig(metadata=...)`` for an SVG, carrying the producer inside the file.
+
+    The SVG writer accepts only Dublin Core keys, so the producer travels as
+    JSON in ``Description``. Embedded rather than only listed in
+    ``figures.json`` because a manifest is keyed by filename: renaming a figure,
+    or copying it into a slide folder, loses the entry but not the file.
+
+    The figure's own hash is deliberately absent - a file cannot contain its own
+    hash. That stays in the manifest.
+    """
+    try:
+        described = describe_save(full_path, image_name)
+        payload = {key: value for key, value in described.items() if value}
+        if payload.get("args"):
+            payload["args"] = _without_column_names(payload["args"])
+        if _STATE["active"] and _STATE["request"] is not None:
+            payload["request"] = summarise(_STATE["request"])
+        payload["pyflash_version"] = _version()
+        metadata = {"Creator": "PyFLASH {} provenance".format(_version())}
+        if image_name:
+            metadata["Title"] = str(image_name)
+        metadata["Description"] = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return metadata
+    except Exception:
+        return {}
+
+
+def embedded_record(svg_path):
+    """Read back the producer embedded in an SVG, or ``None``.
+
+    Prefers the embedded copy over ``figures.json`` when a figure has been moved
+    or renamed away from the manifest that described it.
+    """
+    try:
+        with open(str(svg_path), encoding="utf-8") as stream:
+            head = stream.read(65536)
+        start = head.find("<dc:description>")
+        if start < 0:
+            return None
+        start += len("<dc:description>")
+        end = head.find("</dc:description>", start)
+        if end < 0:
+            return None
+        text = head[start:end]
+        for entity, literal in (("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&apos;", "'"), ("&amp;", "&")):
+            text = text.replace(entity, literal)
+        record = json.loads(text)
+        return record if isinstance(record, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def _observer(full_path, image_name, subfolder, key) -> None:
     """Post-write ``save_fig`` observer: describe the call that produced this file.
 
@@ -244,15 +356,15 @@ def _observer(full_path, image_name, subfolder, key) -> None:
     pre-write hook, because the manifest records the written file's hash.
     """
     try:
-        called = describe_caller() or {}
-        batch = _STATE["batch"]
-        if batch is None:
-            batch = (called.get("args") or {}).get("batch")
+        described = _PENDING.pop(os.path.normcase(str(full_path)), None)
+        if described is None:
+            described = describe_save(full_path, image_name)
+            _PENDING.pop(os.path.normcase(str(full_path)), None)
         record(
             full_path,
-            function=called.get("function"),
-            args=called.get("args"),
-            batch=batch,
+            function=described.get("function"),
+            args=described.get("args"),
+            batch=described.get("batch"),
         )
     except Exception:
         pass
