@@ -302,8 +302,20 @@ def build_montage(panels, fig_dir, *, title, filename=None,
     out_path = os.path.join(fig_dir, f"{filename}.png")
     _pio.makedirs(fig_dir)
     try:
-        fig.savefig(_pio.windows_extended_path(out_path), format="png",
-                    dpi=150, facecolor="white")
+        from PyFLASH import utils
+
+        utils.save_fig(
+            fig,
+            fig_dir,
+            filename,
+            figure_formats=("png",),
+            dpi=150,
+            rasterize=False,
+            save_bbox="tight",
+            transparent=False,
+            sanitize_name=False,
+            verbose=False,
+        )
     finally:
         plt.close(fig)
     return out_path

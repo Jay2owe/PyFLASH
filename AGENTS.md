@@ -39,14 +39,20 @@ Keep the registry in the package and the runner dumb; new `plot_*` functions are
 moment they exist, no runner edit.
 Registered pipeline callables are supported the same way through `PLOT_REGISTRY`.
 
-## Figure/SVG Output Rule
+## Figure/ReproFig Output Rule
+
+Every saved plot must leave through `PyFLASH.utils.save_fig`. It produces SVG,
+PDF, PNG, JPEG, TIFF, WebP, AVIF and HEIF directly through ReproFig, preserving
+one figure identity and embedded data/statistics across every requested format.
+Use `PyFLASH.publication.embed_file` for existing documents, web pages,
+archives and scientific containers. Do not add another file-writing path.
 
 Keep SVG text editable. PyFLASH-generated Matplotlib SVGs must emit labels,
 tick text, legends, p-value annotations, and matrix cell annotations as real
 `<text>` elements, not glyph paths. Prefer `PyFLASH.utils.save_fig` or call
 `PyFLASH.set_pyflash_style()` before plotting. In one-off/custom agent scripts
-that call `fig.savefig(... ".svg")` directly, set this before creating or
-saving figures:
+use `PyFLASH.utils.save_fig`; if a non-PyFLASH script must write SVG directly,
+set this before creating or saving figures:
 
 ```python
 import matplotlib
@@ -143,3 +149,12 @@ Keep `PyFLASH.ui.services` free of top-level `streamlit` imports. Core
 Do not commit local analysis outputs or generated graph artifacts:
 `No Combo/`, `Results/`, `Exports/`, notebooks with private paths, and
 `graphify-out/`.
+
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current

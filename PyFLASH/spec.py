@@ -118,6 +118,10 @@ DESCRIBE_COVERED = {
     'cosinor',
     'acrophase_clock',
     'rhythm_pipeline',
+    # These plotters attach exact data tables and structured results directly to
+    # their Matplotlib figures for ReproFig export.
+    'matrices', 'rect_matrices', 'matrix_differences',
+    'volcano', 'marker_pca', 'timecourse',
 }
 DESCRIBE_EXEMPT = {
     'condition_key', 'images', 'representative_images', 'locations',
@@ -132,10 +136,7 @@ DESCRIBE_EXEMPT = {
     # Descriptive categorical frequency counts / proportions; no inferential test.
     'category_counts',
 }
-DESCRIBE_UNREVIEWED = {
-    'matrices', 'rect_matrices', 'matrix_differences',
-    'volcano', 'marker_pca', 'timecourse',
-}
+DESCRIBE_UNREVIEWED = set()
 
 
 def describe_status(short_name):

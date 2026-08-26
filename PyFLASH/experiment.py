@@ -2323,6 +2323,17 @@ class Experiment:
         self.data = {}
         self.markers = set()
         self.threshold = threshold or Config.THRESHOLD
+        self._provenance_sources = []
+
+    def _declare_provenance_source(self, path, role):
+        path = os.path.abspath(os.fspath(path))
+        entry = {
+            "path": path,
+            "role": str(role),
+            "project_root": self.source_root,
+        }
+        if entry not in self._provenance_sources:
+            self._provenance_sources.append(entry)
 
     # ── Import ─────────────────────────────────────────────────────────
 
@@ -2331,6 +2342,7 @@ class Experiment:
         labels_path = os.path.join(self.filePath, "Condition Labels.csv")
         if os.path.exists(labels_path):
             self.condition_labels = pd.read_csv(labels_path)
+            self._declare_provenance_source(labels_path, "condition_labels")
 
         threshold = self.threshold
         tasks = []
@@ -2375,6 +2387,10 @@ class Experiment:
 
         for subfolder_name, class_type, filename, file_path in tasks:
             tracker.start_item(filename, detail=subfolder_name)
+            self._declare_provenance_source(
+                file_path,
+                "raw_csv" if filename.endswith(".csv") else "roi_zip",
+            )
 
             if filename.endswith('.csv'):
                 stain_name, stain_df = _get_stain_name_and_df(
@@ -3386,6 +3402,7 @@ class MiniExperiment(Experiment):
         labels_path = os.path.join(self.filePath, "Condition Labels.csv")
         if os.path.exists(labels_path):
             self.condition_labels = pd.read_csv(labels_path)
+            self._declare_provenance_source(labels_path, "condition_labels")
 
         files = [f for f in sorted(os.listdir(self.filePath)) if f.endswith('.csv') and f != 'Condition Labels.csv']
         tracker = ProgressTracker(
@@ -3400,6 +3417,7 @@ class MiniExperiment(Experiment):
             if filename.endswith('.csv') and filename != 'Condition Labels.csv':
                 name = os.path.splitext(filename)[0]
                 path = os.path.join(self.filePath, filename)
+                self._declare_provenance_source(path, "raw_csv")
                 self.data[name] = Attribute(name, self._prepare_flat_csv(pd.read_csv(path)), self)
             tracker.finish_item(filename)
         self._last_csv_import_summary = f"{len(files)} tables"

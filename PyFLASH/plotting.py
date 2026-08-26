@@ -93,6 +93,39 @@ if getattr(Config, "HOUSE_STYLE", True):
     apply_pyflash_matplotlib_style()
 
 
+def _attach_reprofig(
+    figure,
+    *,
+    plotted_data=None,
+    data_tables=None,
+    statistics=None,
+    analysis=None,
+    column_classification=None,
+    column_roles=None,
+    emit_statistics=True,
+):
+    """Join exact plot inputs and results to one saved figure."""
+
+    try:
+        from PyFLASH import report
+
+        report.attach(
+            figure,
+            plotted_data=plotted_data,
+            data_tables=data_tables,
+            analysis=analysis,
+            column_classification=column_classification,
+            column_roles=column_roles,
+        )
+        for record in statistics or []:
+            if emit_statistics:
+                report.emit(record, figure=figure)
+            else:
+                report.attach(figure, record=record)
+    except Exception:
+        pass
+
+
 # ── Optional Altair dependency for interactive HTML export ───────────
 try:
     import altair as alt
@@ -453,9 +486,26 @@ def _export_html_bars(experiment, columns, specificity, save_path):
             charts.append((bar + points).properties(title=get_display_name(col)))
         if charts:
             combined = alt.vconcat(*charts).resolve_scale(color='shared')
+            plotted = pd.concat(
+                [
+                    experiment.summary.loc[:, ['Condition', col]].dropna()
+                    for col in columns
+                    if col in experiment.summary.columns
+                ],
+                ignore_index=True,
+                sort=False,
+            )
+            _attach_reprofig(
+                combined,
+                plotted_data=plotted,
+                column_classification={name: "safe" for name in plotted.columns},
+                column_roles={"Condition": "group"},
+            )
             html_path = os.path.join(save_path, 'interactive_bars.html')
             os.makedirs(save_path, exist_ok=True)
             combined.save(html_path, inline=True)
+            from PyFLASH import provenance
+            provenance.stamp_figure_artifact(html_path, combined, "interactive_bars")
     except Exception:
         pass
 
@@ -481,9 +531,17 @@ def _export_html_histogram(experiment, marker, x_attr, specificity, save_path, b
             alt.Y('count():Q'),
             alt.Color(f'{group_col}:N'),
         ).properties(title=f'{get_display_name(x)} Histogram')
+        _attach_reprofig(
+            chart,
+            plotted_data=df.loc[:, [x, group_col]],
+            column_classification={x: "safe", group_col: "safe"},
+            column_roles={x: "value", group_col: "group"},
+        )
         html_path = os.path.join(save_path, 'interactive_histogram.html')
         os.makedirs(save_path, exist_ok=True)
         chart.save(html_path, inline=True)
+        from PyFLASH import provenance
+        provenance.stamp_figure_artifact(html_path, chart, "interactive_histogram")
     except Exception:
         pass
 
@@ -512,10 +570,18 @@ def _export_html_matrix(experiment, columns, specificity, save_path, by, factor,
             color=alt.Color('Correlation:Q', scale=alt.Scale(scheme='redblue', domain=[-1, 1])),
             tooltip=['Variable 1', 'Variable 2', 'Correlation'],
         ).properties(title='Correlation Matrix')
+        _attach_reprofig(
+            chart,
+            plotted_data=corr_long,
+            column_classification={name: "safe" for name in corr_long.columns},
+            column_roles={"Correlation": "value"},
+        )
         corr_label = _correlation_filename_label(correlation).lower()
         html_path = os.path.join(save_path, f'interactive_matrix_{corr_label}.html')
         os.makedirs(save_path, exist_ok=True)
         chart.save(html_path, inline=True)
+        from PyFLASH import provenance
+        provenance.stamp_figure_artifact(html_path, chart, f"interactive_matrix_{corr_label}")
     except Exception:
         pass
 
@@ -561,9 +627,17 @@ def _export_html_volcano(experiment, columns, specificity, save_path, control):
             y=alt.Y('-log10(p):Q', title='-log10(p-value)'),
             tooltip=['Column', '% Change', '-log10(p)'],
         ).properties(title=f'Volcano (vs {control})')
+        _attach_reprofig(
+            chart,
+            plotted_data=df,
+            column_classification={name: "safe" for name in df.columns},
+            column_roles={"Column": "metric", "% Change": "effect", "-log10(p)": "p_value"},
+        )
         html_path = os.path.join(save_path, 'interactive_volcano.html')
         os.makedirs(save_path, exist_ok=True)
         chart.save(html_path, inline=True)
+        from PyFLASH import provenance
+        provenance.stamp_figure_artifact(html_path, chart, "interactive_volcano")
     except Exception:
         pass
 
@@ -10014,10 +10088,14 @@ def _save_plotly_figure(fig, save_path, image_name, subfolder=None, verbose=True
                     pass
         if verbose:
             _log.confirm(f"Figure saved to {svg_path}")
+        from PyFLASH import provenance
+        provenance.stamp_figure_artifact(svg_path, fig, image_name)
         return svg_path
     except Exception:
         html_path = os.path.join(target_dir, f"{image_name}.html")
         fig.write_html(html_path, include_plotlyjs="cdn")
+        from PyFLASH import provenance
+        provenance.stamp_figure_artifact(html_path, fig, image_name)
         if verbose:
             _log.confirm(f"Figure saved to {html_path} (HTML fallback; install kaleido for SVG export)")
         return html_path
@@ -11146,10 +11224,39 @@ def regression_action(ctx: Context, state: dict,
     try:
         import PyFLASH.report as _report
         if _report.is_active():
-            _report.emit(_report.build_correlation_record(
+            record = _report.build_correlation_record(
                 x=x, y=y, group=group_name, n=int(len(df)),
                 r=corr, p=pval, method=test,
-            ))
+            )
+            plotted = df[[x, y]].copy()
+            plotted.insert(0, "group", group_name)
+            plotted["observation_id"] = [str(value) for value in df.index]
+            target_figure = state.get("fig")
+            _report.emit(
+                record,
+                figure=target_figure,
+                plotted_data=plotted,
+                analysis={"independent_unit": "animal"},
+                append_plotted_data=True,
+            )
+            if target_figure is not None:
+                _report.attach(
+                    target_figure,
+                    column_classification={
+                        "group": "safe",
+                        str(x): "safe",
+                        str(y): "safe",
+                        "observation_id": "private",
+                    },
+                    column_roles={
+                        "group": "group",
+                        str(x): "x",
+                        str(y): "y",
+                        "observation_id": "independent_unit",
+                    },
+                    data_status="complete",
+                    statistics_status="complete",
+                )
     except Exception:
         pass
     return {
@@ -11281,7 +11388,7 @@ def _limit_stats_detail_lines(lines, max_items=None):
     return lines[:max_i] + [f"... {omitted} more"]
 
 
-def _annotate_stats_detail_text(ax, lines, *, x=None, y=None):
+def _annotate_stats_detail_text(ax, lines, *, x=None, y=None, ha=None):
     """Draw a removable detailed-stats text block to the right of an axis."""
     lines = [str(line) for line in (lines or []) if str(line).strip() != ""]
     if ax is None or len(lines) == 0:
@@ -11291,7 +11398,7 @@ def _annotate_stats_detail_text(ax, lines, *, x=None, y=None):
         STATS_ANNOTATION_Y if y is None else float(y),
         "\n".join(lines),
         transform=ax.transAxes,
-        ha="left",
+        ha="left" if ha is None else str(ha),
         va="top",
         fontsize=10,
         bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85},
@@ -11603,8 +11710,8 @@ def _regression_annotation_anchor(ax, n_lines, step):
 def _annotate_regression_coefficients(ax, entries, test=None):
     """Draw colour-matched per-group r/significance on-graph.
 
-    Exact p-values, sample sizes, and the test name live in the removable
-    right-side stats block. The on-axis label stays deliberately compact.
+    Exact p-values stay with each colour-matched coefficient; sample sizes and
+    the test name also remain in the on-axis detail annotation.
     """
     entries = list(entries or [])
     n_lines = len(entries)
@@ -11619,7 +11726,8 @@ def _annotate_regression_coefficients(ax, entries, test=None):
         suffix = "" if significance == "ns" else f" {significance}"
         ax.text(
             x, y,
-            f"{label}: r = {_format_regression_rvalue(entry.get('r'))}{suffix}",
+            f"{label}: r = {_format_regression_rvalue(entry.get('r'))}, "
+            f"p = {_format_side_stats_pvalue(entry.get('p'))}{suffix}",
             transform=ax.transAxes,
             ha=ha, va="top",
             fontsize=13, fontweight="bold",
@@ -11644,7 +11752,18 @@ def _annotate_regression_stats_summary(ax, entries, *, test=None, max_items=None
         )
     lines = [f"Test: {_regression_test_display_name(test)} correlation"]
     lines.extend(_limit_stats_detail_lines(detail, max_items=max_items))
-    return _annotate_stats_detail_text(ax, lines)
+    coefficient_x = {
+        text.get_position()[0]
+        for text in ax.texts
+        if "r =" in text.get_text()
+    }
+    x = 0.02 if 0.98 in coefficient_x else 0.98
+    return _annotate_stats_detail_text(
+        ax,
+        lines,
+        x=x,
+        ha="left" if x == 0.02 else "right",
+    )
 
 
 def scatter_3d_action(ctx: Context, state: dict,
@@ -12090,6 +12209,7 @@ def matrix_action(ctx: Context, state: dict,
     # Significance stars + the correlations result dict. The shared renderer
     # draws the stars; we only decide which visible duplicate cell carries them.
     results = {}
+    artifact_statistics = []
     cols = list(corr.columns)
     annot = pd.DataFrame("", index=cols, columns=cols, dtype=object)
     for i, c1 in enumerate(cols):
@@ -12105,6 +12225,17 @@ def matrix_action(ctx: Context, state: dict,
                     else:
                         annot.iat[i, j] = star
                 results[f'{c1} vs {c2}'] = (p_value, coefficient)
+                artifact_statistics.append({
+                    "kind": "correlation",
+                    "x": str(c1),
+                    "y": str(c2),
+                    "test": {"name": correlation, "p": float(p_value)},
+                    "p_raw": float(p_value),
+                    "coefficient": float(coefficient),
+                    "n": int(len(valid)),
+                    "unit": "animal",
+                    "display_annotation": _get_annotation(p_value, ns='ns'),
+                })
 
     # Title the matrix with its group only (short, so it stays prominent at any
     # matrix size), matching plot_rect_matrices' panel titles; the correlation
@@ -12132,6 +12263,20 @@ def matrix_action(ctx: Context, state: dict,
             max_items=stats_summary_max_items,
             x=1.18,
         )
+
+    plotted_table = df.copy()
+    plotted_table.insert(0, "observation_id", plotted_table.index.map(str))
+    plotted_table.insert(1, "group", str(group_name or "Combined"))
+    for statistic in artifact_statistics:
+        statistic["group"] = str(group_name or "Combined")
+    _attach_reprofig(
+        fig,
+        plotted_data=plotted_table.reset_index(drop=True),
+        statistics=artifact_statistics,
+        analysis={"independent_unit": "animal", "method": correlation},
+        column_classification={"observation_id": "private", "group": "safe"},
+        column_roles={"observation_id": "observation_identifier", "group": "group"},
+    )
 
     return {'heatmap': heatmap, 'correlations': results}
 
@@ -16200,9 +16345,19 @@ def plot_condition_key(experiment, save=True, save_path=None,
         return fig
     path = save_path or os.path.join(
         getattr(experiment, "fig_path", "."), f"{filename}.png")
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    apply_pyflash_figure_geometry(fig)
-    fig.savefig(path, **pyflash_savefig_kwargs(dpi=dpi, transparent=False))
+    output_dir = os.path.dirname(path) or "."
+    output_name, extension = os.path.splitext(os.path.basename(path))
+    extension = extension.lstrip(".") or "png"
+    save_fig(
+        fig,
+        output_dir,
+        output_name,
+        figure_formats=(extension,),
+        dpi=dpi,
+        rasterize=False,
+        transparent=False,
+        verbose=False,
+    )
     plt.close(fig)
     _log.confirm(f"[plot_condition_key] Saved key to {path}")
     return path
@@ -18071,6 +18226,8 @@ def volcano_action(ctx: Context, state: dict,
     y_thr = -np.log10(p_thr)
 
     rows = []
+    raw_rows = []
+    artifact_statistics = []
     for col in volcano_columns:
         if col not in summary.columns:
             continue
@@ -18104,6 +18261,28 @@ def volcano_action(ctx: Context, state: dict,
             "y_sig": float(y_sig),
             "significant": is_sig,
             "test": test_name,
+        })
+        for label, values in ((control_name, c_vals), (group_name, g_vals)):
+            for observation_id, value in values.items():
+                raw_rows.append({
+                    "group": label,
+                    "metric": str(col),
+                    "value": float(value),
+                    "observation_id": str(observation_id),
+                })
+        artifact_statistics.append({
+            "kind": "group_comparison",
+            "metric": str(col),
+            "comparison": [control_name, group_name],
+            "groups": [
+                {"name": control_name, "n": int(len(c_vals))},
+                {"name": group_name, "n": int(len(g_vals))},
+            ],
+            "test": {"name": test_name, "p": float(p_val)},
+            "p_raw": float(p_val),
+            "effect": {"name": "percent_change", "value": float(x_pct)},
+            "unit": "animal",
+            "display_annotation": _get_annotation(p_val, ns="ns"),
         })
 
     if len(rows) == 0:
@@ -18251,6 +18430,27 @@ def volcano_action(ctx: Context, state: dict,
 
     state["volcano_skip_save"] = False
     state["volcano_points"] = int(len(dfp))
+    _attach_reprofig(
+        state.get("fig"),
+        data_tables={
+            "plotted_points": dfp.reset_index(drop=True),
+            "analysis_data": pd.DataFrame(raw_rows),
+        },
+        statistics=artifact_statistics,
+        analysis={"independent_unit": "animal", "method": "volcano_group_comparisons"},
+        column_classification={
+            "group": "safe",
+            "metric": "safe",
+            "value": "safe",
+            "observation_id": "private",
+        },
+        column_roles={
+            "group": "group",
+            "metric": "metric",
+            "value": "value",
+            "observation_id": "observation_identifier",
+        },
+    )
     return {"group": group_name, "n_points": int(len(dfp))}
 
 
@@ -20686,6 +20886,34 @@ def _corr_render_matrix_differences(
             mres = payload["methods"][method]
             inferential = bool(mres.get("inferential"))
             n_sig = int(np.nansum(mres["sig"].to_numpy(dtype=bool))) // (2 if list(mres["sig"].index) == list(mres["sig"].columns) else 1)
+            if "method" in long_df.columns:
+                artifact_long = long_df[long_df["method"].astype(str).eq(str(method))].copy()
+            else:
+                artifact_long = long_df.copy()
+            artifact_base = {
+                "kind": "correlation_difference",
+                "comparison": str(comp_label),
+                "groups": [str(left_label), str(right_label)],
+                "method": str(method),
+                "test": "fisher_z" if inferential else "descriptive_difference",
+                "correction": "fdr_bh" if inferential else None,
+                "n_significant": int(n_sig),
+                "unit": "animal",
+            }
+
+            def _attach_difference(figure, matrix_kind):
+                record = dict(artifact_base)
+                record["matrix_kind"] = matrix_kind
+                _attach_reprofig(
+                    figure,
+                    plotted_data=artifact_long,
+                    statistics=[record],
+                    analysis={
+                        "independent_unit": "animal",
+                        "method": "correlation_difference",
+                    },
+                    emit_statistics=False,
+                )
             comp_summary["methods"].append({
                 "method": disp,
                 "inferential": inferential,
@@ -20715,6 +20943,7 @@ def _corr_render_matrix_differences(
                             gate=gate, alpha=alpha,
                             max_items=stats_summary_max_items,
                         )
+                    _attach_difference(sfig, "signed_difference")
                     save_fig(sfig, fig_dir, _flat_stem(
                         f"{disp} Signed Difference Matrix", f"{disp} Signed Delta",
                         comp_label, "svg"))
@@ -20731,6 +20960,7 @@ def _corr_render_matrix_differences(
                             gate=gate, alpha=alpha,
                             max_items=stats_summary_max_items,
                         )
+                    _attach_difference(afig, "absolute_difference")
                     save_fig(afig, fig_dir, _flat_stem(
                         f"{disp} Absolute Difference Matrix", f"{disp} Abs Delta",
                         comp_label, "svg"))
@@ -20746,6 +20976,7 @@ def _corr_render_matrix_differences(
                             gate=gate, alpha=alpha,
                             max_items=stats_summary_max_items,
                         )
+                    _attach_difference(pfig, "p_value")
                     save_fig(pfig, fig_dir, _flat_stem(
                         f"{disp} Difference P-Value Matrix", f"{disp} P Matrix",
                         comp_label, "svg"))
@@ -20761,6 +20992,7 @@ def _corr_render_matrix_differences(
                             gate=gate, alpha=alpha,
                             max_items=stats_summary_max_items,
                         )
+                    _attach_difference(qfig, "q_value")
                     save_fig(qfig, fig_dir, _flat_stem(
                         f"{disp} Difference FDR Q-Value Matrix", f"{disp} Q Matrix",
                         comp_label, "svg"))
@@ -20776,6 +21008,7 @@ def _corr_render_matrix_differences(
                             gate=gate, alpha=alpha,
                             max_items=stats_summary_max_items,
                         )
+                    _attach_difference(gfig, "significance_gate")
                     save_fig(gfig, fig_dir, _flat_stem(
                         f"{disp} Difference Gate Matrix", f"{disp} Gate Matrix",
                         comp_label, "svg"))
@@ -23177,6 +23410,8 @@ def plot_rect_matrices(
     panel_fig_axes = [(fig, axes[0][i], i == n_panels - 1) for i in range(n_panels)]
 
     first_mappable = None
+    artifact_tables = []
+    artifact_statistics = []
     for i, (kind, panel_name, panel_df, panel_display_name) in enumerate(panels):
         _progress_start_item(state, panel_name)
         fig, ax, show_cbar = panel_fig_axes[i]
@@ -23273,6 +23508,18 @@ def plot_rect_matrices(
                         p_value,
                         coefficient,
                     )
+                    artifact_statistics.append({
+                        "kind": "correlation",
+                        "group": str(panel_name),
+                        "x": str(x_col),
+                        "y": str(y_col),
+                        "test": {"name": correlation, "p": float(p_value)},
+                        "p_raw": float(p_value),
+                        "coefficient": float(coefficient),
+                        "n": int(len(pair)),
+                        "unit": "animal",
+                        "display_annotation": _get_annotation(p_value, ns="ns"),
+                    })
                 else:
                     corr_mat.loc[y_col, x_col] = np.nan
                     p_mat.loc[y_col, x_col] = np.nan
@@ -23333,6 +23580,10 @@ def plot_rect_matrices(
             'dropped_y': out_dy,
             'dropped_x': out_dx,
         }
+        artifact_panel = num_df.copy()
+        artifact_panel.insert(0, "observation_id", artifact_panel.index.map(str))
+        artifact_panel.insert(1, "group", str(panel_name))
+        artifact_tables.append(artifact_panel.reset_index(drop=True))
         _progress_finish_item(state, panel_name)
 
     big_fig = panel_fig_axes[0][0]
@@ -23385,6 +23636,18 @@ def plot_rect_matrices(
             x=1.23,
         )
     # Avoid tight_layout here; it can expand inter-panel spacing with fixed-aspect axes.
+    _attach_reprofig(
+        big_fig,
+        plotted_data=(
+            pd.concat(artifact_tables, ignore_index=True, sort=False)
+            if artifact_tables
+            else pd.DataFrame()
+        ),
+        statistics=artifact_statistics,
+        analysis={"independent_unit": "animal", "method": correlation},
+        column_classification={"observation_id": "private", "group": "safe"},
+        column_roles={"observation_id": "observation_identifier", "group": "group"},
+    )
     if save:
         subfolder, suffix = build_subfolder(
             plot_type='Rectangular', marker='Matrices',
@@ -24538,6 +24801,34 @@ def plot_coloc_sankey(
             height=layout_height,
         )
 
+        plotted_links = pd.DataFrame(
+            [
+                {
+                    "source": node_labels[int(item["source"])] if node_labels else "",
+                    "target": node_labels[int(item["target"])] if node_labels else "",
+                    "count": int(item["count"]),
+                    "percent": float(item["pct"]),
+                    "value": float(item["value"]),
+                    "panel": str(panel_name),
+                }
+                for item in link_items
+            ],
+            columns=["source", "target", "count", "percent", "value", "panel"],
+        )
+        _attach_reprofig(
+            fig,
+            plotted_data=plotted_links,
+            column_classification={name: "safe" for name in plotted_links.columns},
+            column_roles={
+                "source": "category",
+                "target": "category",
+                "count": "n",
+                "percent": "value",
+                "value": "value",
+                "panel": "group",
+            },
+        )
+
         if save and exp_obj is not None:
             subfolder, suffix = build_subfolder(
                 plot_type='Sankey', marker=marker_s,
@@ -25436,14 +25727,46 @@ def plot_marker_pca(batch, columns=None, data_cols=None, column_strings=None,
             max_items=stats_summary_max_items,
         )
 
+    scores_df = pd.DataFrame(scores[:, :2], columns=["PC1", "PC2"], index=X.index)
+    scores_df.insert(0, "observation_id", scores_df.index.map(str))
+    scores_df[hue_column] = hue.to_numpy()
+    feature_table = X.copy()
+    feature_table.insert(0, "observation_id", feature_table.index.map(str))
+    feature_table[hue_column] = hue.to_numpy()
+    loadings_table = loadings_df.reset_index().rename(columns={"index": "feature"})
+    _attach_reprofig(
+        fig,
+        data_tables={
+            "plotted_scores": scores_df.reset_index(drop=True),
+            "analysis_features": feature_table.reset_index(drop=True),
+            "loadings": loadings_table,
+        },
+        statistics=[{
+            "kind": "principal_component_analysis",
+            "n": int(len(X)),
+            "unit": "subject",
+            "n_features": int(len(feat_cols)),
+            "standardized": bool(standardize),
+            "explained_variance_ratio": [float(value) for value in evr],
+            "components_displayed": ["PC1", "PC2"],
+        }],
+        analysis={
+            "independent_unit": "subject",
+            "method": "principal_component_analysis",
+            "transformations": ["z-score features"] if standardize else [],
+        },
+        column_classification={"observation_id": "private", hue_column: "safe"},
+        column_roles={"observation_id": "observation_identifier", hue_column: "group"},
+    )
+
     if save:
         save_fig(fig, _stat_plot_save_path(batch, save_path),
                  strip_name(save_name or "marker_pca"), verbose=False)
 
     if return_data:
-        scores_df = pd.DataFrame(scores[:, :2], columns=["PC1", "PC2"], index=X.index)
-        scores_df[hue_column] = hue
-        return fig, {"scores": scores_df, "loadings": loadings_df, "explained_variance": evr}
+        returned_scores = pd.DataFrame(scores[:, :2], columns=["PC1", "PC2"], index=X.index)
+        returned_scores[hue_column] = hue
+        return fig, {"scores": returned_scores, "loadings": loadings_df, "explained_variance": evr}
     return fig
 
 
@@ -25542,6 +25865,51 @@ def plot_timecourse(batch, column, time_col="Time", group_col="Genotype",
             model=model,
             max_items=stats_summary_max_items,
         )
+
+    plotted_table = df[[group_col, time_col, "_t", column, "_v"]].copy()
+    if animal_col in df.columns:
+        plotted_table.insert(0, "observation_id", df[animal_col].astype(str).to_numpy())
+    else:
+        plotted_table.insert(0, "observation_id", df.index.map(str))
+    artifact_statistics = []
+    for group, fit in fits.items():
+        if fit is None:
+            artifact_statistics.append({
+                "kind": "growth_curve",
+                "group": str(group),
+                "status": "fit_failed",
+                "unit": "subject",
+            })
+            continue
+        artifact_statistics.append({
+            "kind": "growth_curve",
+            "group": str(group),
+            "model": fit.get("model"),
+            "parameters": fit.get("params"),
+            "r_squared": fit.get("r_squared"),
+            "aic": fit.get("aic"),
+            "n": fit.get("n"),
+            "unit": "subject",
+            "model_candidates": fit.get("all_models"),
+        })
+    _attach_reprofig(
+        fig,
+        plotted_data=plotted_table.reset_index(drop=True),
+        statistics=artifact_statistics,
+        analysis={
+            "independent_unit": "subject",
+            "method": "growth_curve",
+            "model": model,
+            "transformations": [f"{time_col} converted to numeric time"],
+        },
+        column_classification={"observation_id": "private", group_col: "safe"},
+        column_roles={
+            "observation_id": "observation_identifier",
+            group_col: "group",
+            "_t": "time",
+            "_v": "value",
+        },
+    )
 
     if save:
         save_fig(fig, _stat_plot_save_path(batch, save_path),

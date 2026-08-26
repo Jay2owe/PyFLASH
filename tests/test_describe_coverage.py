@@ -75,7 +75,7 @@ def test_every_registry_target_resolves():
 def test_describe_status_helper():
     assert spec.describe_status('mean_bars') == 'covered'
     assert spec.describe_status('images') == 'exempt'
-    assert spec.describe_status('volcano') == 'unreviewed'
+    assert spec.describe_status('volcano') == 'covered'
     assert spec.describe_status('definitely_not_a_plot') == 'unclassified'
 
 

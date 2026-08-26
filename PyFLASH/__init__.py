@@ -68,6 +68,9 @@ __all__ = [
     "cheat_sheet",
     "set_axis_limits", "clear_axis_limits", "lock_axis_limits",
     "format_summary_for_display",
+    "publish_figures", "publish_artifacts", "embed_file", "formats",
+    "extract_figure", "extract_artifact", "inspect_figure",
+    "inspect_artifact", "scan_figures", "scan_artifacts",
     # Heavy submodules (lazily imported on first access)
     "plotting", "pipeline", "modelling", "stats",
 ]
@@ -109,6 +112,16 @@ _LAZY_ATTRS = {
     "set_axis_limits": ("PyFLASH.plotting", "set_axis_limits"),
     "clear_axis_limits": ("PyFLASH.plotting", "clear_axis_limits"),
     "lock_axis_limits": ("PyFLASH.plotting", "lock_axis_limits"),
+    "publish_figures": ("PyFLASH.publication", "publish_figures"),
+    "publish_artifacts": ("PyFLASH.publication", "publish_artifacts"),
+    "embed_file": ("PyFLASH.publication", "embed_file"),
+    "formats": ("PyFLASH.publication", "formats"),
+    "extract_figure": ("PyFLASH.publication", "extract_figure"),
+    "extract_artifact": ("PyFLASH.publication", "extract_artifact"),
+    "inspect_figure": ("PyFLASH.publication", "inspect_figure"),
+    "inspect_artifact": ("PyFLASH.publication", "inspect_artifact"),
+    "scan_figures": ("PyFLASH.publication", "scan_figures"),
+    "scan_artifacts": ("PyFLASH.publication", "scan_artifacts"),
 }
 
 # Heavy submodules exposed as lazy attributes of the package.  Accessing

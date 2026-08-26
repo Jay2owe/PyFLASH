@@ -467,11 +467,11 @@ def test_regression_annotation_reports_significance_per_group():
             {"group": "Control", "color": "#000000", "r": -0.15, "p": 0.6118, "n": 12},
             {"group": "Dementia-AD", "color": "#ff8000", "r": -0.74, "p": 0.0154, "n": 12},
         ]
-        # Keep the graph compact, with exact p-values and n in the removable
-        # right-side stats block.
+        # Keep exact p-values with each coefficient; n and the test remain in
+        # the compact detail annotation.
         plotting._annotate_regression_coefficients(ax, entries, test="pearsonr")
-        assert ax.texts[0].get_text() == "Control: r = -0.15"
-        assert ax.texts[1].get_text() == "Dementia-AD: r = -0.74 *"
+        assert ax.texts[0].get_text() == "Control: r = -0.15, p = 0.6118"
+        assert ax.texts[1].get_text() == "Dementia-AD: r = -0.74, p = 0.0154 *"
         assert ax.texts[1].get_color() == "#ff8000"
         plotting._annotate_regression_stats_summary(
             ax,

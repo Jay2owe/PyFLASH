@@ -62,21 +62,149 @@ def _pd():
 # ── collector state ──────────────────────────────────────────────────────────
 # Single-process, single-threaded use (the runner's worker handles one request
 # at a time), so a module global is sufficient and avoids thread-local surprises.
-_STATE = {"active": False, "records": []}
+_STATE = {"active": False, "records": [], "origins": []}
 
 
 def start():
     """Arm the collector for a single run, discarding any prior records."""
     _STATE["active"] = True
     _STATE["records"] = []
+    _STATE["origins"] = []
+
+
+def _origin_frame_id():
+    """Identify the plot call a record came from, so a figure can claim its own.
+
+    Records accumulate in one list. Without knowing which call produced each,
+    a plot that computes statistics and saves nothing (``save=False``) would
+    leave them to be swept up by whichever figure saved next.
+    """
+    try:
+        import sys as _sys
+
+        frame = _sys._getframe(1)
+        found = None
+        while frame is not None:
+            module = frame.f_globals.get("__name__", "")
+            if module.startswith("PyFLASH") and module != __name__:
+                found = id(frame)
+            frame = frame.f_back
+        return found
+    except Exception:
+        return None
+
+
+def live_frame_ids():
+    """Frame identities currently on the stack, for :func:`records_since`."""
+    alive = set()
+    try:
+        import sys as _sys
+
+        frame = _sys._getframe(1)
+        while frame is not None:
+            alive.add(id(frame))
+            frame = frame.f_back
+    except Exception:
+        pass
+    return alive
+
+
+def count() -> int:
+    """How many records have been collected so far. Never disarms."""
+    return len(_STATE["records"])
+
+
+def records_since(index, alive=None):
+    """Records collected after ``index``, without disarming the collector.
+
+    ``collect`` takes the records and disarms, which is what a run wants at its
+    end. A figure being saved mid-run needs to read without taking, or the run
+    would lose them. Pass ``alive`` (from :func:`live_frame_ids`) to keep only
+    records whose producing call is still running - the rest belong to a call
+    that finished without saving anything.
+    """
+    try:
+        records = _STATE["records"][int(index):]
+        origins = _STATE["origins"][int(index):]
+    except (TypeError, ValueError):
+        return []
+    if alive is None:
+        return list(records)
+    kept = []
+    for position, record in enumerate(records):
+        origin = origins[position] if position < len(origins) else None
+        if origin is None or origin in alive:
+            kept.append(record)
+    return kept
 
 
 def is_active() -> bool:
-    """True when a caller has armed the collector (plotting code checks this)."""
-    return bool(_STATE["active"])
+    """True when explicit or configured automatic figure recording is enabled."""
+    if _STATE["active"]:
+        return True
+    try:
+        from PyFLASH.config import Config
+
+        return bool(getattr(Config, "RECORD_STATS", True))
+    except Exception:
+        return True
 
 
-def emit(record) -> None:
+def attach(
+    figure,
+    *,
+    record=None,
+    plotted_data=None,
+    data_tables=None,
+    analysis=None,
+    sources=None,
+    column_classification=None,
+    column_roles=None,
+    data_status=None,
+    statistics_status=None,
+    append_plotted_data=False,
+):
+    """Attach exact data and structured results to one Matplotlib figure."""
+    try:
+        from reprofig import attach as _attach
+
+        records = [] if record is None else [coerce(record)]
+        _attach(
+            figure,
+            plotted_data=plotted_data,
+            data_tables=data_tables,
+            statistics=records,
+            analysis=analysis,
+            sources=sources,
+            column_classification=column_classification,
+            column_roles=column_roles,
+            data_status=data_status,
+            statistics_status=statistics_status,
+            append_plotted_data=append_plotted_data,
+        )
+    except Exception:
+        pass
+
+
+def attachment_for(figure):
+    """Return a copy of record fragments attached to ``figure``."""
+    try:
+        from reprofig import attachment_for as _attachment_for
+
+        return _attachment_for(figure)
+    except Exception:
+        return {}
+
+
+def emit(
+    record,
+    *,
+    figure=None,
+    plotted_data=None,
+    analysis=None,
+    sources=None,
+    append_plotted_data=False,
+) -> None:
     """Append a structured result record if the collector is armed.
 
     Fully guarded: this is called from inside plotting/stats code and must never
@@ -84,14 +212,27 @@ def emit(record) -> None:
     silently dropped rather than retained — downstream consumers (render_digest,
     the index ledger) assume every record is a dict.
     """
-    if not _STATE["active"]:
+    if not is_active():
         return
+    if not _STATE["active"]:
+        _STATE["active"] = True
     try:
         coerced = coerce(record)
     except Exception:
         return
     if isinstance(coerced, dict):
         _STATE["records"].append(coerced)
+        _STATE["origins"].append(_origin_frame_id())
+        if figure is not None:
+            attach(
+                figure,
+                record=coerced,
+                plotted_data=plotted_data,
+                analysis=analysis,
+                sources=sources,
+                statistics_status="complete",
+                append_plotted_data=append_plotted_data,
+            )
 
 
 def collect():
@@ -99,6 +240,7 @@ def collect():
     records = _STATE["records"]
     _STATE["active"] = False
     _STATE["records"] = []
+    _STATE["origins"] = []
     return records
 
 

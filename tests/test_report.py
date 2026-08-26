@@ -239,14 +239,21 @@ def test_summarize_return_coerces_pipeline_dict():
 
 # ── collector lifecycle ─────────────────────────────────────────────────────────
 def test_collector_lifecycle():
-    assert report.is_active() is False
-    report.emit({"kind": "x"})            # inert when not armed
-    report.start()
-    assert report.is_active() is True
-    report.emit({"kind": "correlation", "x": "a", "y": "b"})
-    records = report.collect()
-    assert len(records) == 1 and records[0]["kind"] == "correlation"
-    assert report.is_active() is False    # collect disarms
+    from PyFLASH.config import Config
+
+    previous = Config.RECORD_STATS
+    Config.RECORD_STATS = False
+    try:
+        assert report.is_active() is False
+        report.emit({"kind": "x"})            # inert when disabled and not armed
+        report.start()
+        assert report.is_active() is True
+        report.emit({"kind": "correlation", "x": "a", "y": "b"})
+        records = report.collect()
+        assert len(records) == 1 and records[0]["kind"] == "correlation"
+        assert report.is_active() is False    # collect disarms
+    finally:
+        Config.RECORD_STATS = previous
 
 
 def test_emit_drops_non_dict_records():
@@ -436,15 +443,20 @@ def test_cache_hit_preserves_normal_flag():
     assert second["normal"] == first["normal"]
 
 
-def test_multiple_comparisons_inert_when_not_armed():
+def test_multiple_comparisons_inert_when_automatic_recording_disabled():
     from PyFLASH import stats
+    from PyFLASH.config import Config
 
     g1 = pd.Series([1.0, 2.0, 3.0])
     g2 = pd.Series([4.0, 5.0, 6.0])
     exp = types.SimpleNamespace()
-    # collector disarmed by fixture
-    stats.multipleComparisons(
-        exp, [g1, g2], ax=None, fig=None, scatter=None, bar=None,
-        draw=False, group_labels=["A", "B"], comparisons=["1-2"],
-    )
-    assert report.collect() == []
+    previous = Config.RECORD_STATS
+    Config.RECORD_STATS = False
+    try:
+        stats.multipleComparisons(
+            exp, [g1, g2], ax=None, fig=None, scatter=None, bar=None,
+            draw=False, group_labels=["A", "B"], comparisons=["1-2"],
+        )
+        assert report.collect() == []
+    finally:
+        Config.RECORD_STATS = previous

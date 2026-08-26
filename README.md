@@ -72,6 +72,60 @@ batch.export_all_excel()
 save_state(batch, "my_batch.pkl")
 ```
 
+## Self-describing ReproFig figures
+
+Every PyFLASH figure now carries a compressed
+figure record: the exact plotted comma-separated values (CSV) table, exact
+statistics and sample-size definitions, PyFLASH and Python versions, creating
+function, run request, reproduction script, and source-file fingerprints.
+The default `master` is self-contained; companion CSV files are optional.
+
+Choose a distribution profile at the shared save point:
+
+```python
+from PyFLASH.utils import save_fig
+
+save_fig(
+    fig,
+    output_dir,
+    "Figure 1",
+    figure_profile="master",
+    figure_formats=("svg", "pdf", "png", "jpg", "tif", "webp", "avif", "heif"),
+    dpi=300,
+)
+save_fig(
+    fig,
+    output_dir,
+    "Figure 1 public",
+    figure_profile="public",
+    figure_safe_columns=["group", "metric", "value"],
+    write_companion_csv=True,
+)
+```
+
+All direct formats above share one figure identity. For existing PowerPoint,
+Word, Excel, HTML, netCDF-4, HDF5, FITS and ZIP/RO-Crate files, use
+`PyFLASH.publication.embed_file`.
+
+For publication, derive new files from masters without changing them:
+
+```python
+from PyFLASH import publish_artifacts
+
+publish_artifacts(
+    ["Figure 1.svg"],
+    output_dir="Publication Figures",
+    figure_profile="minimal_public",
+    safe_columns=["group", "metric", "value"],
+)
+```
+
+The resulting flat folder contains privacy-validated figure files, public source
+data CSV files, exact statistics CSV files, a hashed manifest, and a validation
+report. Command-line equivalents start with `pyflash-figure`, for example
+`pyflash-figure inspect Figure.svg` and `pyflash-figure publish Figure.svg
+--profile public --safe-columns group,value --output-dir Publication`.
+
 ## Plot styling
 
 Use `set_pyflash_style()` as the single front door for plot styling. It applies

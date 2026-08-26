@@ -3959,7 +3959,11 @@ def _plot_classifier_sweep_outputs(
     plt.ylabel("")
     plt.title("Top iterative classifier sweep models")
     plt.tight_layout()
-    plt.savefig(figures_dir / "top_iterative_model_sweep.png", dpi=dpi)
+    save_fig(
+        plt.gcf(), figures_dir, "top_iterative_model_sweep",
+        figure_formats=("png",), dpi=dpi, rasterize=False,
+        transparent=False, verbose=False,
+    )
     plt.close()
 
     pivot = results.pivot_table(
@@ -3973,7 +3977,11 @@ def _plot_classifier_sweep_outputs(
         sns.heatmap(pivot, annot=True, fmt=".2f", cmap="viridis")
         plt.title(f"Best {score_col.replace('_', ' ')} by model family and subset size")
         plt.tight_layout()
-        plt.savefig(figures_dir / "family_by_subset_size_heatmap.png", dpi=dpi)
+        save_fig(
+            plt.gcf(), figures_dir, "family_by_subset_size_heatmap",
+            figure_formats=("png",), dpi=dpi, rasterize=False,
+            transparent=False, verbose=False,
+        )
         plt.close()
 
     if feature_stats is not None and not feature_stats.empty:
@@ -3984,7 +3992,11 @@ def _plot_classifier_sweep_outputs(
         plt.ylabel("")
         plt.title("Features recurring in top models")
         plt.tight_layout()
-        plt.savefig(figures_dir / "top_feature_recurrence.png", dpi=dpi)
+        save_fig(
+            plt.gcf(), figures_dir, "top_feature_recurrence",
+            figure_formats=("png",), dpi=dpi, rasterize=False,
+            transparent=False, verbose=False,
+        )
         plt.close()
 
 

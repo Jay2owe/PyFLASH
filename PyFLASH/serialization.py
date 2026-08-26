@@ -163,6 +163,15 @@ def save_state(obj, filename=None, verbose=True):
         filename = os.path.join(obj.csv_path, f"{obj.name}.pkl")
 
     obj._state_path = filename
+    sources = list(getattr(obj, "_provenance_sources", []) or [])
+    state_source = {
+        "path": os.path.abspath(os.fspath(filename)),
+        "role": "batch_pickle",
+        "project_root": os.path.dirname(os.path.abspath(os.fspath(filename))),
+    }
+    if state_source not in sources:
+        sources.append(state_source)
+    obj._provenance_sources = sources
     os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
     with open(filename, 'wb') as f:
         pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -197,6 +206,15 @@ def load_state(filename, normalize_paths=True, resave_if_rebased=False, verbose=
     obj = _load_pickle(filename)
 
     obj._state_path = filename
+    sources = list(getattr(obj, "_provenance_sources", []) or [])
+    state_source = {
+        "path": os.path.abspath(os.fspath(filename)),
+        "role": "batch_pickle",
+        "project_root": os.path.dirname(os.path.abspath(os.fspath(filename))),
+    }
+    if state_source not in sources:
+        sources.append(state_source)
+    obj._provenance_sources = sources
     legacy_arrays_removed = _strip_legacy_image_arrays(obj)
     exp_suffix_migrated = _migrate_exp_suffix_columns(obj)
     rebased = False

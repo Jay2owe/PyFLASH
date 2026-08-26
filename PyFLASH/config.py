@@ -68,6 +68,23 @@ class Config:
     # time (shrinks over-long titles, lifts overlapping suptitles; never shrinks
     # the data axes). Both are on by default; set False to restore raw behaviour.
     HOUSE_STYLE = True
+    RECORD_STATS = True  # False to stop recording a figure's statistics in its provenance
+    FIGURE_PROFILE = "master"  # master, public, or minimal_public
+    # Every requested direct ReproFig carrier receives the same figure identity.
+    # Supported values: svg, pdf, png, jpg/jpeg, tif/tiff, webp, avif, heic/heif.
+    FIGURE_FORMATS = ("svg",)
+    FIGURE_DPI = None  # numeric override; raster defaults come from ReproFig
+    FIGURE_DPI_PRESET = None  # screen, continuous_tone, or line_art
+    FIGURE_RENDER_PRESET = None  # synonym for FIGURE_DPI_PRESET
+    FIGURE_WIDTH = None  # optional rendered width in inches
+    FIGURE_HEIGHT = None  # optional rendered height in inches
+    FIGURE_FORMAT_OPTIONS = None  # global options or {format: {option: value}}
+    FIGURE_ALLOW_REENCODE = False  # needed only for carrier conversions
+    FIGURE_SAFE_COLUMNS = None  # explicit allowlist used by direct public saves
+    FIGURE_PUBLIC_SOURCES = None  # approved source-id/path -> public URL mapping
+    FIGURE_COMPANION_CSV = False  # master already embeds exact CSV bytes
+    FIGURE_PROOF = False  # opt in to semantic/statistical proof capture
+    FIGURE_PROOF_POLICY = None  # required grades and non-secret key/env references
     USE_PYFLASH_LAYOUT = True
 
     # ── Effect sizes ───────────────────────────────────────────────────

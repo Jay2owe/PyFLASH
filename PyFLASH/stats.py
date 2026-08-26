@@ -1764,7 +1764,7 @@ def _format_effect_strings(effects, condition_list):
 def _emit_comparison_record(
     valid_groups, group_labels, cond_list, test, post_hoc,
     overall, comparisons, results, effect_strings, results_dict, normal,
-    fallback_metric=None, valid_indices=None, factor_list=None,
+    fallback_metric=None, valid_indices=None, factor_list=None, figure=None,
 ):
     """Push a structured comparison record to the report collector, if armed.
 
@@ -1809,7 +1809,7 @@ def _emit_comparison_record(
             term_labels = list(factor_list) + ["Interaction", "Residual"]
         else:
             term_labels = None
-        report.emit(report.build_comparison_record(
+        record = report.build_comparison_record(
             metric=metric,
             group_names=names,
             group_values=valid_groups,
@@ -1822,7 +1822,46 @@ def _emit_comparison_record(
             raw_stats=results_dict,
             normal=normal,
             factor_terms=term_labels,
-        ))
+        )
+        plot_rows = []
+        for group_index, group_values in enumerate(valid_groups):
+            group_name = names[group_index] if group_index < len(names) else f"G{group_index + 1}"
+            try:
+                entries = group_values.items()
+            except AttributeError:
+                entries = enumerate(group_values)
+            for observation_id, value in entries:
+                plot_rows.append({
+                    "group": group_name,
+                    "metric": metric,
+                    "value": value,
+                    "observation_id": str(observation_id),
+                })
+        plotted_data = pd.DataFrame(plot_rows)
+        report.emit(
+            record,
+            figure=figure,
+            plotted_data=plotted_data,
+            analysis={"independent_unit": "animal"},
+        )
+        if figure is not None:
+            report.attach(
+                figure,
+                column_classification={
+                    "group": "safe",
+                    "metric": "safe",
+                    "value": "safe",
+                    "observation_id": "private",
+                },
+                column_roles={
+                    "group": "group",
+                    "metric": "metric",
+                    "value": "value",
+                    "observation_id": "independent_unit",
+                },
+                data_status="complete",
+                statistics_status="complete",
+            )
     except Exception:
         pass
 
@@ -1928,7 +1967,7 @@ def multipleComparisons(
             overall, comparisons, results, effect_strings, results_dict,
             cached.get('normal'),
             fallback_metric=save_name, valid_indices=valid_indices,
-            factor_list=getattr(experiment, "factor", None),
+            factor_list=getattr(experiment, "factor", None), figure=fig,
         )
         return test, post_hoc, annotation_objects, results_dict
 
@@ -1945,10 +1984,15 @@ def multipleComparisons(
         normality_dir = output_dir or experiment.data_path
         os.makedirs(normality_dir, exist_ok=True)
         out_path = os.path.join(normality_dir, fname)
-        apply_pyflash_figure_geometry(norm_fig)
-        norm_fig.savefig(
-            out_path,
-            **pyflash_savefig_kwargs(dpi=normality_dpi, transparent=False),
+        save_fig(
+            norm_fig,
+            normality_dir,
+            os.path.splitext(fname)[0],
+            figure_formats=("png",),
+            dpi=normality_dpi,
+            rasterize=False,
+            transparent=False,
+            verbose=False,
         )
         if verbose:
             _log.confirm(f"Normality figure saved to {out_path}")
@@ -2190,6 +2234,6 @@ def multipleComparisons(
         valid_groups, group_labels, cond_list, test, post_hoc,
         overall, comparisons, results, effect_strings, results_dict, normal,
         fallback_metric=save_name, valid_indices=valid_indices,
-        factor_list=getattr(experiment, "factor", None),
+        factor_list=getattr(experiment, "factor", None), figure=fig,
     )
     return test, post_hoc, annotation_objects, results_dict

@@ -518,6 +518,8 @@ class DataFrameExperiment:
         fig_path=None,
         data_path=None,
         file_path=None,
+        source_paths=None,
+        source_uri=None,
         aliases=None,
         summaries=None,
         data=None,
@@ -597,6 +599,21 @@ class DataFrameExperiment:
         self.image_fig_path = os.path.join(self.fig_path, "Images")
         self.representative_path = os.path.join(self.filePath, "Results", "Representative Images")
         self.legend_path = os.path.join(self.filePath, "Results", "Legends")
+        if source_paths is None:
+            source_values = []
+        elif isinstance(source_paths, (str, bytes, os.PathLike)):
+            source_values = [source_paths]
+        else:
+            source_values = list(source_paths)
+        self._provenance_sources = [
+            {
+                "path": os.path.abspath(os.fspath(path)),
+                "role": "source_csv" if str(path).lower().endswith(".csv") else "source",
+                "project_root": self.filePath,
+                "uri": source_uri,
+            }
+            for path in source_values
+        ]
 
         self.summary = _normalise_frame(
             summary,

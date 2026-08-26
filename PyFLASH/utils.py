@@ -7,6 +7,8 @@ import re
 import math
 import time
 import threading
+import tempfile
+import warnings
 from contextlib import contextmanager
 from collections.abc import Mapping
 import numpy as np
@@ -1202,11 +1204,59 @@ def rasterize_data_artists(figure, threshold=50):
                 pass
 
 
+_DIRECT_FIGURE_EXTENSIONS = {
+    "svg", "pdf", "png", "jpg", "jpeg", "jpe", "tif", "tiff",
+    "webp", "avif", "heic", "heif",
+}
+
+
+def _normalise_figure_formats(values):
+    if isinstance(values, str):
+        values = [values]
+    normalised = []
+    for value in values or ():
+        extension = str(value).strip().lower().lstrip(".")
+        if extension not in _DIRECT_FIGURE_EXTENSIONS:
+            raise ValueError(
+                f"Unsupported direct figure format {value!r}. Use one of "
+                f"{sorted(_DIRECT_FIGURE_EXTENSIONS)}, or use "
+                "PyFLASH.publication.embed_file for an existing document or "
+                "scientific container."
+            )
+        if extension not in normalised:
+            normalised.append(extension)
+    if not normalised:
+        raise ValueError("At least one figure format is required")
+    return normalised
+
+
+def _format_options_for(options, extension):
+    if not options:
+        return None
+    keys = {str(key).lower().lstrip(".") for key in options}
+    if keys & _DIRECT_FIGURE_EXTENSIONS:
+        aliases = {
+            "jpg": "jpeg", "jpe": "jpeg", "tif": "tiff", "heic": "heif"
+        }
+        requested = aliases.get(extension, extension)
+        for key, value in options.items():
+            candidate = aliases.get(str(key).lower().lstrip("."), str(key).lower().lstrip("."))
+            if candidate == requested:
+                return dict(value or {})
+        return None
+    return dict(options)
+
+
 def save_fig(figure, save_path, image_name, extra_artist=None,
              pad_inches=None, subfolder=None, verbose=True,
              skip_existing=None, rasterize=True, montage=False,
-             save_bbox=None):
-    """Save a figure as SVG with optional subfolder creation.
+             save_bbox=None, figure_profile=None,
+             figure_safe_columns=None, public_sources=None,
+             write_companion_csv=None, figure_formats=None, dpi=None,
+             dpi_preset=None, render_preset=None, width=None, height=None,
+             format_options=None, allow_reencode=None, transparent=True,
+             sanitize_name=True, proof=None, proof_policy=None):
+    """Save one audited figure to every requested direct ReproFig carrier.
 
     Parameters
     ----------
@@ -1224,6 +1274,39 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         keeps the global style. Use ``"tight"`` for figures whose authored
         width carries meaning, such as compact mean bars with one slot per
         group.
+    figure_profile : {"master", "public", "minimal_public"}, optional
+        Embedded record profile. ``None`` uses ``Config.FIGURE_PROFILE``.
+        Public profiles are privacy-validated before the target is replaced.
+    figure_safe_columns : sequence or mapping, optional
+        Explicit public column allowlist. Required for unclassified tables.
+    public_sources : mapping, optional
+        Approved replacements for internal source references.
+    write_companion_csv : bool, optional
+        Also write disposable data/statistics CSV files beside the figure. The
+        master remains self-contained when these files are absent.
+    figure_formats : sequence of str, optional
+        Direct output carriers. ``None`` uses ``Config.FIGURE_FORMATS``. SVG,
+        PDF, PNG, JPEG, TIFF, WebP, AVIF and HEIF are supported and all receive
+        the same ReproFig identity. Existing documents and scientific
+        containers are handled by ``PyFLASH.publication.embed_file``.
+    dpi, dpi_preset, render_preset : optional
+        Exact dots per inch, or ReproFig's ``screen``, ``continuous_tone`` or
+        ``line_art`` preset. Exact ``dpi`` wins.
+    width, height : float, optional
+        Render dimensions in inches. Supplying one preserves the aspect ratio.
+    format_options : mapping, optional
+        Encoder options for every format, or a mapping keyed by format.
+    transparent : bool
+        Preserve a transparent canvas when the chosen carrier supports it.
+    sanitize_name : bool
+        Remove legacy filesystem-hostile characters from ``image_name``. Set
+        false only when the caller has already supplied a deliberate filename.
+    proof : bool, optional
+        Capture semantic marks and a shared proof root. The default remains off.
+    proof_policy : mapping, optional
+        Required verification meanings plus non-secret signing, trust and
+        encryption references. Password values are accepted only through the
+        named environment-variable fields in the policy.
     """
     from matplotlib import pyplot as plt
     from PyFLASH.config import Config, apply_matplotlib_fast_path
@@ -1244,27 +1327,69 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             return "\\\\?\\UNC\\" + abs_path.lstrip("\\")
         return "\\\\?\\" + abs_path
 
-    image_name = strip_name(image_name)
+    image_name = strip_name(image_name) if sanitize_name else str(image_name)
     if subfolder is not None:
         save_path = os.path.join(save_path, subfolder)
 
-    ext = ".svg"
-    full_path = os.path.join(save_path, f"{image_name}{ext}")
+    selected_formats = _normalise_figure_formats(
+        figure_formats
+        if figure_formats is not None
+        else getattr(Config, "FIGURE_FORMATS", ("svg",))
+    )
+    full_paths = [
+        os.path.join(save_path, f"{image_name}.{extension}")
+        for extension in selected_formats
+    ]
+    full_path = full_paths[0]
 
-    save_full_path = full_path
+    save_full_paths = list(full_paths)
     # Warn if path approaches Windows MAX_PATH limit, then save through the
     # extended-length path prefix so long metric names still write correctly.
     if os.name == "nt" and len(full_path) > 245:
-        import warnings
         warnings.warn(
             f"Path length ({len(full_path)} chars) exceeds 245. "
             f"Consider setting Config.ALIASES or shortening the base path. "
             f"Path: {full_path}",
             stacklevel=2,
         )
-        save_full_path = _windows_extended_path(full_path)
+        save_full_paths = [_windows_extended_path(path) for path in full_paths]
 
     use_skip = skip_existing if skip_existing is not None else Config.SKIP_EXISTING
+    selected_profile = (
+        figure_profile
+        if figure_profile is not None
+        else getattr(Config, "FIGURE_PROFILE", "master")
+    )
+    if selected_profile not in {"master", "public", "minimal_public"}:
+        raise ValueError(
+            "figure_profile must be 'master', 'public', or 'minimal_public'"
+        )
+    if figure_safe_columns is None:
+        figure_safe_columns = getattr(Config, "FIGURE_SAFE_COLUMNS", None)
+    if public_sources is None:
+        public_sources = getattr(Config, "FIGURE_PUBLIC_SOURCES", None)
+    if write_companion_csv is None:
+        write_companion_csv = bool(getattr(Config, "FIGURE_COMPANION_CSV", False))
+    if dpi is None:
+        dpi = getattr(Config, "FIGURE_DPI", None)
+    if dpi_preset is None:
+        dpi_preset = getattr(Config, "FIGURE_DPI_PRESET", None)
+    if render_preset is None:
+        render_preset = getattr(Config, "FIGURE_RENDER_PRESET", None)
+    if width is None:
+        width = getattr(Config, "FIGURE_WIDTH", None)
+    if height is None:
+        height = getattr(Config, "FIGURE_HEIGHT", None)
+    if format_options is None:
+        format_options = getattr(Config, "FIGURE_FORMAT_OPTIONS", None)
+    if allow_reencode is None:
+        allow_reencode = bool(getattr(Config, "FIGURE_ALLOW_REENCODE", False))
+    if proof_policy is None:
+        proof_policy = getattr(Config, "FIGURE_PROOF_POLICY", None)
+    proof_policy = dict(proof_policy or {})
+    if proof is None:
+        proof = bool(getattr(Config, "FIGURE_PROOF", False) or proof_policy)
+    proof = bool(proof)
 
     # Notify observers with the live figure before the caller closes it (and
     # before rasterize_data_artists mutates it for SVG). Fires regardless of
@@ -1274,7 +1399,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
 
     if Config.SAVE_MODE:
         os.makedirs(_windows_extended_path(save_path), exist_ok=True)
-        if use_skip and os.path.isfile(save_full_path):
+        if use_skip and all(os.path.isfile(path) for path in save_full_paths):
             if verbose:
                 _log.hint(f"Skipped (exists): {full_path}")
             return full_path
@@ -1297,28 +1422,179 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         # Carry the producing call inside the file as well as in the folder's
         # figures.json: a manifest is keyed by filename, so a renamed or copied
         # figure loses the entry but keeps what is embedded in the SVG.
+        _prepared_record = None
         try:
             from PyFLASH import provenance
 
-            _svg_metadata = provenance.svg_metadata(full_path, image_name)
-        except Exception:
-            _svg_metadata = {}
-
-        with plt.rc_context({'svg.fonttype': 'none', 'mathtext.default': 'regular'}):
-            figure.savefig(
-                save_full_path,
-                metadata=_svg_metadata or None,
-                **pyflash_savefig_kwargs(
-                    bbox_inches=save_bbox,
-                    pad_inches=pad_inches,
-                    bbox_extra_artists=extra_artist,
-                    transparent=True,
-                ),
+            _prepared_record, _svg_metadata, _described = provenance.prepare_figure_record(
+                figure,
+                full_path,
+                image_name,
+                figure_profile=selected_profile,
+                safe_columns=figure_safe_columns,
+                public_sources=public_sources,
+                proof=proof,
             )
-            normalize_pyflash_svg_canvas(save_full_path, save_bbox=save_bbox)
+        except Exception as exc:
+            if selected_profile != "master" or proof:
+                raise
+            warnings.warn(
+                f"Figure provenance is incomplete: {type(exc).__name__}: {exc}",
+                stacklevel=2,
+            )
+            try:
+                _svg_metadata = provenance.svg_metadata(full_path, image_name)
+            except Exception:
+                _svg_metadata = {}
 
-        if _FIG_SAVED_OBSERVERS:
-            _notify_fig_saved_observers(full_path, image_name, subfolder, bool(montage))
+        from reprofig import save_figure as _reprofig_save_figure
+        from reprofig import validate_artifact
+
+        _companion_base_record = _prepared_record
+        _variant_record = _prepared_record
+        base_savefig_kwargs = pyflash_savefig_kwargs(
+            bbox_inches=save_bbox,
+            pad_inches=pad_inches,
+            bbox_extra_artists=extra_artist,
+            transparent=bool(transparent),
+        )
+        for index, (carrier_path, save_carrier_path, extension) in enumerate(
+            zip(full_paths, save_full_paths, selected_formats)
+        ):
+            if use_skip and os.path.isfile(save_carrier_path):
+                continue
+            descriptor, temporary_path = tempfile.mkstemp(
+                dir=_windows_extended_path(save_path),
+                prefix=f".{image_name}.",
+                suffix=f".{extension}",
+            )
+            os.close(descriptor)
+            # ReproFig distinguishes a not-yet-written target by suffix.  An
+            # empty mkstemp file looks like a corrupt carrier instead.
+            os.unlink(temporary_path)
+            temporary_save_path = _windows_extended_path(temporary_path)
+            try:
+                with plt.rc_context({'svg.fonttype': 'none', 'mathtext.default': 'regular'}):
+                    if _variant_record is None:
+                        figure.savefig(
+                            temporary_save_path,
+                            format=extension,
+                            **base_savefig_kwargs,
+                        )
+                        _saved_record = None
+                    else:
+                        _saved_record = _reprofig_save_figure(
+                            figure,
+                            temporary_save_path,
+                            record=_variant_record,
+                            figure_profile=selected_profile,
+                            dpi=dpi,
+                            dpi_preset=dpi_preset,
+                            render_preset=render_preset,
+                            width=width,
+                            height=height,
+                            format_options=_format_options_for(
+                                format_options, extension
+                            ),
+                            write_companion_csv=False,
+                            savefig_kwargs=base_savefig_kwargs,
+                            allow_reencode=bool(allow_reencode),
+                            safe_columns=figure_safe_columns,
+                            public_sources=public_sources,
+                            proof=proof,
+                            # PyFLASH normalizes the SVG canvas after rendering;
+                            # policy signing/encryption is therefore applied
+                            # below, after the final visual reference refresh.
+                            proof_policy=None,
+                        )
+                if extension == "svg":
+                    normalize_pyflash_svg_canvas(
+                        temporary_save_path, save_bbox=save_bbox
+                    )
+                    if proof and _saved_record is not None:
+                        from reprofig import embed_file, refresh_visual_reference
+
+                        _saved_record = refresh_visual_reference(
+                            temporary_save_path, _saved_record
+                        )
+                        embed_file(
+                            temporary_save_path,
+                            _saved_record,
+                            output_path=temporary_save_path,
+                        )
+                if proof and _saved_record is not None:
+                    from reprofig import apply_artifact_policy
+
+                    _saved_record, _proof_report = apply_artifact_policy(
+                        temporary_save_path,
+                        proof_policy,
+                        record=_saved_record,
+                        reuse_encrypted_sections=any(
+                            bool(value.get("encrypted"))
+                            for value in (
+                                (_saved_record.extensions.get("proof") or {}).get(
+                                    "sections", []
+                                )
+                            )
+                        ),
+                    )
+                    reports = dict(
+                        getattr(figure, "_reprofig_proof_reports", {}) or {}
+                    )
+                    reports[carrier_path] = _proof_report.to_dict()
+                    setattr(figure, "_reprofig_proof_reports", reports)
+                    # Reuse encrypted sections across variants so every carrier
+                    # has one evidence root; signatures are rebound per visual.
+                    _variant_record = _saved_record
+                if _saved_record is not None:
+                    validation = validate_artifact(
+                        temporary_save_path,
+                        expected_profile=selected_profile,
+                        public_safety=selected_profile != "master",
+                    )
+                    if not validation.valid:
+                        raise ValueError(
+                            "; ".join(
+                                issue.message
+                                for issue in validation.issues
+                                if issue.severity == "error"
+                            )
+                        )
+                os.replace(temporary_save_path, save_carrier_path)
+            finally:
+                try:
+                    os.unlink(temporary_save_path)
+                except OSError:
+                    pass
+
+            if _prepared_record is not None:
+                provenance.stage_prepared_save(
+                    carrier_path, _described, _saved_record
+                )
+            if _FIG_SAVED_OBSERVERS:
+                _notify_fig_saved_observers(
+                    carrier_path, image_name, subfolder, bool(montage)
+                )
+        if _companion_base_record is not None and write_companion_csv:
+            from reprofig import derive_profile, write_companion_tables
+
+            companion_profile = (
+                "public" if selected_profile == "minimal_public"
+                else selected_profile
+            )
+            companion_record = derive_profile(
+                _companion_base_record,
+                companion_profile,
+                safe_columns=figure_safe_columns,
+                public_sources=public_sources,
+            )
+            write_companion_tables(companion_record, full_path)
+        try:
+            from reprofig import detach as _detach_figure_record
+
+            _detach_figure_record(figure)
+        except Exception:
+            pass
 
     if verbose:
         _log.confirm(f"Figure saved to {full_path}")

@@ -413,7 +413,7 @@ def test_pyflash_runner_describe_status_for_func():
     # module-qualified pipeline target — used to decide whether to flag a 0-record run.
     assert runner._describe_status_for_func("mean_bars") == "covered"
     assert runner._describe_status_for_func("plot_mean_bars") == "covered"
-    assert runner._describe_status_for_func("volcano") == "unreviewed"
+    assert runner._describe_status_for_func("volcano") == "covered"
     assert runner._describe_status_for_func("plot_images") == "exempt"
     assert runner._describe_status_for_func("correlation_pipeline") == "covered"
     assert runner._describe_status_for_func("PyFLASH.pipeline.correlation") == "covered"
