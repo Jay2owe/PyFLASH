@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -37,8 +38,6 @@ jobs:
     environment:
       name: pypi
       url: https://pypi.org/p/PyFLASH-analysis
-    permissions:
-      id-token: write
     steps:
       - name: Download distributions
         uses: actions/download-artifact@v8
@@ -47,3 +46,6 @@ jobs:
           path: dist/
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
