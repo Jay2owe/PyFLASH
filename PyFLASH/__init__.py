@@ -11,6 +11,8 @@ Usage:
     batch = load_state("my_batch.pkl")
 """
 
+__version__ = "0.2.0"
+
 from PyFLASH.markers import (
     Attribute, Antibody, cellMarker, objectMarker, stainColors,
 )

@@ -50,11 +50,23 @@ _stats_cache: dict = {}
 
 
 def stats_cache_key(column_name, condition_names, specificity, stats_options=None):
-    """Build a hashable cache key for a stats computation."""
+    """Build a hashable cache key for a stats computation.
+
+    Folds in the two session-wide settings that change the answer but are not
+    visible in *stats_options*: ``Config.POSTHOC_CORRECTION``, which
+    ``multipleComparisons`` resolves ``"auto"`` against after this key is
+    built, and ``Config.CORRECTION_AUDIT``, which decides which
+    ``Correction-*`` rows the results dict carries. Without them, switching
+    either mid-session would serve a stale verdict.
+    """
+    from PyFLASH.config import Config
+
     conds = frozenset(condition_names) if condition_names else frozenset()
     spec = tuple(specificity) if specificity else ()
     opts = tuple(sorted((stats_options or {}).items()))
-    return (str(column_name), conds, spec, opts)
+    session = (str(getattr(Config, "POSTHOC_CORRECTION", "auto")),
+               str(getattr(Config, "CORRECTION_AUDIT", "cheap")))
+    return (str(column_name), conds, spec, opts, session)
 
 
 def clear_stats_cache():
@@ -87,6 +99,13 @@ def extract_p_and_stats_from_results(result_object, comparisons):
 
 def results_to_excel(results_dict, other, experiment_save_path, save_name,
                      verbose=True, output_dir=None):
+    """Write the stats results dict and the summary strings to one CSV.
+
+    ``results_dict`` is an open namespace, so keys beginning with an underscore
+    are reserved for plumbing passed between stages of the analysis (raw group
+    sizes, rank vectors, the correction audit object) and are never written as
+    result rows.
+    """
     out_dir = output_dir or experiment_save_path
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{save_name}.csv")
@@ -95,6 +114,8 @@ def results_to_excel(results_dict, other, experiment_save_path, save_name,
         writer.writerow(["Statistics Results"])
         writer.writerow(["Test", "Statistic", "P-Values"])
         for test_name, values in results_dict.items():
+            if str(test_name).startswith("_"):
+                continue        # internal plumbing, not a result row
             if len(values) > 1 and isinstance(values[1], list):
                 row = [test_name, values[0], *values[1]]
             else:
@@ -606,6 +627,7 @@ def runITTest(
     results_dict[method_key] = [float(statistic), float(pvalue)]
     # Legacy key kept for old report/pipeline parsers.
     results_dict["Independent T Test"] = [float(statistic), float(pvalue)]
+    _publish_uncorrected(results_dict, [float(pvalue)], basis="raw")
     annotation = [get_annotation(pvalue, ns)]
     return [float(pvalue)], annotation, (float(statistic), float(pvalue)), results_dict, method_label
 
@@ -622,6 +644,7 @@ def mwu_multiple_comparisons(df_list, comparisons, results_dict, ns="ns"):
         statistics.append(float(statistic))
         pvalues.append(float(pvalue))
     results_dict["Mann-Whitney U"] = [statistics, pvalues]
+    _publish_uncorrected(results_dict, pvalues, basis="raw")
     annotations = [get_annotation(pvalue, ns) for pvalue in pvalues]
     return pvalues, annotations, (statistics, pvalues), results_dict, "Mann-Whitney U"
 
@@ -760,12 +783,18 @@ def _normalize_lsd_correction(posthoc_correction, n_tests):
 
 
 def runOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tukey", posthoc_correction="auto"):
+    from PyFLASH.config import Config
+
     groups = _coerce_groups(df_list)
     posthoc_method, posthoc_label, embedded_correction = _normalize_owa_posthoc(posthoc)
     if len(groups) < 2 or any(len(g) <= 1 for g in groups):
         return [], [], (float("nan"), float("nan")), results_dict, posthoc_label
     f_stat, pvalue = f_oneway(*groups)
     results_dict["OWA"] = [float(f_stat), float(pvalue)]
+    # Tukey, Dunnett, Scheffe and Tamhane all carry their own multiplicity
+    # handling inside the statistic, so what they return is already adjusted;
+    # only Fisher LSD hands back raw p-values.
+    raw_pvalues = None
     try:
         if posthoc_method == "tukey":
             tukey_result = _run_tukey(*groups)
@@ -780,18 +809,56 @@ def runOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tukey", posthoc
             statistics = [1] * len(pvalues)
         else:
             statistics, pvalues = _run_fisher_lsd(groups, comparisons)
+            raw_pvalues = [float(p) for p in pvalues]
+            # Published before the correction is chosen: Westfall-Young is
+            # decided from these inputs, not from the p-values alone.
+            _publish_uncorrected(
+                results_dict, raw_pvalues, basis="raw",
+                family="value", statistic="lsd",
+                groups=[np.asarray(g, float) for g in groups],
+                pairs=tuple(
+                    tuple(int(part) - 1 for part in comp.split("-"))
+                    for comp in comparisons
+                ),
+            )
             if embedded_correction is None:
                 method, correction = _normalize_lsd_correction(posthoc_correction, len(comparisons))
+            else:
+                method, correction = embedded_correction, None
+            wy = None
+            if method == "westfall_young":
+                try:
+                    wy = _westfall_young_from_inputs(
+                        results_dict, raw_pvalues, "lsd", Config)
+                except CorrectionUnavailable as exc:
+                    results_dict["Correction-Unavailable"] = [str(exc), np.nan]
+            pvalues, method, applied = _correct_or_fall_back(
+                pvalues, method, correction, len(comparisons), results_dict,
+                wy=wy)
+            if correction is not None:
+                correction = applied
+                _record_applied_correction(results_dict, correction)
                 if correction != "Uncorrected":
                     posthoc_label = f"Fisher LSD {correction}"
-            else:
-                method = embedded_correction
-            pvalues = _apply_kw_correction(pvalues, method)
     except ValueError:
         if posthoc_method == "tukey":
             return [], [], (float(f_stat), float(pvalue)), results_dict, posthoc_label
         raise
     results_dict[posthoc_label.replace(" ", "-")] = [statistics, pvalues]
+    if raw_pvalues is None:
+        # Fisher LSD already published above, before its correction was chosen.
+        _publish_uncorrected(
+            results_dict, pvalues, basis="self_adjusted",
+            family="value_unsupported",
+            reason=(
+                f"{posthoc_label} p-values cannot be reproduced cheaply under "
+                "permutation - the studentised range and the multivariate t "
+                "each need a numerical integral per draw - so no permutation "
+                "null is available. Both already account for comparisons that "
+                "share a group; Fisher LSD is the ANOVA post-hoc that supports "
+                "Westfall-Young."
+            ),
+        )
     annotations = [get_annotation(p, ns) for p in pvalues]
     return pvalues, annotations, (float(f_stat), float(pvalue)), results_dict, posthoc_label
 
@@ -868,6 +935,18 @@ def runWelchOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tamhane T2
         results_dict["Welch_posthoc_error"] = [str(exc), np.nan]
         return [], [], (f_stat, pvalue), results_dict, f"{posthoc_label} (error: {exc})"
     results_dict[posthoc_label.replace(" ", "-")] = [statistics, pvalues]
+    # Games-Howell and Tamhane T2 both carry their own correction.
+    _publish_uncorrected(
+        results_dict, pvalues, basis="self_adjusted",
+        family="unequal_variance",
+        reason=(
+            "Permuting values across groups imposes equal variance, which is "
+            "the assumption Welch ANOVA is chosen to avoid, so a permutation "
+            "null here would be wrong rather than approximate. Games-Howell "
+            "and Tamhane T2 carry their own correction; a studentised "
+            "bootstrap would be needed for a calibrated alternative."
+        ),
+    )
     annotations = [get_annotation(p, ns) for p in pvalues]
     return pvalues, annotations, (f_stat, pvalue), results_dict, posthoc_label
 
@@ -887,6 +966,14 @@ def _normalize_kw_posthoc(posthoc):
 
 
 _KW_CORRECTION_ALIASES = {
+    # Permutation-calibrated. Opt-in only: "auto" never resolves here.
+    "westfall_young": ("westfall_young", "Westfall-Young"),
+    "westfall": ("westfall_young", "Westfall-Young"),
+    "wy": ("westfall_young", "Westfall-Young"),
+    "permutation": ("westfall_young", "Westfall-Young"),
+    "perm": ("westfall_young", "Westfall-Young"),
+    "maxt": ("westfall_young", "Westfall-Young"),
+    "max_t": ("westfall_young", "Westfall-Young"),
     "bonferroni": ("bonferroni", "Bonferroni"),
     "bonf": ("bonferroni", "Bonferroni"),
     "corrected": ("bonferroni", "Bonferroni"),
@@ -979,10 +1066,30 @@ def _normalize_kw_correction(posthoc_correction, n_tests):
     raise ValueError(f"posthoc_correction must be one of: {valid}")
 
 
-def _apply_kw_correction(pvalues, method):
+class CorrectionUnavailable(ValueError):
+    """The requested correction cannot be supplied on this test path.
+
+    A distinct type, so the fallback branch can let a genuine bug in the
+    permutation engine surface instead of reporting it as "unavailable".
+    """
+
+
+_NO_NULL_MESSAGE = (
+    "Westfall-Young needs a permutation null, which is not available for this "
+    "test. Rank post-hocs (Dunn, Conover) support it; Welch ANOVA cannot, "
+    "because permuting values across groups imposes the equal variance Welch "
+    "exists to avoid."
+)
+
+
+def _apply_kw_correction(pvalues, method, wy=None):
     values = [float(p) for p in pvalues]
     if method == "none":
         return values
+    if method == "westfall_young":
+        if wy is None or len(wy) != len(values):
+            raise CorrectionUnavailable(_NO_NULL_MESSAGE)
+        return [float(p) for p in wy]
     if method == "bonferroni":
         return [bonferroni_correction(p, len(values)) for p in values]
     if method == "sidak":
@@ -994,6 +1101,8 @@ def _apply_kw_correction(pvalues, method):
 
 
 def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", posthoc_correction="auto"):
+    from PyFLASH.config import Config
+
     groups = _coerce_groups(df_list)
     posthoc = _normalize_kw_posthoc(posthoc)
     if len(groups) < 2:
@@ -1016,6 +1125,18 @@ def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", postho
             results_dict["Posthoc_error"] = [msg, np.nan]
             return [], [], (float(kw_statistic), float(kw_pvalue)), results_dict, f"{posthoc} (error: {msg})"
         results_dict[posthoc] = [1, pvalues]
+        # The studentised range already accounts for the family, so these are
+        # self-adjusted rather than raw.
+        _publish_uncorrected(
+            results_dict, pvalues, basis="self_adjusted",
+            family="rank_unsupported",
+            reason=(
+                f"{posthoc} p-values cannot be reproduced from the pooled mean "
+                "ranks - Nemenyi comes from a clipped studentised-range "
+                "approximation and DSCF re-ranks within each pair - so no "
+                "permutation null is available. Dunn and Conover support it."
+            ),
+        )
         annotations = [get_annotation(result, ns) for result in pvalues]
         return pvalues, annotations, (float(kw_statistic), float(kw_pvalue)), results_dict, posthoc
 
@@ -1038,6 +1159,27 @@ def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", postho
         dunn_uncorrected.append(dunn_p)
         conover_uncorrected.append(conover_p)
 
+    # Everything the correction audit needs. Published rather than consumed
+    # here so the audit stays in one place for every test path. rankdata gives
+    # mid-ranks, which is exactly the cache key: untied data always ranks 1..N
+    # and the entry is shared across the whole batch, while a tied column gets
+    # its own entry. Pooling order and group_sizes order must agree, or the
+    # tied case is silently wrong.
+    pooled = np.concatenate([np.asarray(g, float) for g in groups])
+    _publish_uncorrected(
+        results_dict,
+        conover_uncorrected if posthoc == "Conover" else dunn_uncorrected,
+        basis="raw",
+        family="rank",
+        statistic="conover" if posthoc == "Conover" else "dunn",
+        group_sizes=tuple(len(g) for g in groups),
+        ranks=tuple(float(r) for r in stats.rankdata(pooled)),
+        pairs=tuple(
+            tuple(int(part) - 1 for part in comp.split("-"))
+            for comp in comparisons
+        ),
+    )
+
     dunn_bonferroni = _apply_kw_correction(dunn_uncorrected, "bonferroni")
     conover_bonferroni = _apply_kw_correction(conover_uncorrected, "bonferroni")
 
@@ -1055,13 +1197,32 @@ def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", postho
         "Uncorrected": dunn_uncorrected,
     }
     if correction not in conover_by_correction:
-        conover_by_correction[correction] = _apply_kw_correction(conover_uncorrected, correction_method)
-        dunn_by_correction[correction] = _apply_kw_correction(dunn_uncorrected, correction_method)
+        if correction_method == "westfall_young":
+            # Each statistic needs its own null - Conover and Dunn do not share
+            # a denominator - but both derive from the one cached mean-rank
+            # matrix, so this is a closed-form transform, not a second
+            # enumeration.
+            try:
+                conover_wy = _westfall_young_from_inputs(
+                    results_dict, conover_uncorrected, "conover", Config)
+                dunn_wy = _westfall_young_from_inputs(
+                    results_dict, dunn_uncorrected, "dunn", Config)
+            except CorrectionUnavailable as exc:
+                results_dict["Correction-Unavailable"] = [str(exc), np.nan]
+                correction_method, correction = _normalize_kw_correction(
+                    "auto", n_tests)
+            else:
+                conover_by_correction[correction] = conover_wy
+                dunn_by_correction[correction] = dunn_wy
+        if correction not in conover_by_correction:
+            conover_by_correction[correction] = _apply_kw_correction(conover_uncorrected, correction_method)
+            dunn_by_correction[correction] = _apply_kw_correction(dunn_uncorrected, correction_method)
         results_dict[f"Conover-{correction}"] = [1, conover_by_correction[correction]]
         results_dict[f"Dunn-{correction}"] = [1, dunn_by_correction[correction]]
 
     conover = conover_by_correction[correction]
     dunn = dunn_by_correction[correction]
+    _record_applied_correction(results_dict, correction)
     posthoc_result = conover if posthoc == "Conover" else dunn
     posthoc_string = f"{posthoc} {correction}"
     annotations = [get_annotation(result, ns) for result in posthoc_result]
@@ -1224,8 +1385,12 @@ def runLinearModel(
         raw_pvalues.append(float(pvalue))
 
     correction_method, correction = _normalize_kw_correction(posthoc_correction, len(comparisons))
-    pvalues = _apply_kw_correction(raw_pvalues, correction_method)
+    pvalues, correction_method, correction = _correct_or_fall_back(
+        raw_pvalues, correction_method, correction, len(comparisons),
+        results_dict)
+    _record_applied_correction(results_dict, correction)
     results_dict["Linear-Model-Contrasts-Uncorrected"] = [statistics, raw_pvalues]
+    _publish_uncorrected(results_dict, raw_pvalues, basis="raw")
     results_dict[f"Linear-Model-Contrasts-{correction}"] = [statistics, pvalues]
     annotations = [get_annotation(p, ns) for p in pvalues]
     cov_label = f" {cov_type}" if cov_type else ""
@@ -1258,6 +1423,7 @@ def runTWA(experiment, column, factors=None, comparisons=None, results_dict=None
     tukey_results = _run_tukey(*groups)
     statistics, pairwise_pvalues = extract_p_and_stats_from_results(tukey_results, comparisons)
     results_dict["Tukey"] = [statistics, pairwise_pvalues]
+    _publish_uncorrected(results_dict, pairwise_pvalues, basis="self_adjusted")
     annotations = [get_annotation(result, ns) for result in pairwise_pvalues]
     return pairwise_pvalues, annotations, (sum_sqs, pvals), results_dict, "Tukey"
 
@@ -1717,6 +1883,343 @@ def plot_comparison_lines_from_fig_data(*args, **kwargs):
     return plot_comparison_lines_from_figdata(*args, **kwargs)
 
 
+def _record_applied_correction(results_dict, label):
+    """Remember which correction actually produced the reported p-values.
+
+    Recovered from data rather than by splitting a display string like
+    "Dunn Bonferroni", which breaks the moment someone adds a hyphen.
+    """
+    inputs = results_dict.get("_audit_inputs")
+    if not isinstance(inputs, dict):
+        inputs = {}
+    inputs["correction"] = label
+    results_dict["_audit_inputs"] = inputs
+    return results_dict
+
+
+def _public_results(results_dict):
+    """The result rows only - no underscore-prefixed plumbing.
+
+    ``_audit_inputs`` holds raw value and rank arrays; letting those reach a
+    stored record would inflate every manifest with a second copy of the data.
+    """
+    return {k: v for k, v in results_dict.items() if not str(k).startswith("_")}
+
+
+def _strip_audit_inputs(results_dict):
+    """A copy of *results_dict* without the raw arrays the audit needed.
+
+    ``_audit_inputs`` carries the observed values and the rank vector. The
+    stats cache lives for a whole session, so pinning a figure's data there
+    long after the figure is drawn is pure waste.
+    """
+    inputs = results_dict.get("_audit_inputs")
+    if not inputs:
+        return results_dict
+    trimmed = dict(results_dict)
+    trimmed["_audit_inputs"] = {
+        key: value for key, value in inputs.items()
+        if key not in ("groups", "ranks")
+    }
+    return trimmed
+
+
+def _publish_uncorrected(results_dict, pvalues, *, basis="raw", **extra):
+    """Publish a post-hoc's own p-values on the one channel the audit reads.
+
+    Every post-hoc path writes here, aligned one-to-one with *comparisons*, so
+    the correction audit never has to know which test produced the numbers.
+    *basis* records whether those p-values are raw or already adjusted by the
+    post-hoc itself; *extra* carries whatever a path can offer towards a
+    permutation null.
+    """
+    values = []
+    for p in pvalues:
+        try:
+            values.append(float(p))
+        except (TypeError, ValueError):
+            values.append(float("nan"))
+    results_dict["Posthoc-Uncorrected"] = [1, values]
+    inputs = results_dict.get("_audit_inputs")
+    if not isinstance(inputs, dict):
+        inputs = {}
+    inputs["basis"] = basis
+    inputs.update(extra)
+    results_dict["_audit_inputs"] = inputs
+    return results_dict
+
+
+_LADDER_ROWS = (
+    ("uncorrected", "Correction-Uncorrected"),
+    ("holm", "Correction-Holm"),
+    ("bh_q", "Correction-BH-q"),
+    ("bonferroni", "Correction-Bonferroni"),
+    ("sidak", "Correction-Sidak"),
+    ("westfall_young", "Correction-WestfallYoung"),
+)
+
+_PERMUTATION_ROWS = (
+    ("alpha_star", "Correction-AlphaStar"),
+    ("alpha_bonferroni", "Correction-AlphaBonferroni"),
+    ("fwer_if_uncorrected", "Correction-FWER-Uncorrected"),
+    ("fwer_of_bonferroni", "Correction-FWER-Bonferroni"),
+    ("p_floor", "Correction-pFloor"),
+    ("p_resolution", "Correction-NullResolution"),
+)
+
+
+def _audit_to_results_dict(audit, comparisons, results_dict, results_strings,
+                           basis="raw"):
+    """Write the correction ladder into results_dict so the CSV carries it.
+
+    Row shape matches ``results_to_excel``: ``[label, 1, *pvalues]`` for the
+    per-comparison ladders, ``[label, value, nan]`` for the design-wide numbers.
+    Never changes what is plotted - this only records what each convention
+    would have said.
+    """
+    from PyFLASH.stats_extra import verdict_changes
+
+    alpha = float(audit.get("alpha", 0.05))
+    for key, label in _LADDER_ROWS:
+        values = audit.get(key)
+        if values:
+            results_dict[label] = [1, [float(v) for v in values]]
+
+    perm = audit.get("permutation")
+    if perm:
+        for key, label in _PERMUTATION_ROWS:
+            if perm.get(key) is not None:
+                results_dict[label] = [float(perm[key]), np.nan]
+        results_dict["Correction-NullMode"] = [
+            f"{perm.get('mode')} ({perm.get('n_perm')} perms)", np.nan
+        ]
+    elif audit.get("skipped"):
+        results_dict["Correction-Unavailable"] = [str(audit["skipped"]), np.nan]
+
+    # Whether the p-values the ladder was applied to were raw or already
+    # multiplicity-adjusted by the post-hoc itself (Tukey, Dunnett, Nemenyi and
+    # friends carry their own correction in the studentised range). On a
+    # self-adjusted basis the ladder rows are a second correction on top, so
+    # they read conservative - the reader has to be told which they are looking
+    # at.
+    results_dict["Correction-Basis"] = [str(basis), np.nan]
+
+    # Guarded on its own: the ladder rows above are the always-on promise, and
+    # a fault in the summary must not take them down with it.
+    try:
+        changes = verdict_changes(audit, comparisons, alpha=alpha)
+    except Exception as exc:
+        results_dict["Correction_verdict_error"] = [str(exc), np.nan]
+        changes = {}
+    if changes:
+        results_strings["Correction audit"] = [
+            f"{comp}: significant under "
+            f"{', '.join(names) if names else 'no convention'}"
+            for comp, names in changes.items()
+        ]
+    if perm:
+        results_strings["Correction calibration"] = (
+            f"honest alpha*={perm['alpha_star']:.4f} vs Bonferroni "
+            f"{perm['alpha_bonferroni']:.4f}; uncorrected FWER "
+            f"{perm['fwer_if_uncorrected']:.3f}; smallest attainable p "
+            f"{perm['p_floor']:.4g}"
+        )
+    return results_dict
+
+
+# Guard rails on the permutation audit. Above the pooled-n ceiling the
+# sampled branch still costs only ~30 ms, but Bonferroni's conservatism is
+# negligible at that n and the audit has nothing to say, so it is not worth a
+# (20000, k) allocation on a pathological ROI-level call.
+MAX_AUDIT_N = 200
+MIN_AUDIT_GROUP = 2
+
+
+def _westfall_young_from_inputs(results_dict, pvalues, statistic, Config):
+    """Westfall-Young values for one statistic, from the published inputs.
+
+    Reuses the same cached null the audit uses, so asking for the correction
+    costs nothing beyond what the audit already paid on the rank path.
+    """
+    from PyFLASH import stats_extra as _se
+
+    inputs = dict(results_dict.get("_audit_inputs") or {})
+    # explicit_wy: the request itself authorises the per-column cost the
+    # "cheap" tier would otherwise decline.
+    plan, reason = _permutation_plan(inputs, len(pvalues), Config,
+                                     explicit_wy=True)
+    if plan is None:
+        if reason is None and getattr(Config, "CORRECTION_AUDIT", "cheap") is False:
+            reason = ("Config.CORRECTION_AUDIT is off, so no permutation null "
+                      "was computed")
+        elif reason is None and len(pvalues) < 2:
+            reason = ("a single comparison is not a family, so there is "
+                      "nothing to correct")
+        raise CorrectionUnavailable(reason or _NO_NULL_MESSAGE)
+    if statistic is not None:
+        plan["statistic"] = statistic
+    try:
+        null = _build_null(plan)
+        return _se.westfall_young_from_null(
+            pvalues, null, inputs.get("pairs"))
+    except ValueError as exc:
+        raise CorrectionUnavailable(str(exc)) from exc
+
+
+def _correct_or_fall_back(pvalues, method, label, n_tests, results_dict,
+                          wy=None):
+    """Apply *method*, or record why it could not be and use ``auto`` instead.
+
+    A user who set a session-wide correction should not lose every figure on a
+    path that cannot supply it; the CSV says what happened.
+    """
+    try:
+        return _apply_kw_correction(pvalues, method, wy=wy), method, label
+    except CorrectionUnavailable as exc:
+        results_dict["Correction-Unavailable"] = [str(exc), np.nan]
+        method, label = _normalize_kw_correction("auto", n_tests)
+        return _apply_kw_correction(pvalues, method), method, label
+
+
+def _permutation_plan(inputs, n_comparisons, Config, explicit_wy=False):
+    """Decide whether a permutation null is available, valid and affordable.
+
+    Returns ``(kwargs_or_None, reason_or_None)``. A reason without kwargs is
+    recorded in the CSV, so a reader can tell "not applicable" from
+    "not computed"; no reason means the audit simply had nothing to say.
+    """
+    tier = getattr(Config, "CORRECTION_AUDIT", "cheap")
+    if tier is False:
+        return None, None
+    if n_comparisons < 2:
+        # One comparison is not a family; correcting it is a no-op.
+        return None, None
+    family = inputs.get("family")
+    if family == "rank":
+        sizes = tuple(inputs.get("group_sizes") or ())
+        blocked = _size_guard(sizes)
+        if blocked:
+            return None, blocked
+        return {
+            "family": "rank",
+            "group_sizes": sizes,
+            "ranks": inputs.get("ranks"),
+            "statistic": inputs.get("statistic", "dunn"),
+            "n_resamples": int(getattr(Config, "CORRECTION_RESAMPLES", 20000)),
+            "exact_max": int(getattr(Config, "CORRECTION_EXACT_MAX", 10000)),
+        }, None
+    if family == "value":
+        # Per column rather than per design, so it does not run on every
+        # figure by default. Asking for the correction is asking for its cost.
+        if not (tier == "full" or explicit_wy):
+            return None, None
+        groups = list(inputs.get("groups") or [])
+        blocked = _size_guard(tuple(len(g) for g in groups))
+        if blocked:
+            return None, blocked
+        return {
+            "family": "value",
+            "groups": groups,
+            "statistic": inputs.get("statistic", "lsd"),
+            "n_resamples": int(
+                getattr(Config, "CORRECTION_RESAMPLES_VALUE", 10000)),
+        }, None
+    return None, inputs.get("reason")
+
+
+def _size_guard(sizes):
+    """Why this design is out of bounds for a permutation audit, or None."""
+    if not sizes or min(sizes) < MIN_AUDIT_GROUP:
+        return "a group of one carries no information to permute"
+    if sum(sizes) > MAX_AUDIT_N:
+        return (f"pooled n={sum(sizes)} is above the {MAX_AUDIT_N} ceiling "
+                "for the permutation audit")
+    return None
+
+
+def _build_null(plan):
+    """Turn a plan into a null. The one place either kind is constructed."""
+    from PyFLASH import stats_extra as _se
+
+    plan = dict(plan)
+    if plan.pop("family") == "rank":
+        return _se.permutation_null(
+            plan.pop("group_sizes"), plan.pop("ranks"), **plan)
+    return _se.value_permutation_null(plan.pop("groups"), **plan)
+
+
+def _note_unhonoured_request(results_dict, requested, applied, n_tests, inputs):
+    """Record why a requested correction was not the one reported.
+
+    Some paths never look at ``posthoc_correction`` at all - Welch ANOVA picks
+    Games-Howell or Tamhane T2 and ignores it - so a request can go unanswered
+    without any branch having refused it. Silence there would be the worst
+    outcome: the user believes they switched correction and did not.
+    """
+    if requested is None or "Correction-Unavailable" in results_dict:
+        return
+    try:
+        method, _label = _normalize_kw_correction(requested, n_tests)
+    except ValueError:
+        return
+    if method != "westfall_young":
+        return
+    if "Westfall-Young" in str(applied or ""):
+        return
+    results_dict["Correction-Unavailable"] = [
+        inputs.get("reason") or _NO_NULL_MESSAGE, np.nan]
+
+
+def _run_correction_audit(results_dict, results_strings, comparisons, Config,
+                          requested=None, applied=None):
+    """Compute the correction audit for whatever the post-hoc published.
+
+    One place for every test path: the ``run*`` functions publish their own
+    p-values and whatever they can offer towards a null, and this decides what
+    is affordable and writes the result. Reads ``Posthoc-Uncorrected``; does
+    nothing if the path never published to it.
+    """
+    from PyFLASH import stats_extra as _se
+
+    raw = results_dict.get("Posthoc-Uncorrected")
+    raw_p = raw[1] if isinstance(raw, (list, tuple)) and len(raw) > 1 else None
+    if not raw_p:
+        return None
+    inputs = results_dict.get("_audit_inputs") or {}
+    _note_unhonoured_request(results_dict, requested, applied, len(raw_p), inputs)
+
+    # An explicit Westfall-Young request authorises the per-column cost here
+    # too, so the CSV carries the column the reported verdict came from.
+    explicit_wy = False
+    if requested is not None:
+        try:
+            explicit_wy = _normalize_kw_correction(
+                requested, len(raw_p))[0] == "westfall_young"
+        except ValueError:
+            explicit_wy = False
+    plan, reason = _permutation_plan(inputs, len(raw_p), Config,
+                                     explicit_wy=explicit_wy)
+    null = None
+    if plan is not None:
+        try:
+            null = _build_null(plan)
+        except Exception as exc:
+            reason = f"the permutation null could not be built: {exc}"
+    audit = _se.correction_audit(
+        raw_p, null=null, want_permutation=False, pairs=inputs.get("pairs"),
+    )
+    if reason and not audit.get("permutation"):
+        audit.setdefault("skipped", reason)
+    _audit_to_results_dict(
+        audit, comparisons, results_dict, results_strings,
+        basis=inputs.get("basis", "raw"),
+    )
+    # Kept for the describe layer (report.build_comparison_record); the leading
+    # underscore keeps it out of the CSV.
+    results_dict["_correction_audit"] = audit
+    return audit
+
+
 def _effects_to_results_dict(effects, results_dict):
     """Record computed effect sizes into the results dict written to CSV."""
     for key, value in (effects.get("overall") or {}).items():
@@ -1819,9 +2322,12 @@ def _emit_comparison_record(
             comparisons=comparisons,
             pairwise_pvalues=results,
             effect_strings=effect_strings,
-            raw_stats=results_dict,
+            raw_stats=_public_results(results_dict),
             normal=normal,
             factor_terms=term_labels,
+            correction_audit=results_dict.get("_correction_audit"),
+            correction_reported=(
+                (results_dict.get("_audit_inputs") or {}).get("correction")),
         )
         plot_rows = []
         for group_index, group_values in enumerate(valid_groups):
@@ -1912,6 +2418,13 @@ def multipleComparisons(
     previously computed results are reused (draw still runs if requested).
     """
     from PyFLASH.config import Config
+
+    if posthoc_correction in (None, "auto"):
+        # A session-wide switch, so a whole run can move to the calibrated
+        # correction without threading a parameter through every call. The
+        # signature default stays the literal "auto" so the function is still
+        # readable and callable outside a configured session.
+        posthoc_correction = getattr(Config, "POSTHOC_CORRECTION", "auto")
 
     if not dfs:
         return "N/A", "N/A", None, {}
@@ -2183,6 +2696,18 @@ def multipleComparisons(
         except Exception as e:
             results_dict["Effect_error"] = [str(e), np.nan]
 
+    # ── Correction audit ────────────────────────────────────────────
+    # Always computed, never plotted. The closed-form ladder costs nothing and
+    # answers "would a different correction convention have changed this?"
+    # without touching the reported verdict.
+    if getattr(Config, "CORRECTION_AUDIT", "cheap") is not False:
+        try:
+            _run_correction_audit(
+                results_dict, results_strings, comparisons, Config,
+                requested=posthoc_correction, applied=post_hoc)
+        except Exception as e:
+            results_dict["Correction_audit_error"] = [str(e), np.nan]
+
     if save_name:
         results_to_excel(
             results_dict, results_strings, experiment.data_path, save_name,
@@ -2223,7 +2748,7 @@ def multipleComparisons(
             'annotations': annotations,
             'results': results,
             'overall': overall,
-            'results_dict': results_dict,
+            'results_dict': _strip_audit_inputs(results_dict),
             'comparisons': comparisons,
             'results_strings': results_strings,
             'effect_strings': effect_strings,

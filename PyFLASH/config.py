@@ -87,6 +87,23 @@ class Config:
     FIGURE_PROOF_POLICY = None  # required grades and non-secret key/env references
     USE_PYFLASH_LAYOUT = True
 
+    # ── Correction calibration ─────────────────────────────────────────
+    # The audit is always recorded and never changes what is plotted.
+    # "cheap"  - closed-form ladder everywhere, plus the cached permutation
+    #            audit on rank post-hocs (one enumeration per design, shared
+    #            across every marker in a batch)
+    # "full"   - also permutes observed values for ANOVA / Fisher LSD, which is
+    #            per column rather than per design (~30 ms a figure)
+    # False    - closed-form ladder only
+    CORRECTION_AUDIT = "cheap"
+    CORRECTION_RESAMPLES = 20000      # Monte Carlo draws when exact is too big
+    CORRECTION_EXACT_MAX = 10000      # enumerate exactly at or below this many
+    CORRECTION_RESAMPLES_VALUE = 10000  # draws for the per-column value null
+    # Session-wide default for posthoc_correction. "auto" is the historical
+    # rule (Bonferroni above three comparisons, otherwise uncorrected); set
+    # "westfall-young" to switch a whole session to the calibrated correction.
+    POSTHOC_CORRECTION = "auto"
+
     # ── Effect sizes ───────────────────────────────────────────────────
     EFFECT_SIZES = True        # compute effect sizes alongside p-values
     EFFECT_CI = True           # bootstrap CIs for parametric pairwise effects

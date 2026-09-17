@@ -440,6 +440,8 @@ def build_comparison_record(
     raw_stats=None,
     normal=None,
     factor_terms=None,
+    correction_audit=None,
+    correction_reported=None,
 ):
     """Build a Tier-1 record for a group-comparison plot (bars/box/etc.).
 
@@ -488,6 +490,18 @@ def build_comparison_record(
             record["test"]["statistic"] = _f(stat)
             record["test"]["p"] = _f(p)
 
+    # Which correction conventions call each comparison significant. Guarded,
+    # because report.py must never raise into the plotting path.
+    changes = {}
+    if correction_audit:
+        try:
+            from PyFLASH.stats_extra import verdict_changes
+            changes = verdict_changes(
+                correction_audit, comparisons,
+                alpha=float(correction_audit.get("alpha", 0.05)))
+        except Exception:
+            changes = {}
+
     pairwise = []
     if comparisons:
         pvals = pairwise_pvalues
@@ -505,8 +519,21 @@ def build_comparison_record(
             if idx < len(pvals):
                 entry["p"] = _f(pvals[idx])
                 entry["sig"] = significance_stars(entry["p"])
+            if correction_audit:
+                # Merged into the entry rather than kept as a parallel list: a
+                # parallel list would have to be re-aligned by index on every
+                # read, and a misalignment would be invisible.
+                for key in _CORRECTION_KEYS:
+                    values = correction_audit.get(key)
+                    if values and idx < len(values):
+                        entry[f"p_{key}"] = _f(values[idx])
+                entry["significant_under"] = list(changes.get(str(comp), []))
             pairwise.append(entry)
     record["pairwise"] = pairwise
+
+    if correction_audit:
+        record["correction"] = _correction_block(
+            correction_audit, changes, correction_reported)
 
     record["direction"] = _direction(groups)
     if effect_strings:
@@ -534,7 +561,48 @@ def _comparison_headline(record) -> str:
     direction = record.get("direction")
     if direction:
         parts.append(direction)
+    correction = record.get("correction") or {}
+    if correction.get("contested"):
+        parts.append(
+            "correction-dependent: " + ", ".join(correction["contested"]))
     return "; ".join(parts)
+
+
+_CORRECTION_KEYS = ("uncorrected", "holm", "bh_q", "bonferroni", "sidak",
+                    "westfall_young")
+
+
+def _correction_block(audit, changes, reported):
+    """Design-wide correction numbers, plus which verdicts are contested.
+
+    ``contested`` is the field a cross-run query filters on: comparisons that
+    some conventions call significant and others do not. An empty list means
+    the choice of correction decided nothing in this figure.
+    """
+    perm = audit.get("permutation") or {}
+    available = [key for key in _CORRECTION_KEYS if audit.get(key)]
+    if perm.get("alpha_star") is not None:
+        available.append("calibrated")
+    total = len(available)
+    contested = sorted(
+        comp for comp, names in changes.items()
+        if names and total and len(names) < total
+    )
+    block = {
+        "alpha": _f(audit.get("alpha")),
+        "reported": _s(reported),
+        "conventions": available,
+        "contested": contested,
+        "unavailable": _s(audit.get("skipped")),
+    }
+    for key in ("mode", "n_perm"):
+        if perm.get(key) is not None:
+            block[key if key != "mode" else "null_mode"] = perm[key]
+    for key in ("alpha_star", "alpha_bonferroni", "fwer_if_uncorrected",
+                "fwer_of_bonferroni", "p_floor", "p_resolution"):
+        if perm.get(key) is not None:
+            block[key] = _f(perm[key])
+    return block
 
 
 def build_correlation_record(*, x, y, group=None, n=None, r=None, p=None, method=None):

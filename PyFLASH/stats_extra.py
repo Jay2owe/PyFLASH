@@ -22,6 +22,10 @@ keeping PyFLASH BSD-3-Clause.
 """
 from __future__ import annotations
 
+import itertools as _itertools
+import math as _math
+from functools import lru_cache as _lru_cache
+
 import numpy as np
 import pandas as pd
 from scipy import stats as _sps
@@ -338,6 +342,527 @@ def apply_fdr(pvalues, labels=None, families=None, method="fdr_bh", alpha=0.05):
         out.loc[mask, "p_adjusted"] = adj
     out["reject"] = out["p_adjusted"] <= float(alpha)
     return out.reset_index(drop=True)
+
+
+# ── Correction calibration ───────────────────────────────────────────
+# What multiple-comparison correction actually costs on one design, and a
+# permutation-calibrated alternative to the closed-form conventions.
+#
+# The load-bearing observation: under the complete null a rank statistic
+# depends only on the group sizes and the multiset of ranks, never on the
+# data.  One cached computation per design signature therefore serves every
+# marker, metric and figure in a batch.  Untied data always ranks 1..N, so a
+# whole batch usually collapses to a single cache entry; a tied column (Count
+# with repeated zeros, say) gets its own entry and is still computed once.
+#
+# Nothing here decides anything.  These functions report what each convention
+# would say; choosing between them is left to the caller.
+
+_CORRECTION_CONVENTIONS = (
+    "uncorrected", "holm", "bh_q", "bonferroni", "sidak", "westfall_young",
+)
+
+_LADDER_METHODS = (
+    ("holm", "holm"),
+    ("bh_q", "fdr_bh"),
+    ("bonferroni", "bonferroni"),
+    ("sidak", "sidak"),
+)
+
+
+def _ordered_partitions(indices, sizes):
+    """Every way of splitting *indices* into groups of the given *sizes*.
+
+    Yields ``N! / prod(n_i!)`` tuples-of-tuples.  The final group is whatever
+    is left over, so it is never enumerated separately.
+    """
+    if len(sizes) == 1:
+        yield (tuple(indices),)
+        return
+    head, rest = sizes[0], sizes[1:]
+    for first in _itertools.combinations(indices, head):
+        chosen = set(first)
+        remaining = [i for i in indices if i not in chosen]
+        for tail in _ordered_partitions(remaining, rest):
+            yield (first,) + tail
+
+
+def _exact_mean_ranks(ranks, ns):
+    """Mean rank per group for every possible assignment. Shape (total, k)."""
+    idx = tuple(range(len(ranks)))
+    rows = [
+        [ranks[list(part)].sum() / n for part, n in zip(parts, ns)]
+        for parts in _ordered_partitions(idx, tuple(ns))
+    ]
+    return np.asarray(rows, float)
+
+
+def _sampled_mean_ranks(ranks, ns, n_resamples, seed):
+    """Mean rank per group for *n_resamples* random assignments."""
+    rng = np.random.default_rng(seed)
+    perm = np.argsort(rng.random((int(n_resamples), len(ranks))), axis=1)
+    drawn = ranks[perm]
+    cuts = np.cumsum(ns)[:-1]
+    return np.stack(
+        [blk.sum(axis=1) / n for blk, n in zip(np.split(drawn, cuts, axis=1), ns)],
+        axis=1,
+    )
+
+
+def _rank_multiset_constants(ranks):
+    """Quantities the post-hoc statistics need that depend only on the ranks.
+
+    All three are invariant under permutation - they are properties of the rank
+    multiset, not of how it is split - so they are computed once per design
+    rather than once per arrangement.
+    """
+    n = len(ranks)
+    _, counts = np.unique(ranks, return_counts=True)
+    tied = counts[counts > 1]
+    tie_sum = float(np.sum(tied ** 3 - tied)) if tied.size else 0.0
+    # scikit_posthocs uses two different tie factors, one subtractive (Dunn)
+    # and one multiplicative (Conover / Nemenyi). Reproduce both exactly.
+    dunn_tie = tie_sum / (12.0 * (n - 1)) if n > 1 else 0.0
+    scale_tie = min(1.0, 1.0 - tie_sum / (n ** 3 - n)) if n > 1 else 1.0
+    if scale_tie == 1.0:
+        s_squared = n * (n + 1.0) / 12.0
+    else:
+        s_squared = (1.0 / (n - 1.0)) * (
+            float(np.sum(np.asarray(ranks, float) ** 2))
+            - n * ((n + 1.0) ** 2) / 4.0
+        )
+    return {"n": n, "tie_sum": tie_sum, "dunn_tie": dunn_tie,
+            "scale_tie": scale_tie, "s_squared": s_squared}
+
+
+def _pairwise_b(ns, pairs):
+    """The ``1/n_i + 1/n_j`` term, one per pair."""
+    return np.array([1.0 / ns[i] + 1.0 / ns[j] for i, j in pairs], float)
+
+
+def _dunn_null_pvalues(mean_ranks, ns, const, pairs):
+    """Two-sided Dunn p-values, matching ``scikit_posthocs.posthoc_dunn``.
+
+    ``z = |Rbar_i - Rbar_j| / sqrt((n(n+1)/12 - tie) * (1/n_i + 1/n_j))``
+    """
+    n = const["n"]
+    a = n * (n + 1.0) / 12.0 - const["dunn_tie"]
+    diff = np.stack([np.abs(mean_ranks[:, i] - mean_ranks[:, j])
+                     for i, j in pairs], axis=1)
+    sigma = np.sqrt(a * _pairwise_b(ns, pairs))[None, :]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = np.where(sigma > 0, diff / sigma, np.inf)
+    return 2.0 * _sps.norm.sf(z)
+
+
+def _conover_null_pvalues(mean_ranks, ns, const, pairs):
+    """Two-sided Conover p-values, matching ``scikit_posthocs.posthoc_conover``.
+
+    Unlike Dunn, the denominator moves with the arrangement: it carries the
+    Kruskal-Wallis statistic of that same permutation, which is what makes
+    Conover more powerful and what makes a Dunn null wrong for it.
+    """
+    n = const["n"]
+    k = len(ns)
+    ns_arr = np.asarray(ns, float)
+    rank_sums = mean_ranks * ns_arr[None, :]
+    h = (12.0 / (n * (n + 1.0))) * np.sum(rank_sums ** 2 / ns_arr[None, :],
+                                          axis=1) - 3.0 * (n + 1.0)
+    h_cor = h / const["scale_tie"]
+    d = (n - 1.0 - h_cor) / (n - k)
+    d = np.clip(d, 0.0, None)
+    diff = np.stack([np.abs(mean_ranks[:, i] - mean_ranks[:, j])
+                     for i, j in pairs], axis=1)
+    denom = np.sqrt(const["s_squared"] * _pairwise_b(ns, pairs)[None, :]
+                    * d[:, None])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = np.where(denom > 0, diff / denom, np.inf)
+    p = 2.0 * _sps.t.sf(np.abs(t), df=n - k)
+    # A zero denominator with a zero difference is "no evidence", not "certain".
+    return np.where((denom <= 0) & (diff <= 0), 1.0, p)
+
+
+_NULL_STATISTICS = {
+    "dunn": _dunn_null_pvalues,
+    "conover": _conover_null_pvalues,
+}
+
+
+@_lru_cache(maxsize=64)
+def _mean_rank_null_cached(group_sizes, ranks, n_resamples, exact_max, seed):
+    """The expensive half: every arrangement's per-group mean rank.
+
+    Shared across statistics, so asking for Conover after Dunn on the same
+    design costs only the closed-form transform.
+    """
+    ns = list(group_sizes)
+    rank_array = np.asarray(ranks, float)
+    n_total = int(sum(ns))
+    total = _math.factorial(n_total) // _math.prod(_math.factorial(n) for n in ns)
+    if total <= exact_max:
+        mean_ranks = _exact_mean_ranks(rank_array, ns)
+        mode = "exact"
+    else:
+        mean_ranks = _sampled_mean_ranks(rank_array, ns, n_resamples, seed)
+        mode = "sampled"
+    return mean_ranks, mode, int(total)
+
+
+@_lru_cache(maxsize=64)
+def _permutation_null_cached(group_sizes, ranks, n_resamples, exact_max, seed,
+                             statistic):
+    """Cached core.  All arguments are hashable; *ranks* is a sorted tuple.
+
+    A ``(20000, 6)`` float array is ~960 KB, so ``maxsize`` is deliberately
+    small: this cache sits alongside a 288 MB batch pickle.
+    """
+    ns = list(group_sizes)
+    mean_ranks, mode, total = _mean_rank_null_cached(
+        group_sizes, ranks, n_resamples, exact_max, seed)
+    pairs = [(i, j) for i in range(len(ns)) for j in range(i + 1, len(ns))]
+    const = _rank_multiset_constants(np.asarray(ranks, float))
+    p_null = _NULL_STATISTICS[statistic](mean_ranks, ns, const, pairs)
+    p_null = np.clip(np.asarray(p_null, float), 0.0, 1.0)
+    p_null.flags.writeable = False        # the cache hands out one shared array
+    return {
+        "p": p_null,
+        "pairs": pairs,
+        "mode": mode,
+        "statistic": statistic,
+        "n_perm": int(p_null.shape[0]),
+        "n_arrangements": int(total),
+    }
+
+
+def permutation_null(group_sizes, ranks=None, *, statistic="dunn",
+                     n_resamples=20000, exact_max=10_000, seed=0):
+    """Null distribution of the pairwise rank statistics for one design.
+
+    Returns a dict with ``p`` (an ``(n_perm, n_pairs)`` array of two-sided null
+    p-values), ``pairs``, ``mode`` (``"exact"`` or ``"sampled"``),
+    ``statistic``, ``n_perm`` and ``n_arrangements``.
+
+    *statistic* must name the post-hoc that produced the observed p-values -
+    ``"dunn"`` or ``"conover"``.  They do not share a denominator, and
+    comparing one against the other's null would be comparing unlike things.
+    Nemenyi and DSCF are unsupported: Nemenyi's p-values come from a clipped
+    studentised-range approximation, and DSCF re-ranks within each pair, so
+    neither is recoverable from the pooled mean ranks.
+
+    Exhaustive enumeration is used at or below *exact_max* arrangements and
+    Monte Carlo above it.  The crossover is a measured one: enumerating 34,650
+    arrangements costs ~970 ms where 20,000 random draws cost ~30 ms at any
+    size, so exactness is only worth buying on the small designs where
+    discreteness actually bites.
+
+    The result is cached on ``(group_sizes, sorted ranks, ...)``.  Only the
+    multiset of ranks matters under the null, so every untied column of a batch
+    shares one entry.  The returned array is read-only for that reason.
+    """
+    if statistic not in _NULL_STATISTICS:
+        raise ValueError(
+            f"statistic must be one of {sorted(_NULL_STATISTICS)}, "
+            f"not {statistic!r}")
+    ns = tuple(int(n) for n in group_sizes)
+    n_total = sum(ns)
+    if ranks is None:
+        rk = tuple(float(i) for i in range(1, n_total + 1))
+    else:
+        rk = tuple(round(float(r), 6) for r in sorted(ranks))
+    if len(rk) != n_total:
+        raise ValueError(
+            f"ranks has {len(rk)} entries but the group sizes sum to {n_total}")
+    return _permutation_null_cached(
+        ns, rk, int(n_resamples), int(exact_max), int(seed), statistic)
+
+
+def attainable_p_floor(group_sizes, ranks=None, **kw):
+    """Smallest p-value this design is physically capable of producing.
+
+    Measured on the same scale the post-hoc reports - Dunn's normal
+    approximation - not on the exact permutation scale.  The two differ, and
+    the difference decides cases: a 3-vs-3 comparison has only 20 possible
+    arrangements, so its *exact* two-sided floor is 0.10, but the Dunn p for
+    that most extreme arrangement is 0.0495.  Uncorrected it can therefore just
+    reach significance; under Bonferroni at 0.0167 it cannot, whatever the
+    biology.
+
+    A floor above the threshold in force means a non-significant result is
+    uninformative rather than negative.
+    """
+    return float(permutation_null(group_sizes, ranks, **kw)["p"].min())
+
+
+def correction_ladder(pvalues):
+    """Every closed-form correction convention for one family of p-values.
+
+    No permutations, so this is free and valid on every test path regardless of
+    how the p-values were produced.  Delegates to :func:`adjust_pvalues`.
+    """
+    p = [float(x) for x in pvalues]
+    out = {"uncorrected": p}
+    for key, method in _LADDER_METHODS:
+        _, adj = adjust_pvalues(p, method=method)
+        out[key] = [float(v) for v in adj]
+    return out
+
+
+def westfall_young(pvalues, null):
+    """Westfall-Young step-down maxT adjusted p-values.
+
+    For each hypothesis, the null distribution of the *minimum* p-value over
+    the hypotheses not yet rejected.  Because that null is built from the same
+    permutations for every comparison, it inherits the correlation between
+    comparisons sharing a group - which is why it is never stricter than
+    Bonferroni, and can be markedly less strict.
+    """
+    p_null = np.asarray(null["p"], float)
+    p = np.asarray([float(x) for x in pvalues], float)
+    order = np.argsort(p)
+    adj = np.empty_like(p)
+    running = 0.0
+    for step, idx in enumerate(order):
+        remaining = order[step:]
+        min_null = p_null[:, remaining].min(axis=1)
+        raw = float((min_null <= p[idx]).mean())
+        running = max(running, raw)       # step-down monotonicity
+        adj[idx] = running
+    return adj.tolist()
+
+
+def _align_null_columns(p_null, null_pairs, pairs):
+    """Reorder null columns onto the observed comparison order.
+
+    The null is built in a fixed pair order; the caller reports comparisons in
+    whatever order the figure uses.  With equal group sizes the columns are
+    exchangeable and this is a no-op, but with unequal sizes each pair has its
+    own standard error, so a mismatch would quietly compare one pair against
+    another pair's null.  Returns ``None`` when the two sets do not correspond.
+    """
+    if pairs is None:
+        return p_null
+    wanted = [tuple(sorted((int(i), int(j)))) for i, j in pairs]
+    available = {tuple(sorted(p)): col for col, p in enumerate(null_pairs)}
+    if len(set(wanted)) != len(wanted) or any(p not in available for p in wanted):
+        return None
+    return p_null[:, [available[p] for p in wanted]]
+
+
+def value_permutation_null(groups, *, statistic="lsd", n_resamples=10000,
+                           seed=0):
+    """Permutation null for the pairwise ANOVA post-hocs, on observed values.
+
+    Not cached: unlike the rank null this depends on the data, so it is one
+    computation per column rather than one per design.  That is why the
+    parametric paths are gated behind ``Config.CORRECTION_AUDIT = "full"`` or
+    an explicit request, while the rank path is always on.
+
+    *statistic* selects the denominator, and it must match the post-hoc that
+    produced the observed p-values:
+
+    ``"lsd"``
+        Fisher LSD - ``t = |m_i - m_j| / sqrt(MSE * (1/n_i + 1/n_j))``,
+        two-sided t on ``N - k`` degrees of freedom.
+
+    Tukey and Dunnett are not offered, and the reason is cost rather than
+    principle.  Reproducing Tukey means evaluating ``studentized_range.sf``
+    once per draw, which is a numerical double integral costing on the order of
+    a second for a handful of values - thousands of times over is out of the
+    question.  Dunnett needs a multivariate-t integral with the same problem.
+    Neither loses much: the studentised range and the multivariate t already
+    account for comparisons that share a group, which is most of what
+    Westfall-Young would add.  Fisher LSD is the path that genuinely needs it,
+    because it applies no correction of its own.
+
+    Valid only under exchangeability.  Do not use it where the groups may have
+    unequal variance: permuting across groups imposes the equal variance the
+    analysis was trying to avoid, which makes the null wrong rather than
+    merely approximate.
+    """
+    if statistic not in _VALUE_STATISTICS:
+        raise ValueError(
+            f"statistic must be one of {sorted(_VALUE_STATISTICS)}, "
+            f"not {statistic!r}")
+    arrays = [np.asarray(g, float) for g in groups]
+    ns = [len(a) for a in arrays]
+    k = len(ns)
+    pooled = np.concatenate(arrays)
+    n_total = pooled.size
+    df_error = n_total - k
+    if df_error <= 0 or k < 2:
+        raise ValueError("not enough data for a value permutation null")
+
+    rng = np.random.default_rng(seed)
+    order = np.argsort(rng.random((int(n_resamples), n_total)), axis=1)
+    draws = pooled[order]
+    cuts = np.cumsum(ns)[:-1]
+    blocks = np.split(draws, cuts, axis=1)
+    means = np.stack([b.mean(axis=1) for b in blocks], axis=1)
+    ss_within = np.sum(
+        [((b - b.mean(axis=1, keepdims=True)) ** 2).sum(axis=1) for b in blocks],
+        axis=0,
+    )
+    mse = ss_within / df_error
+
+    pairs = [(i, j) for i in range(k) for j in range(i + 1, k)]
+    b_term = np.array([1.0 / ns[i] + 1.0 / ns[j] for i, j in pairs])
+    diff = np.stack([np.abs(means[:, i] - means[:, j]) for i, j in pairs],
+                    axis=1)
+    p_null = _VALUE_STATISTICS[statistic](diff, mse, b_term, k, df_error)
+    p_null = np.clip(np.asarray(p_null, float), 0.0, 1.0)
+    return {
+        "p": p_null,
+        "pairs": pairs,
+        "mode": "sampled",
+        "statistic": statistic,
+        "n_perm": int(p_null.shape[0]),
+        "n_arrangements": None,
+    }
+
+
+def _lsd_value_pvalues(diff, mse, b_term, k, df_error):
+    """Fisher LSD: the pooled-MSE t-test PyFLASH's ``_run_fisher_lsd`` uses."""
+    se = np.sqrt(mse[:, None] * b_term[None, :])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = np.where(se > 0, diff / se, np.inf)
+    return 2.0 * _sps.t.sf(np.abs(t), df_error)
+
+
+_VALUE_STATISTICS = {
+    "lsd": _lsd_value_pvalues,
+}
+
+
+def westfall_young_from_null(pvalues, null, pairs=None):
+    """Adjust *pvalues* against an already-built null, aligning its columns.
+
+    The one place either null kind - rank or value - turns into adjusted
+    p-values, so the alignment rule cannot drift between them.
+    """
+    p_null = _align_null_columns(
+        np.asarray(null["p"], float), null["pairs"], pairs)
+    if p_null is None or p_null.shape[1] != len(pvalues):
+        raise ValueError(
+            "the permutation null does not correspond to the reported "
+            "comparisons, so it cannot be used to adjust them")
+    return westfall_young(pvalues, {"p": p_null})
+
+
+def value_westfall_young_adjusted(pvalues, groups, *, pairs=None,
+                                  statistic="lsd", **kw):
+    """Westfall-Young adjusted p-values from a value-permutation null."""
+    null = value_permutation_null(groups, statistic=statistic, **kw)
+    return westfall_young_from_null(pvalues, null, pairs)
+
+
+def westfall_young_adjusted(pvalues, group_sizes, *, ranks=None, pairs=None,
+                            statistic="dunn", **kw):
+    """Westfall-Young adjusted p-values for a rank post-hoc.
+
+    Builds (or reuses) the cached null for the design, aligns its columns onto
+    *pairs* - the ``(i, j)`` group indices behind each reported p-value - and
+    adjusts.  Raises ``ValueError`` rather than returning a number when the
+    null cannot be made to correspond to the reported comparisons.
+    """
+    null = permutation_null(group_sizes, ranks, statistic=statistic, **kw)
+    return westfall_young_from_null(pvalues, null, pairs)
+
+
+def correction_audit(pvalues, group_sizes=None, *, ranks=None, alpha=0.05,
+                     null=None, pairs=None, want_permutation=True, **kw):
+    """Every correction convention for one family, plus what correction costs.
+
+    Always returns the closed-form ladder.  Adds the permutation block when a
+    null is supplied or computable - the caller decides, because on the
+    parametric paths the null is per-column rather than cached per design.
+
+    *pairs* is the 0-based ``(i, j)`` group indices behind each reported
+    p-value, in reported order.  Pass it whenever the comparison order might
+    differ from the null's, which is the only thing keeping unequal-sized
+    groups honest.
+
+    The permutation block reports ``alpha_star`` (the *uncorrected* p threshold
+    delivering an honest family-wise error rate of *alpha* on this exact
+    design), what Bonferroni uses instead, the true error rate each convention
+    actually achieves, and the attainable p floor.
+    """
+    audit = {"alpha": float(alpha), **correction_ladder(pvalues)}
+    if want_permutation and null is None and group_sizes is not None:
+        null = permutation_null(group_sizes, ranks, **kw)
+    if null is None:
+        audit["permutation"] = None
+        return audit
+
+    p_null = np.asarray(null["p"], float)
+    k = p_null.shape[1]
+    if k != len(audit["uncorrected"]):
+        # The null covers a different family than the one reported; publishing
+        # its numbers here would silently compare unlike things.
+        audit["permutation"] = None
+        audit["skipped"] = (
+            f"null covers {k} comparisons but "
+            f"{len(audit['uncorrected'])} were reported"
+        )
+        return audit
+
+    aligned = _align_null_columns(p_null, null["pairs"], pairs)
+    if aligned is None:
+        audit["permutation"] = None
+        audit["skipped"] = "reported comparisons do not match the null design"
+        return audit
+    p_null = aligned
+    null = {**null, "p": p_null}
+
+    min_p = p_null.min(axis=1)
+    audit["westfall_young"] = westfall_young(pvalues, null)
+    audit["permutation"] = {
+        "mode": null["mode"],
+        "n_perm": int(null["n_perm"]),
+        "n_arrangements": null.get("n_arrangements"),
+        # The smallest adjusted p this null can express. Westfall-Young counts
+        # permutations, so it cannot resolve below one of them - an observed p
+        # far under this gets an adjusted value dominated by resolution rather
+        # than by evidence, and can come out above Bonferroni.
+        "p_resolution": 1.0 / float(null["n_perm"]),
+        "p_floor": float(p_null.min()),
+        "fwer_if_uncorrected": float((min_p < alpha).mean()),
+        "fwer_of_bonferroni": float((min_p < alpha / k).mean()),
+        "alpha_star": float(np.quantile(min_p, alpha)),
+        "alpha_bonferroni": float(alpha / k),
+    }
+    return audit
+
+
+
+def verdict_changes(audit, comparisons=None, alpha=0.05):
+    """Which correction conventions call each comparison significant.
+
+    An empty list means the design never reached significance under any
+    convention; a full list means the choice of correction was irrelevant.
+    Anything in between is a result that depends on a convention rather than on
+    the data, which is the case worth flagging.
+
+    Compares each adjusted p against *alpha*, never against ``alpha_star`` -
+    ``alpha_star`` is a threshold for *uncorrected* p, and mixing the two is the
+    easiest mistake available here.  The calibrated verdict is reported
+    separately as its own ``calibrated`` convention.
+    """
+    keys = [k for k in _CORRECTION_CONVENTIONS if audit.get(k)]
+    n = len(audit.get("uncorrected") or [])
+    labels = list(comparisons) if comparisons is not None else []
+    perm = audit.get("permutation") or {}
+    alpha_star = perm.get("alpha_star")
+    out = {}
+    for i in range(n):
+        label = str(labels[i]) if i < len(labels) else str(i + 1)
+        names = [k for k in keys
+                 if np.isfinite(float(audit[k][i])) and float(audit[k][i]) <= alpha]
+        if alpha_star is not None:
+            raw = float(audit["uncorrected"][i])
+            if np.isfinite(raw) and raw <= float(alpha_star):
+                names.append("calibrated")
+        out[label] = names
+    return out
 
 
 # ── Many-to-one (treatment vs control) ───────────────────────────────

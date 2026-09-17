@@ -1,5 +1,9 @@
 # PyFLASH - Agent Guide
 
+The package's read-only public orientation is `PyFLASH.context`; the portable
+`README_AI.md` and `pyflash_context.json` files are generated from it for agents
+that cannot import Python or run the local runner.
+
 PyFLASH is a Python package for processing and analyzing immunofluorescence
 confocal microscopy data exported from FLASH/ImageJ workflows. The PyPI
 distribution is `PyFLASH-analysis`; the import package is `PyFLASH`.
@@ -75,6 +79,26 @@ doesn't exist yet. Eight layers:
    in `pipeline.__all__` must wear `@montage_pipeline` (or be in `pipeline.MONTAGE_EXEMPT`) —
    `tests/test_pipeline_montage.py` fails until it does. When you add a pipeline, give it a
    `montage=True` parameter, wear the decorator, and tag its headline `save_fig` calls.
+
+9. **Correction audit** — `PyFLASH/stats_extra.py` (`permutation_null`,
+   `correction_audit`, `westfall_young`, `verdict_changes`), consumed by
+   `PyFLASH/stats.py::multipleComparisons`. Every stats CSV and every stored
+   comparison record now carries each pairwise p-value under **every**
+   correction convention, plus the true family-wise error rate the design runs
+   at, the threshold that would deliver an honest 5%, and the smallest p the
+   design can produce. **No default moves**: `posthoc_correction="auto"`
+   resolves exactly as it always did, and the audit never touches the plotted
+   asterisk. `posthoc_correction="westfall-young"` (aliases `wy`,
+   `permutation`) opts into a permutation-calibrated correction; a session-wide
+   switch is `Config.POSTHOC_CORRECTION`. Supported after Kruskal-Wallis with
+   Dunn or Conover (cached per design, so one enumeration serves a whole batch)
+   and on ANOVA with Fisher LSD at `Config.CORRECTION_AUDIT="full"` or on
+   explicit request. **Welch ANOVA refuses** — permuting across groups imposes
+   the equal variance Welch exists to avoid — and Tukey/Dunnett/Nemenyi/DSCF
+   are declined on cost; all of them record why in `Correction-Unavailable` and
+   fall back to `auto` rather than failing. Numbers, cost tiers and the five
+   ways to misread the columns live in `docs/correction-calibration/` —
+   `00_overview.md` and `csv-columns.md`. Do not restate them here.
 
 `discover` is the source of truth for "what plots exist" — the generated reference block
 self-heals against it through `scripts/update_pyflash_references.py`.
@@ -196,6 +220,14 @@ page-specific UI test file.
   collector, `build_montage` grid builder): `PyFLASH/pipeline_montage.py`. Every
   `pipeline.__all__` entry must wear the decorator or be `MONTAGE_EXEMPT`
   (`tests/test_pipeline_montage.py` enforces it).
+- Correction calibration (permutation-calibrated multiple-comparison
+  thresholds and the always-on audit ladder): `PyFLASH/stats_extra.py`
+  (`permutation_null`, `value_permutation_null`, `correction_audit`,
+  `westfall_young`, `verdict_changes`), wired in
+  `PyFLASH/stats.py::multipleComparisons`. Post-hoc paths publish their own
+  p-values on one channel (`Posthoc-Uncorrected`) plus whatever they can offer
+  towards a null (`_audit_inputs`); keys beginning `_` are plumbing and are
+  never written to the CSV.
 - Outlier detection (`flag_outliers`, `iqr_bounds`, `mad_modified_z`), effect
   sizes, FDR, ICC: `PyFLASH/stats_extra.py`.
 - Outlier / manual exclusion for downstream analysis (`exclude_outliers`,

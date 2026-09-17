@@ -72,3 +72,6 @@ Issues = "https://github.com/Jay2owe/PyFLASH/issues"
 [tool.setuptools.packages.find]
 include = ["PyFLASH", "PyFLASH.*"]
 exclude = ["tests", "tests.*"]
+
+[tool.setuptools.package-data]
+PyFLASH = ["README_AI.md", "pyflash_context.json"]

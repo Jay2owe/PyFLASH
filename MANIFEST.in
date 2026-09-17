@@ -1,1 +1,4 @@
 include CITATION.cff
+include README_AI.md
+include pyflash_context.json
+include scripts/generate_agent_context.py

@@ -331,8 +331,15 @@ PARAM_DOCS = {
     ),
     "posthoc_correction": _p(
         "str",
-        "Multiple-comparison correction for the pairwise tests. 'auto' picks "
-        "one to suit the posthoc test; naming one overrides that.",
+        "Multiple-comparison correction for the pairwise tests. 'auto' is "
+        "unchanged: Bonferroni above three comparisons, otherwise uncorrected. "
+        "'westfall-young' (aliases 'wy', 'permutation') calibrates the "
+        "threshold to the actual design by permutation, so it accounts for "
+        "comparisons that share a group; available after Kruskal-Wallis with "
+        "Dunn or Conover, and on ANOVA with Fisher LSD. Not available after "
+        "Welch ANOVA, or with Tukey/Dunnett/Nemenyi/DSCF, which fall back to "
+        "'auto' and record why. Also 'Holm', 'FDR-BH', 'Sidak', 'Uncorrected'. "
+        "Every convention is written to the stats CSV whichever one is chosen.",
         default="auto",
     ),
     "variance_test": _p(
