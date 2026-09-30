@@ -19,7 +19,7 @@ python -m pip install PyFLASH-analysis
 ```
 
 For a fixed installation of the current release, use
-`python -m pip install "PyFLASH-analysis==0.3.0"` and record your installed
+`python -m pip install "PyFLASH-analysis==0.3.1"` and record your installed
 dependency versions with the analysis.
 
 For local development from this repository, install the editable package from

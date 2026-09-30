@@ -932,9 +932,13 @@ def get_columns(df, column_strings=None, regex_string=None, exclude=''):
 
 
 def get_nonobject_columns(df):
-    """Split columns into numeric and non-numeric (object dtype) lists."""
-    numeric = [col for col in df.columns if df[col].dtype != 'object']
-    other = [col for col in df.columns if df[col].dtype == 'object']
+    """Separate text metadata from columns used for numeric summaries."""
+    # Pandas 3 infers text as StringDtype rather than object. Keep both in
+    # the metadata path so subject labels and covariates are never averaged.
+    other = [col for col in df.columns
+             if pd.api.types.is_object_dtype(df[col].dtype)
+             or pd.api.types.is_string_dtype(df[col].dtype)]
+    numeric = [col for col in df.columns if col not in other]
     return numeric, other
 
 

@@ -24,7 +24,7 @@ jobs:
         run: |
           python -m pip install --upgrade build twine pytest
           python -m pip install .
-          python -m pytest tests/test_association_coefficients.py tests/test_association_correlations.py tests/test_aesthetics.py tests/test_dataframe_adapter.py tests/test_context.py tests/test_reprofig_integration.py -q
+          python -m pytest tests/test_miniexperiment.py tests/test_association_coefficients.py tests/test_association_correlations.py tests/test_aesthetics.py tests/test_dataframe_adapter.py tests/test_context.py tests/test_reprofig_integration.py -q
           python -m build
           python -m twine check dist/*
           python -m pip install --no-deps --force-reinstall dist/*.whl

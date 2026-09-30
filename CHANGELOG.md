@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 - 2026-10-01
+## 0.3.1 - 2026-10-01
 
 - Explain association-coefficient estimates, intervals, reference comparisons
   and overall joint tests separately in a removable statistics panel.
@@ -8,6 +8,8 @@
   least-squares comparisons, with two-sided or prespecified directional tests.
 - Preserve figure and plotting-area dimensions when statistics are changed
   or hidden, and honor requested raster export resolution.
+- Preserve text covariates and subject labels when creating summaries with
+  pandas 3 or nullable string columns; only measurement values are averaged.
 - Add correction-audit results and optional permutation-calibrated comparisons
   while preserving existing default corrections.
 - Add portable public agent context, simulated reviewer demonstration and
