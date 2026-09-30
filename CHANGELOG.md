@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 - 2026-10-01
+
+- Explain association-coefficient estimates, intervals, reference comparisons
+  and overall joint tests separately in a removable statistics panel.
+- Add explicit pooled bootstrap Wald or separate two-group ordinary
+  least-squares comparisons, with two-sided or prespecified directional tests.
+- Preserve figure and plotting-area dimensions when statistics are changed
+  or hidden, and honor requested raster export resolution.
+- Add correction-audit results and optional permutation-calibrated comparisons
+  while preserving existing default corrections.
+- Add portable public agent context, simulated reviewer demonstration and
+  manuscript analysis scripts using public package APIs.
+
 ## 0.2.0 - 2026-08-26
 
 - Add self-describing master SVG figures with exact plotted data, statistics,

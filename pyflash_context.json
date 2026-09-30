@@ -2,7 +2,7 @@
   "schema_version": 1,
   "package": "PyFLASH",
   "distribution": "PyFLASH-analysis",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "reader": {
     "purpose": "read-only package usage orientation",
     "python": "from PyFLASH import context; context.read(format='json')",
@@ -12,11 +12,11 @@
   "topics": [
     {
       "ok": true,
-      "version": "0.2.0",
+      "version": "0.3.0",
       "topic": "overview",
       "title": "Choose a PyFLASH workflow",
       "description": "Orient around the data model, registered plots and reproducible outputs.",
-      "content": "PyFLASH 0.2.0 - Choose a PyFLASH workflow\n\nPyFLASH is a Python package for turning microscopy experiment data into analysed tables and figures. Its public plotting and analysis functions are the callable surface. The package's live plot registry is `PyFLASH.spec.PLOT_REGISTRY`; the agent runner resolves those names and returns JSON plus an equivalent script. Start by identifying the batch, the question, and the output folder.",
+      "content": "PyFLASH 0.3.0 - Choose a PyFLASH workflow\n\nPyFLASH is a Python package for turning microscopy experiment data into analysed tables and figures. Its public plotting and analysis functions are the callable surface. The package's live plot registry is `PyFLASH.spec.PLOT_REGISTRY`; the agent runner resolves those names and returns JSON plus an equivalent script. Start by identifying the batch, the question, and the output folder.",
       "prerequisites": [],
       "related": [
         "data",
@@ -60,11 +60,11 @@
     },
     {
       "ok": true,
-      "version": "0.2.0",
+      "version": "0.3.0",
       "topic": "data",
       "title": "Load and describe experiment data",
       "description": "Use the Batch and Experiment objects or a saved state as the input boundary.",
-      "content": "PyFLASH 0.2.0 - Load and describe experiment data\n\nA normal workflow starts from a `Batch` created with `PyFLASH.create_batch(...)` or loaded with `PyFLASH.load_state(...)`. Keep the input state unchanged while exploring a plot. For a new request, identify the batch path, its conditions and the grouping or filtering needed; do not guess column names when `data_overview` or the runner's live descriptions can establish them.",
+      "content": "PyFLASH 0.3.0 - Load and describe experiment data\n\nA normal workflow starts from a `Batch` created with `PyFLASH.create_batch(...)` or loaded with `PyFLASH.load_state(...)`. Keep the input state unchanged while exploring a plot. For a new request, identify the batch path, its conditions and the grouping or filtering needed; do not guess column names when `data_overview` or the runner's live descriptions can establish them.",
       "prerequisites": [],
       "related": [
         "overview",
@@ -74,11 +74,11 @@
     },
     {
       "ok": true,
-      "version": "0.2.0",
+      "version": "0.3.0",
       "topic": "plotting",
       "title": "Choose a registered plot",
       "description": "Map the biological comparison to a registered plotting action and its arguments.",
-      "content": "PyFLASH 0.2.0 - Choose a registered plot\n\nUse the `/pyflash` control skill or its runner to discover registered aliases and inspect their live signatures. The runner accepts an action name plus JSON parameters; it can produce SVG outputs and PNG previews. Prefer a registered plot whose name and reference entry match the question. Shared parameters such as filters, markers, grouping and output location retain the same meaning across plots.",
+      "content": "PyFLASH 0.3.0 - Choose a registered plot\n\nUse the `/pyflash` control skill or its runner to discover registered aliases and inspect their live signatures. The runner accepts an action name plus JSON parameters; it can produce SVG outputs and PNG previews. Prefer a registered plot whose name and reference entry match the question. Shared parameters such as filters, markers, grouping and output location retain the same meaning across plots.",
       "prerequisites": [],
       "related": [
         "data",
@@ -88,11 +88,11 @@
     },
     {
       "ok": true,
-      "version": "0.2.0",
+      "version": "0.3.0",
       "topic": "analysis",
       "title": "Run a statistical or pipeline analysis",
       "description": "Use the pipeline and modelling functions when the request is more than a figure.",
-      "content": "PyFLASH 0.2.0 - Run a statistical or pipeline analysis\n\nPyFLASH exposes pipeline and modelling callables such as `data_overview`, `correlation`, `adjusted_correlation`, `linear_model`, and `rhythm`. Choose the analysis from the scientific question, preserve the returned evidence and inspect missing or unsupported estimates. The action layer is the stable boundary for agent calls; it does not replace the package's statistical definitions.",
+      "content": "PyFLASH 0.3.0 - Run a statistical or pipeline analysis\n\nPyFLASH exposes pipeline and modelling callables such as `data_overview`, `correlation`, `adjusted_correlation`, `linear_model`, and `rhythm`. Choose the analysis from the scientific question, preserve the returned evidence and inspect missing or unsupported estimates. The action layer is the stable boundary for agent calls; it does not replace the package's statistical definitions.",
       "prerequisites": [],
       "related": [
         "overview",
@@ -102,11 +102,11 @@
     },
     {
       "ok": true,
-      "version": "0.2.0",
+      "version": "0.3.0",
       "topic": "outputs",
       "title": "Read and preserve outputs",
       "description": "Keep figure files, provenance and result metadata together.",
-      "content": "PyFLASH 0.2.0 - Read and preserve outputs\n\nWrite outputs under the request's explicit result root. A successful runner response includes structured results, output paths when applicable, provenance or run metadata, and an `equivalent_script`. Treat the script and recorded inputs as part of the result so another agent can reproduce the call. A preview is for inspection; the SVG or data artifact is the durable output.",
+      "content": "PyFLASH 0.3.0 - Read and preserve outputs\n\nWrite outputs under the request's explicit result root. A successful runner response includes structured results, output paths when applicable, provenance or run metadata, and an `equivalent_script`. Treat the script and recorded inputs as part of the result so another agent can reproduce the call. A preview is for inspection; the SVG or data artifact is the durable output.",
       "prerequisites": [],
       "related": [
         "plotting",
@@ -116,11 +116,11 @@
     },
     {
       "ok": true,
-      "version": "0.2.0",
+      "version": "0.3.0",
       "topic": "troubleshooting",
       "title": "Diagnose a rejected or unexpected call",
       "description": "Use live discovery, descriptions and returned errors before retrying.",
-      "content": "PyFLASH 0.2.0 - Diagnose a rejected or unexpected call\n\nFor an unknown action, run live `discover` and then `describe` the exact alias. For a parameter error, use the live signature and the package reference rather than inventing a spelling. If a figure has the wrong appearance, check the active PyFLASH style, filters, grouping and output metadata before rerunning. A failed call may have created files; inspect the result root before repeating a write.",
+      "content": "PyFLASH 0.3.0 - Diagnose a rejected or unexpected call\n\nFor an unknown action, run live `discover` and then `describe` the exact alias. For a parameter error, use the live signature and the package reference rather than inventing a spelling. If a figure has the wrong appearance, check the active PyFLASH style, filters, grouping and output metadata before rerunning. A failed call may have created files; inspect the result root before repeating a write.",
       "prerequisites": [],
       "related": [
         "plotting",

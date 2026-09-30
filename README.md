@@ -55,16 +55,16 @@ For local notebook testing, start Jupyter from this repository and run `pip inst
 
 ## Reproducible installation
 
-The current tagged release is [PyFLASH 0.2.0](https://github.com/Jay2owe/PyFLASH/releases/tag/v0.2.0).
+The current tagged release is [PyFLASH 0.3.0](https://github.com/Jay2owe/PyFLASH/releases/tag/v0.3.0).
 For a fixed installation of that release:
 
 ```bash
-python -m pip install "PyFLASH-analysis==0.2.0"
+python -m pip install "PyFLASH-analysis==0.3.0"
 ```
 
 The default branch and unpinned installation can change over time. Record the
 software version, dependencies and analysis settings with your results.
-Source for the release is available at the `v0.2.0` tag.
+Source for the release is available at the `v0.3.0` tag.
 
 ## Small simulated demo
 
@@ -297,7 +297,7 @@ If you use PyFLASH in academic work, cite the software release you used:
 
 ```text
 Malcolm, J. (2026). PyFLASH: ImageJ confocal microscopy data processing and analysis pipeline
-(Version 0.2.0) [Computer software]. https://github.com/Jay2owe/PyFLASH/releases/tag/v0.2.0
+(Version 0.3.0) [Computer software]. https://github.com/Jay2owe/PyFLASH/releases/tag/v0.3.0
 PyPI: https://pypi.org/project/PyFLASH-analysis/
 Source: https://github.com/Jay2owe/PyFLASH
 ```

@@ -465,6 +465,8 @@ def test_pyflash_runner_discover_includes_registered_pipeline_signatures():
 def test_pyflash_reference_updater_is_current():
     root = Path(__file__).resolve().parents[1]
     script = root / "scripts" / "update_pyflash_references.py"
+    if not script.is_file():
+        pytest.skip("developer skill updater is not included in public source archives")
     reference_dir = _pyflash_reference_dir()
     if reference_dir is None or not (reference_dir / "plot-functions.md").exists():
         pytest.skip("pyflash skill references are local to this project")

@@ -19,12 +19,17 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.x"
+          python-version: "3.12"
       - name: Build and check distributions
         run: |
-          python -m pip install --upgrade build twine
+          python -m pip install --upgrade build twine pytest
+          python -m pip install .
+          python -m pytest tests/test_association_coefficients.py tests/test_association_correlations.py tests/test_aesthetics.py tests/test_dataframe_adapter.py tests/test_context.py tests/test_reprofig_integration.py -q
           python -m build
           python -m twine check dist/*
+          python -m pip install --no-deps --force-reinstall dist/*.whl
+          (cd "$RUNNER_TEMP" && python -c "import PyFLASH; from importlib.metadata import version; assert PyFLASH.__version__ == version('PyFLASH-analysis'); print('Installed wheel:', PyFLASH.__version__, PyFLASH.__file__)")
+          sha256sum dist/*
       - name: Store distributions
         uses: actions/upload-artifact@v7
         with:
