@@ -66,3 +66,27 @@ tmp_*.txt
 # Pytest scratch output roots (preview PNG/SVG/CSV written by test runs).
 # Regenerated on every run; never an input.
 .pytest-tmp*/
+
+# Local agent instructions, audit reports, and deployment configuration.
+/CLAUDE.md
+/CLAUDE_CONTEXT*.md
+/AGENTS.md
+/GEMINI.md
+/DEPLOY_CONTRACT.md
+/PUBLISHING_AUDIT.md
+/.planning/
+/.env
+/.env.*
+*.conflicted-copy.*
+*conflicted copy*
+
+# Internal maintainer notes within the public documentation source.
+/docs/wiki/**/CONTEXT.md
+
+# Generated demo and reproduction outputs
+demo/output/
+demo/outputs/
+reproduce/**/output/
+reproduce/**/outputs/
+__pycache__/
+*.pyc

@@ -7,7 +7,7 @@ clear idea of where saved files go.
 
 ## Before You Start
 
-- Use Python 3.9 or newer.
+- Use Python 3.10 or newer.
 - Decide which data path you have:
   raw FLASH/ImageJ experiment folders, or an already-clean `pandas.DataFrame`.
 - Keep local paths as placeholders while learning, then replace them with your

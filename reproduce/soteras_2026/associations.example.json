@@ -1,0 +1,14 @@
+{
+  "status": "Example only. Supply the confirmed exclusion; mouse marker/behaviour columns and group pooling must come from the original analysis.",
+  "associations": [
+    {
+      "name": "Fig1G",
+      "x": "Age",
+      "y": "Volumeanterior-inferiorHT",
+      "group_column": "Diagnosis",
+      "groups": ["Control", "MCI", "AD"],
+      "filter": {},
+      "exclude_subjects": []
+    }
+  ]
+}

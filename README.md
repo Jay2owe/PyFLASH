@@ -5,7 +5,7 @@
 
 A Python package for processing and analyzing immunofluorescence (IF) confocal microscopy data exported from the FLASH ImageJ Plugin.
 
-📖 **[Documentation](https://pyflash.readthedocs.io/)**
+**[Documentation](https://pyflash.readthedocs.io/)**
 
 ## What it does
 
@@ -17,17 +17,89 @@ Takes CSV exports from ImageJ's 3D Object Counter and other plugins, processes t
 pip install PyFLASH-analysis
 ```
 
+### Typical installation time
+
+On a normal desktop or laptop (at least 4 CPU cores, 8 GB RAM, an SSD, and a
+stable broadband connection), allow approximately **2-5 minutes** to install
+PyFLASH and its required dependencies into a fresh Python environment.
+Python must already be installed. This is a planning estimate; download speed,
+existing packages and availability of prebuilt dependencies affect the time.
+Installing Python itself or optional extras takes additional time.
+
+For reference, an uncached installation of PyFLASH-analysis 0.2.0 from PyPI
+into a fresh environment took **4 minutes 4 seconds** on 30 September 2026
+(Windows 11, Python 3.12.10, AMD Ryzen 7 7730U, 32 GB RAM, SSD). This includes
+required dependency downloads and installation; it excludes installing Python
+and creating the environment. See [`demo/verification.json`](demo/verification.json).
+
 ## License
 
 PyFLASH is distributed under the BSD 3-Clause License. See `LICENSE`.
 
-**Requires:** Python ≥ 3.9
+**Requires:** Python ≥ 3.10
 
-**Dependencies:** pandas, numpy, matplotlib, seaborn, scipy, statsmodels, scikit-posthocs, openpyxl, read-roi, Pillow
+**Required dependencies (minimum versions):** reprofig 0.5.1, pandas 1.5,
+numpy 1.23, matplotlib 3.6, seaborn 0.12, scipy 1.11, statsmodels 0.14,
+scikit-posthocs 0.9, scikit-learn 1.2, openpyxl 3.0, read-roi 1.6, and Pillow 9.0.
+`pip` installs these automatically; the authoritative requirements are in
+[`pyproject.toml`](pyproject.toml).
+
+**Hardware and operating systems:** no GPU or other non-standard hardware is
+required for the demo. The package uses cross-platform Python dependencies.
+The demo was verified on Windows 11 with Python 3.12.10 and PyFLASH-analysis
+0.2.0; macOS and Linux were not tested in this verification run.
 
 The PyPI distribution is `PyFLASH-analysis`; the Python import package is `PyFLASH`.
 For local development, install from the repository with `pip install -e .`.
 For local notebook testing, start Jupyter from this repository and run `pip install -e .`; the editable `PyFLASH-analysis` install points at the local `PyFLASH/` source files while imports stay as `import PyFLASH`.
+
+## Reproducible installation
+
+The current tagged release is [PyFLASH 0.2.0](https://github.com/Jay2owe/PyFLASH/releases/tag/v0.2.0).
+For a fixed installation of that release:
+
+```bash
+python -m pip install "PyFLASH-analysis==0.2.0"
+```
+
+The default branch and unpinned installation can change over time. Record the
+software version, dependencies and analysis settings with your results.
+Source for the release is available at the `v0.2.0` tag.
+
+## Small simulated demo
+
+The [`demo/`](demo/README.md) folder includes a ready-to-use CSV table of twelve
+artificial subjects (six per group), under 1 KB, and a runnable script.
+Download or clone this repository and run from its root:
+
+```bash
+python demo/run_demo.py
+```
+
+Expected output is `Demo passed`, an imported subject table, a group-statistics
+CSV, a saved and reloaded PyFLASH experiment, and a timing/version report under
+`demo/output/`. Group mean signal intensities are approximately **40.89737**
+and **51.88691** arbitrary units. The script checks its numerical results
+against the supplied [expected result](demo/expected_result.json).
+
+Expected running time on a normal desktop or laptop is **under 1 minute**,
+including Python imports and output writing, after installation. All data and
+the built-in group difference are simulated and have no biological meaning.
+See the [demo guide](demo/README.md) for outputs, rerunning, and adapting the
+example to your own tabular data.
+
+The verified demo took **10.3 seconds** on the laptop described above, using
+the published PyPI package in a fresh environment. Exact tested dependency
+versions are in [`demo/tested-dependencies.txt`](demo/tested-dependencies.txt).
+
+## Manuscript analysis scripts
+
+The [Soteras et al. rerun guide](reproduce/soteras_2026/README.md) provides
+command-line scripts using public PyFLASH APIs for human regression/correlation
+analyses, mouse batch preparation, and explicitly configured panel statistics.
+Each run records its inputs, settings, versions and sample counts. The guide
+identifies the original exclusions and settings still required before claiming
+an exact match to the final paper results.
 
 ## Quick start
 
@@ -64,7 +136,7 @@ batch = create_batch(
 
 # Analyse
 cols = get_columns(batch.summary, column_strings=['Count', 'Volume'], exclude='NonColoc')
-plot_mean_bars(batch, cols, specificity=('Time', 'WeekEight'))
+plot_mean_bars(batch, cols, factor='Genotype')
 plot_matrices(batch, cols)
 
 # Export
@@ -224,10 +296,28 @@ with PyFLASH.verbose():
 If you use PyFLASH in academic work, cite the software release you used:
 
 ```text
-Jamie Malcolm. PyFLASH: ImageJ confocal microscopy data processing and analysis pipeline.
+Malcolm, J. (2026). PyFLASH: ImageJ confocal microscopy data processing and analysis pipeline
+(Version 0.2.0) [Computer software]. https://github.com/Jay2owe/PyFLASH/releases/tag/v0.2.0
 PyPI: https://pypi.org/project/PyFLASH-analysis/
 Source: https://github.com/Jay2owe/PyFLASH
 ```
+
+Machine-readable citation metadata is provided in [`CITATION.cff`](CITATION.cff).
+When using a different release, cite its version and source tag instead.
+
+## Development and testing
+
+From a checkout of this repository:
+
+```bash
+python -m pip install -e .
+python -m pip install pytest
+python -m pytest tests -q
+```
+
+For the optional browser interface, install `.[ui]` and run `pyflash-ui`.
+The [documentation site](https://pyflash.readthedocs.io/) covers usage and
+individual analysis functions; its sources are maintained in `docs/wiki/`.
 
 ## Acknowledgements
 

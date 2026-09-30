@@ -1,0 +1,53 @@
+{
+  "date": "2026-09-30",
+  "claim": "Methods rerun verified; exact submitted-paper equality not established.",
+  "focused_tests_passed": 7,
+  "human_input": "author-confirmed human.pkl; data supplied separately",
+  "participant_rows_after_confirmed_rule": 45,
+  "device_exclusion_basis": "Author instructed exclusion of lowest-activity Alzheimer participant; resolved identifier retained in private receipts.",
+  "coefficient_bootstrap_resamples": 10000,
+  "correlation_diagnostic_resamples": 100,
+  "coefficient_rows": 6,
+  "directional_test_rows": 4,
+  "correlation_rows": 42,
+  "model_specific_counts": {
+    "Age-volume": {
+      "MCI": 15,
+      "Control": 14,
+      "AD": 9
+    },
+    "Volume-M10": {
+      "MCI": 15,
+      "Control": 14,
+      "AD": 9
+    }
+  },
+  "versions": {
+    "PyFLASH-analysis": "0.2.0",
+    "numpy": "2.1.0",
+    "pandas": "2.2.2",
+    "scipy": "1.14.1",
+    "statsmodels": "0.14.2"
+  },
+  "limitations": [
+    "Original bootstrap seed not recovered.",
+    "Complete original per-panel ROUT exclusions and Dunn correction choices not recovered.",
+    "Stored morning/evening ratio is inverse of manuscript evening/morning definition.",
+    "Global device exclusion changes peak sample counts.",
+    "Mouse batches not downloaded or checked without scoped approval.",
+    "Sensitivity example is a method check, not a recovered original profile."
+  ],
+  "script_and_settings_sha256": {
+    "01_prepare_mouse_batches.py": "6ad1244c0f7fb072129040e28d0a7611369eb314ec304bed710826ced978daca",
+    "02_human_associations.py": "f1017bd591b3c647415b882c860a90dd813f2a25235a96692ed731362e5cd909",
+    "03_panel_statistics.py": "91b521ec7870c0d5e47565ccf13432cd8a7b521ef04e815668c73376857c9a3e",
+    "04_human_covariate_sensitivity.py": "dcc45dac42a3bf72d26496a645b88813ed49f0a41f7861cc0171c12c710e7612",
+    "05_grouped_associations.py": "8b5ba7933ac5638ebd677aea42dee0bea539e99bd8f44cc90f564fd8ae778caf",
+    "associations.example.json": "46d497a06b07a5ae7cbd59d3462b1d38492c7e3c8871cc8b8aff1fbd6a972b40",
+    "common.py": "8296846547c00a3f19246b04be55eab37945ca6bd47ce75d85539d5c77d0b465",
+    "panels.example.json": "1cecdefef47d4b7b8325232bd0ec96e27d8ebc5714e3fb4f5acde0430044950d",
+    "profiles.example.json": "13cd4bfefa4d1fd80780adbf739737d20e23734df13a59304d3baf9f3afdd731",
+    "README.md": "038b50b37a6dc3bf77df17d613833faaf0879b55011dc716e3fbc6ade360aeeb",
+    "test_reproduction.py": "ea9a9e2df12141419699ee24d8d242c4dbeec7e8075cbfec861fb50705400306"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "dataset": "entirely simulated; no biological inference",
+  "subjects": 12,
+  "subjects_per_group": {"A": 6, "B": 6},
+  "group_means": {"A": 40.89737141927083, "B": 51.88690592447917},
+  "welch_t": -18.63248973782161,
+  "welch_p": 4.285380460051286e-09
+}

@@ -1,0 +1,41 @@
+{
+  "verified_on": "2026-09-30",
+  "operating_system": "Windows 11 Home (10.0.26200)",
+  "cpu": "AMD Ryzen 7 7730U (8 cores / 16 threads)",
+  "ram_gb": 32,
+  "storage": "SSD",
+  "python": "3.12.10",
+  "pyflash": "0.2.0",
+  "installation": {
+    "package": "PyFLASH-analysis==0.2.0",
+    "elapsed_seconds": 244.126,
+    "exit_code": 0,
+    "scope": "fresh virtual environment; uncached package downloads; excludes installing Python and creating the environment"
+  },
+  "demo": {
+    "dataset": "entirely simulated",
+    "subjects": 12,
+    "subjects_per_group": {
+      "A": 6,
+      "B": 6
+    },
+    "metric": "Signal_MeanIntensity",
+    "group_means": {
+      "A": 40.89737141927083,
+      "B": 51.88690592447917
+    },
+    "test": "Welch's T-Test",
+    "posthoc": "Welch's t-test",
+    "python": "3.12.10",
+    "welch_t": -18.63248973782161,
+    "welch_p": 4.285380460051283e-09,
+    "pyflash": "0.2.0",
+    "elapsed_seconds": 10.339
+  },
+  "validation": "Passed using PyFLASH-analysis 0.2.0 installed from PyPI in a fresh virtual environment; means checked against supplied truth; Welch t and p independently checked against scipy.stats.ttest_ind(equal_var=False); saved experiment reloaded unchanged.",
+  "source_sha256": {
+    "data/summary.csv": "94badd77cd3418000c87b1bfeffea1e3e37b33f7ab581143784c499804637bcf",
+    "expected_result.json": "63c959a7d894d7c725f9554f0982ba77c2002072241f676cd042ae5f7b95cd5f",
+    "run_demo.py": "27d2900171e19a876ff73ab88aa1533b5148e670ecf304520686b52a4cd0f1af"
+  }
+}

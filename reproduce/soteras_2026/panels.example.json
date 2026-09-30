@@ -1,0 +1,43 @@
+{
+  "status": "Examples only. Confirm final column mappings and exclusions before using on paper data.",
+  "panels": [
+    {
+      "panel": "Fig1B",
+      "column": "Totalcounts",
+      "group_column": "Diagnosis",
+      "groups": ["Control", "MCI", "AD"],
+      "filter": {},
+      "method": "anova_tukey",
+      "comparisons": ["1-2", "1-3", "2-3"],
+      "exclude_subjects": []
+    },
+    {
+      "panel": "Fig1C",
+      "column": "morningpeakamplitude",
+      "group_column": "Diagnosis",
+      "groups": ["Control", "MCI", "AD"],
+      "method": "anova_tukey",
+      "comparisons": ["1-2", "1-3", "2-3"],
+      "exclude_subjects": []
+    },
+    {
+      "panel": "Fig1D",
+      "column": "Eveningpeakamplitude",
+      "group_column": "Diagnosis",
+      "groups": ["Control", "MCI", "AD"],
+      "method": "anova_tukey",
+      "comparisons": ["1-2", "1-3", "2-3"],
+      "exclude_subjects": []
+    },
+    {
+      "panel": "Fig1E",
+      "column": "Morning-eveningpeakratio",
+      "transform": "reciprocal",
+      "group_column": "Diagnosis",
+      "groups": ["Control", "MCI", "AD"],
+      "method": "anova_tukey",
+      "comparisons": ["1-2", "1-3", "2-3"],
+      "exclude_subjects": []
+    }
+  ]
+}

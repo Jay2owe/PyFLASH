@@ -6,7 +6,7 @@ Install PyFLASH in the Python environment you will use for analysis.
 
 ## Before You Start
 
-- PyFLASH requires Python 3.9 or newer.
+- PyFLASH requires Python 3.10 or newer.
 - The package name on PyPI is `PyFLASH-analysis`.
 - The import name in Python is `PyFLASH`.
 
@@ -17,6 +17,10 @@ Install the released package:
 ```powershell
 python -m pip install PyFLASH-analysis
 ```
+
+For a fixed installation of the current release, use
+`python -m pip install "PyFLASH-analysis==0.2.0"` and record your installed
+dependency versions with the analysis.
 
 For local development from this repository, install the editable package from
 the project root:
