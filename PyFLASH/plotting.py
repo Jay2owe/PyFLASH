@@ -24890,6 +24890,8 @@ _PARAM_DESCRIPTIONS = {
     'y_label':              'Optional y-axis label override.',
     'footer':               'Optional footer text below the plot. Pass "auto" for a generic paired-ratio note or a list of footer lines.',
     'primary_comparison':   'Preferred contrast to headline in the paired-ratio stats card, e.g. "AD vs Control" or ("Control", "AD").',
+    'comparison_test':      'Association-coefficient reference comparisons: "bootstrap_wald" (default; two-sided pooled-model bootstrap-SE Wald z tests) or "ols_t" (separate two-group OLS interaction t-tests). Does not change plotted slopes, confidence intervals or the joint bootstrap chi-square.',
+    'comparison_tail':      'Association-coefficient OLS alternative for group slope minus reference slope: "two" (default), "less", or "greater". Directional alternatives require comparison_test="ols_t".',
     'show_sample_lines':  'Draw one line per subject joining denominator and numerator endpoints in paired-ratio endpoint plots (default True).',
     'show_participant_lines': 'Legacy alias for show_sample_lines.',
     'show_reference_line':  'Retained for backwards compatibility; paired endpoint plots do not draw a ratio=1 line on the endpoint axis.',
@@ -30316,56 +30318,104 @@ def _association_coefficient_summary_lines(
     value,
     bootstrap,
     max_items,
+    comparisons=None,
 ):
-    unit = "standardized beta" if value == "beta" else "raw slope"
     component_models = _association_component_models_from_coefficients(
         coefficients,
         factor_name,
     )
-    lines = [
-        *_association_model_summary_lines(component_models),
-        f"Value: {unit}",
-        f"Bootstrap: {bootstrap['valid']}/{bootstrap['requested']} valid",
-        f"Seed: {bootstrap['random_state']}",
-        (
-            f"Joint Wald: chi-square({int(joint_test['df'])})="
-            f"{_format_side_stats_value(joint_test['statistic'])}, "
-            f"p={_format_side_stats_pvalue(joint_test['p'])}"
-        ),
-        "Details:",
+    display_models = [
+        {**model, "formula": _association_model_formula(
+            get_display_name(model["y"], minimal=True),
+            get_display_name(model["x"], minimal=True),
+            get_display_name(model["group"], minimal=True),
+            [get_display_name(column, minimal=True) for column in model["covariates"]],
+        )}
+        for model in component_models
     ]
-    interaction_lookup = {
-        (str(row.association), str(row.group)): row
-        for row in interactions.itertuples(index=False)
-    }
+    confidence = 100 * (1 - float(coefficients.iloc[0].get("ci_alpha", 0.05)))
+    ci_method = str(coefficients.iloc[0]["ci_method"])
+    interval_method = "group-stratified bootstrap" if ci_method == "bootstrap" else "OLS t"
+    unit = "beta" if value == "beta" else "slope"
+    lines = [
+        *_association_model_summary_lines(display_models),
+        "Plotted group slopes:",
+        ("  beta = outcome SD per predictor SD (all-group scaling)"
+         if value == "beta" else "  slope = outcome units per predictor unit"),
+        *(["  SD = standard deviation across all included participants"]
+          if value == "beta" else []),
+        f"  Brackets: {confidence:g}% {interval_method} confidence interval",
+        "  n = complete participants in that group",
+        "  These intervals describe slopes, not group differences.",
+    ]
     coefficient_rows = list(coefficients.itertuples(index=False))
     if max_items is None:
         shown_rows = coefficient_rows
     else:
         shown_rows = coefficient_rows[:max(0, int(max_items))]
-    detail = []
     active_association = None
     for row in shown_rows:
         if str(row.association) != active_association:
             active_association = str(row.association)
-            detail.append(f"{active_association}:")
-        text = (
-            f"  {row.group}: "
+            lines.append(f"{active_association}:")
+        lines.append(
+            f"  {row.group}: {unit}="
             f"{_format_side_stats_value(row.estimate)} "
             f"[{_format_side_stats_value(row.ci_low)}, "
             f"{_format_side_stats_value(row.ci_high)}], n={int(row.n)}"
         )
-        interaction = interaction_lookup.get((str(row.association), str(row.group)))
-        if interaction is not None:
-            text += (
-                f", delta={_format_side_stats_value(interaction.estimate)}, "
-                f"p={_format_side_stats_pvalue(interaction.p)}"
-            )
-        detail.append(text)
     omitted = len(coefficient_rows) - len(shown_rows)
     if omitted > 0:
-        detail.append(f"... {omitted} more")
-    return lines + detail
+        lines.append(f"... {omitted} more group slopes")
+
+    comparisons = interactions if comparisons is None else comparisons
+    ols = not comparisons.empty and "method" in comparisons and comparisons.iloc[0]["method"] == "ols_t"
+    lines.append("Group vs reference slope tests:")
+    if ols:
+        tail = str(comparisons.iloc[0]["tail"])
+        alternative = {"two": "two-sided: group slope != reference",
+                       "less": "one-sided: group slope < reference",
+                       "greater": "one-sided: group slope > reference"}[tail]
+        lines.extend(["  Separate two-group ordinary least-squares (OLS) t-tests",
+                      "  Same covariates; only group and reference participants",
+                      f"  Alternative: {alternative}",
+                      "  delta = fitted group slope - reference slope",
+                      "  t = delta / OLS standard error; df = residual degrees of freedom"])
+        if value == "beta":
+            lines.append("  delta uses pair scaling; plotted beta uses all groups.")
+    else:
+        lines.extend(["  Pooled all-group model; two-sided Wald z-tests",
+                      "  Standard errors from the group-stratified bootstrap",
+                      "  z = delta / bootstrap standard error",
+                      "  delta = group slope - reference slope (plotted scale)"])
+    lines.extend(["  p = tail probability under no slope difference",
+                  "  Nominal p-values; no correction for multiple tests"])
+    comparison_rows = list(comparisons.itertuples(index=False))
+    shown_comparisons = comparison_rows if max_items is None else comparison_rows[:max(0, int(max_items))]
+    active_association = None
+    for row in shown_comparisons:
+        if str(row.association) != active_association:
+            active_association = str(row.association)
+            lines.append(f"{active_association}:")
+        n = getattr(row, "n", coefficients.loc[coefficients.association.eq(row.association), "n"].sum())
+        statistic = (f"t={_format_side_stats_value(row.t)}, df={int(row.df)}"
+                     if ols else f"z={_format_side_stats_value(row.z)}")
+        lines.extend([
+            f"  {row.group} vs {row.reference}: delta={_format_side_stats_value(row.estimate)}",
+            f"    {statistic}, p={float(row.p):.6g}, model n={int(n)}",
+        ])
+    if len(comparison_rows) > len(shown_comparisons):
+        lines.append(f"... {len(comparison_rows) - len(shown_comparisons)} more comparisons")
+    total_n = int(coefficients.groupby("association")["n"].sum().max())
+    lines.extend([
+        "Overall test (all groups and associations):",
+        "  Null: all predictor-by-group slope differences = 0",
+        f"  Joint bootstrap Wald: chi-square({int(joint_test['df'])})="
+        f"{_format_side_stats_value(joint_test['statistic'])}, p={float(joint_test['p']):.6g}, n={total_n}",
+        "  df = number of independently tested interaction terms",
+        f"  Bootstrap refits: {bootstrap['valid']}/{bootstrap['requested']} valid; seed={bootstrap['random_state']}",
+    ])
+    return lines
 
 
 def _association_correlation_method_label(
@@ -30654,6 +30704,7 @@ def _association_coefficients_figure(
     bootstrap=None,
     title=None,
     subtitle=None,
+    comparisons=None,
 ):
     from PyFLASH.layout import mark_manual_layout
 
@@ -30670,7 +30721,22 @@ def _association_coefficients_figure(
         16.0,
         max(9.2, 1.6 * len(group_order) + 4.4, legend_width),
     )
-    fig, ax = plt.subplots(figsize=(fig_width, 7.2))
+    summary_lines = (
+        _association_coefficient_summary_lines(
+            coefficients, interactions, joint_test,
+            factor_name=factor_name, value=value, bootstrap=bootstrap,
+            max_items=stats_summary_max_items, comparisons=comparisons,
+        )
+        if show_stats_summary else []
+    )
+    # Reserve the same plotting area and two sidecar columns, even when hidden.
+    # Stats content must never change either the canvas or the data-axis size.
+    canvas_width, canvas_height = fig_width + 9.2, 8.4
+    fig, ax = plt.subplots(figsize=(canvas_width, canvas_height))
+    data_width = fig_width - 1.8
+    ax.set_position([0.8 / canvas_width, 0.85 / canvas_height,
+                     data_width / canvas_width, 5.4 / canvas_height])
+    fig._pyflash_fixed_canvas = True
 
     for association_index, association in enumerate(associations):
         subset = (
@@ -30763,49 +30829,33 @@ def _association_coefficients_figure(
         else "Association coefficients across groups"
     )
     ax.set_title(str(title) if title is not None else default_title, loc="left", pad=92)
-    ax.text(
-        0.0,
-        1.135,
+    ax.annotate(
         str(subtitle or "Group-specific model slopes with confidence intervals."),
-        transform=ax.transAxes,
+        xy=(0.0, 1.0),
+        xycoords="axes fraction",
+        xytext=(0, 44),
+        textcoords="offset points",
         ha="left",
         va="bottom",
         fontsize=16,
         color="#374151",
-        clip_on=False,
-    )
-    ax.text(
-        0.0,
-        1.075,
-        (
-            f"Joint group-moderation test: chi-square({int(joint_test['df'])})="
-            f"{joint_test['statistic']:.2f}, p={joint_test['p']:.3f}"
-        ),
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=16,
-        fontweight="bold",
-        color="#111827",
-        clip_on=False,
+        annotation_clip=False,
     )
     if show_stats_summary:
-        lines = _association_coefficient_summary_lines(
-            coefficients,
-            interactions,
-            joint_test,
-            value=value,
-            factor_name=factor_name,
-            bootstrap=bootstrap,
-            max_items=stats_summary_max_items,
-        )
-        _annotate_stats_detail_text(ax, lines, x=1.07, y=0.82)
+        comparison_start = summary_lines.index("Group vs reference slope tests:")
+        overall_start = summary_lines.index("Overall test (all groups and associations):")
+        estimates = summary_lines[:comparison_start] + summary_lines[overall_start:]
+        comparisons_text = summary_lines[comparison_start:overall_start]
+        _annotate_stats_detail_text(ax, estimates, x=1.07, y=0.82)
+        second_column_x = 1.07 + 4.7 / data_width
+        _annotate_stats_detail_text(ax, comparisons_text, x=second_column_x, y=0.82)
     mark_manual_layout(fig)
     return fig
 
 
 def _emit_association_coefficients_report(
-    schemas, coefficients, interactions, joint_test, *, factor_name, value
+    schemas, coefficients, interactions, joint_test, *, factor_name, value,
+    comparisons=None,
 ):
     try:
         import PyFLASH.report as report
@@ -30866,21 +30916,26 @@ def _emit_association_coefficients_report(
                         "estimate": row.estimate,
                         "se": row.standard_error,
                         "p": row.p,
+                        "method": "pooled bootstrap-SE Wald z",
+                        "tail": "two",
                     }
                     for row in model_interactions.itertuples(index=False)
                 }
             )
-            report.emit(
-                report.build_linear_model_record(
-                    dependent_variable=spec["y"],
-                    formula=formula,
-                    group=factor_name or "group",
-                    predictors=[spec["x"], *covariates],
-                    covariates=covariates,
-                    n=int(nodes["n"].sum()),
-                    coefficients=model_coefficients,
-                )
+            model_record = report.build_linear_model_record(
+                dependent_variable=spec["y"],
+                formula=formula,
+                group=factor_name or "group",
+                predictors=[spec["x"], *covariates],
+                covariates=covariates,
+                n=int(nodes["n"].sum()),
+                coefficients=model_coefficients,
             )
+            if comparisons is not None:
+                model_record["slope_comparisons"] = report.coerce(
+                    comparisons.loc[comparisons["association"].eq(spec["label"])].to_dict("records")
+                )
+            report.emit(model_record)
         report.emit(
             report.build_linear_model_record(
                 dependent_variable="joint association moderation",
@@ -31277,6 +31332,8 @@ def plot_association_coefficients(
     group_cols=None,
     subject_col=None,
     dataframe_kwargs=None,
+    comparison_test="bootstrap_wald",
+    comparison_tail="two",
 ):
     """Plot several adjusted association coefficients across the same groups.
 
@@ -31290,6 +31347,15 @@ def plot_association_coefficients(
     applicable. Use ``return_data=True`` to receive the plot-ready coefficient
     and interaction tables, joint test, and bootstrap metadata with the figure.
     Set ``show_values=False`` to hide the plotted coefficient labels.
+
+    Reference-comparison p-values are separate from group-slope confidence
+    intervals and the overall joint test. ``comparison_test="bootstrap_wald"``
+    keeps two-sided pooled-model bootstrap-SE Wald z-tests. Select ``"ols_t"``
+    for separately fitted two-group OLS interaction t-tests, and select
+    ``comparison_tail="less"`` or ``"greater"`` only for a directional hypothesis.
+    The right-side summary states the method, alternative, scaling and sample
+    size. ``return_data=True`` also returns the selected ``comparisons`` table;
+    ``interactions`` remains the original pooled bootstrap table.
     """
     from PyFLASH.association_coefficients import analyze, normalize_specs
 
@@ -31340,6 +31406,8 @@ def plot_association_coefficients(
                 roi=roi_base,
                 save=save,
                 return_data=return_data,
+                comparison_test=comparison_test,
+                comparison_tail=comparison_tail,
             )
             for roi_base in roi_bases
         }
@@ -31369,6 +31437,8 @@ def plot_association_coefficients(
                 roi=roi,
                 save=save,
                 return_data=return_data,
+                comparison_test=comparison_test,
+                comparison_tail=comparison_tail,
             )
             for spec in iter_specificities(specificity)
         }
@@ -31444,6 +31514,8 @@ def plot_association_coefficients(
             bootstrap_resamples=bootstrap_resamples,
             random_state=random_state,
             min_n=min_n,
+            comparison_test=comparison_test,
+            comparison_tail=comparison_tail,
         )
         fig = _association_coefficients_figure(
             analysis["coefficients"],
@@ -31459,6 +31531,7 @@ def plot_association_coefficients(
             bootstrap=analysis["bootstrap"],
             title=title,
             subtitle=subtitle,
+            comparisons=analysis["comparisons"],
         )
         _emit_association_coefficients_report(
             analysis["schemas"],
@@ -31467,6 +31540,7 @@ def plot_association_coefficients(
             analysis["joint_test"],
             factor_name=factor,
             value=str(value).lower(),
+            comparisons=analysis["comparisons"],
         )
 
     multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
@@ -31490,6 +31564,7 @@ def plot_association_coefficients(
         "figure": fig,
         "coefficients": analysis["coefficients"],
         "interactions": analysis["interactions"],
+        "comparisons": analysis["comparisons"],
         "joint_test": {
             key: item
             for key, item in analysis["joint_test"].items()

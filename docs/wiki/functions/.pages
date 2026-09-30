@@ -39,6 +39,7 @@ nav:
       - plot_regressions.md
       - plot_correlation_contrast.md
       - plot_coefficient_contrast.md
+      - plot_association_coefficients.md
       - plot_multivariable_regression_matrix.md
       - plot_model_result_matrix.md
       - plot_scatter_3d.md

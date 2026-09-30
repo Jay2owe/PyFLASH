@@ -20,6 +20,12 @@ same shape of question asked about *slopes* rather than correlations — e.g. a
 decline that is steeper in one group than another. The two can disagree when
 groups differ in spread, so pick the one matching the claim you are making.
 
+Use [`plot_association_coefficients`](../functions/plot_association_coefficients.md)
+to show several association slopes with confidence intervals across the same
+groups, with association-specific covariates and an overall joint bootstrap
+test. Its fixed statistics panel distinguishes group estimates, selected
+reference comparisons and the overall result without resizing the image.
+
 ## Input Data
 
 Regression plots read subject-level numeric columns from `.summary`. They accept
@@ -39,12 +45,21 @@ result table from `.summary`, `.summaries`, `.data`, or a named attribute.
 | Function | Registry name | Use |
 |---|---|---|
 | [`plot_regressions`](../functions/plot_regressions.md) | `regressions` | Scatter plots with fitted lines, one per group or one combined overlay. |
+| [`plot_association_coefficients`](../functions/plot_association_coefficients.md) | `association_coefficients` | Several adjusted group slopes and intervals, selected reference comparisons, and a joint bootstrap test. |
 | [`plot_multivariable_regression_matrix`](../functions/plot_multivariable_regression_matrix.md) | `multivariable_regression_matrix` | Heatmap of model metrics across outcomes and predictor sets. |
 | [`plot_model_result_matrix`](../functions/plot_model_result_matrix.md) | `model_result_matrix` | Heatmap renderer for precomputed model-result tables. |
 | [`plot_correlation_contrast`](../functions/plot_correlation_contrast.md) | `correlation_contrast` | Slopegraph of an `x`-vs-measures correlation across an ordered group factor, with Fisher r-to-z / ACAT omnibus significance vs a reference. |
 | [`plot_coefficient_contrast`](../functions/plot_coefficient_contrast.md) | `coefficient_contrast` | Same slopegraph for regression *coefficients* (standardized beta or raw slope), with OLS `x * group` interaction significance vs a reference. |
 
 ## Common Options
+
+For `plot_association_coefficients`, `comparison_test="bootstrap_wald"` keeps
+the default pooled-model two-sided bootstrap-SE Wald comparisons. Choose
+`comparison_test="ols_t"` for separate two-group ordinary least-squares t-tests;
+`comparison_tail="two"`, `"less"` or `"greater"` states the alternative.
+These choices do not change the plotted slopes, intervals or joint test.
+`show_stats_summary=False` hides its panel while preserving the canvas and
+plotting-area dimensions. See the function page for scaling and cohort details.
 
 For the two contrast slopegraphs, `x_axis_width_scale` changes only the plotted
 x-axis/data-region width relative to the figure canvas. Lower values pull the

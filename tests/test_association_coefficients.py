@@ -173,7 +173,8 @@ def test_raw_dataframe_and_dataframe_experiment_paths(association_df, tmp_path):
     plt.close(adapted["figure"])
 
 
-def test_miniexperiment_and_batch_paths(association_df, tmp_path):
+@pytest.mark.parametrize("comparison_test", ["bootstrap_wald", "ols_t"])
+def test_miniexperiment_and_batch_paths(association_df, tmp_path, comparison_test):
     input_dir = tmp_path / "mini"
     input_dir.mkdir()
     association_df.to_csv(input_dir / "Data.csv", index=False)
@@ -188,8 +189,8 @@ def test_miniexperiment_and_batch_paths(association_df, tmp_path):
     batch = Batch("human", [mini], conditions, str(tmp_path / "batch"))
     batch.processData(import_images=False, progress=False)
 
-    mini_result = _plot(mini)
-    batch_result = _plot(batch)
+    mini_result = _plot(mini, comparison_test=comparison_test)
+    batch_result = _plot(batch, comparison_test=comparison_test)
     np.testing.assert_allclose(
         mini_result["coefficients"]["estimate"],
         batch_result["coefficients"]["estimate"],
@@ -242,13 +243,133 @@ def test_stats_summary_is_exact_and_removable(association_df):
     assert "Volume ~ Age * Diagnosis + Sex" in text
     assert "Volume-activity coupling:" in text
     assert "M10 ~ Volume * Diagnosis + Age + Sex" in text
-    assert "Joint Wald: chi-square(4)=" in text
+    assert "Joint bootstrap Wald: chi-square(4)=" in text
     assert "p=" in text
     assert "n=" in text
     assert "delta=" in text
-    assert "Joint Wald" not in _axis_text(hidden["figure"])
+    assert "Joint bootstrap Wald" not in _axis_text(hidden["figure"])
+    assert "p=" not in _axis_text(hidden["figure"])
+    np.testing.assert_allclose(shown["figure"].get_size_inches(), hidden["figure"].get_size_inches())
+    np.testing.assert_allclose(shown["figure"].axes[0].get_position().bounds,
+                               hidden["figure"].axes[0].get_position().bounds)
+    assert "Group vs reference slope tests:" in text
+    assert "Pooled all-group model; two-sided Wald z-tests" in text
+    assert "These intervals describe slopes, not group differences." in text
+    assert "model n=36" in text
+    for annotation in shown["figure"].axes[0].texts:
+        if "p=" in annotation.get_text():
+            assert annotation.get_position()[0] > 1
     plt.close(shown["figure"])
     plt.close(hidden["figure"])
+
+
+@pytest.mark.parametrize("tail", ["two", "less", "greater"])
+def test_directional_comparisons_match_independent_two_group_ols(association_df, tail):
+    from scipy import stats as scipy_stats
+    import statsmodels.formula.api as smf
+    result = _plot(association_df, comparison_test="ols_t", comparison_tail=tail)
+    comparisons = result["comparisons"]
+    assert comparisons["method"].eq("ols_t").all()
+    assert comparisons["model_scope"].eq("two_groups").all()
+    for row in comparisons.itertuples(index=False):
+        pair = association_df.loc[association_df.Diagnosis.isin([row.reference, row.group])].copy()
+        pair["x"] = (pair[row.x] - pair[row.x].mean()) / pair[row.x].std(ddof=0)
+        pair["y"] = (pair[row.y] - pair[row.y].mean()) / pair[row.y].std(ddof=0)
+        pair["patient"] = pair.Diagnosis.ne(row.reference).astype(int)
+        covariates = row.covariates.split(", ")
+        formula = "y ~ x * patient" + "".join(
+            " + C(Sex)" if col == "Sex" else " + " + col for col in covariates if col
+        )
+        fit = smf.ols(formula, data=pair).fit()
+        t = float(fit.tvalues["x:patient"])
+        expected_p = (2 * scipy_stats.t.sf(abs(t), fit.df_resid) if tail == "two"
+                      else scipy_stats.t.cdf(t, fit.df_resid) if tail == "less"
+                      else scipy_stats.t.sf(t, fit.df_resid))
+        assert row.t == pytest.approx(t, rel=1e-9)
+        assert row.df == fit.df_resid
+        assert row.p == pytest.approx(expected_p, rel=1e-9)
+        assert row.n == len(pair) == 24
+        assert row.estimate == pytest.approx(fit.params["x:patient"], rel=1e-9)
+    text = _axis_text(result["figure"])
+    assert "Separate two-group ordinary least-squares (OLS) t-tests" in text
+    assert "delta uses pair scaling; plotted beta uses all groups." in text
+    assert "model n=24" in text
+    assert "Pooled all-group model; two-sided Wald z-tests" not in text
+    assert "OLS" not in result["figure"].axes[0].get_title()
+    assert "p=" not in result["figure"].axes[0].get_title()
+    plt.close(result["figure"])
+
+
+def test_comparison_choice_preserves_slopes_intervals_joint_and_shared_cohort(association_df, tmp_path):
+    frame = association_df.copy()
+    frame.loc[0, "M10"] = np.nan
+    baseline = _plot(frame)
+    selected = _plot(_experiment(frame, tmp_path), comparison_test="ols_t", comparison_tail="less")
+    pd.testing.assert_frame_equal(baseline["coefficients"], selected["coefficients"])
+    pd.testing.assert_frame_equal(baseline["interactions"], selected["interactions"])
+    assert baseline["joint_test"] == selected["joint_test"]
+    assert set(selected["comparisons"]["n"]) == {23}
+    assert selected["comparisons"]["n_reference"].eq(11).all()
+    np.testing.assert_allclose(baseline["figure"].get_size_inches(), selected["figure"].get_size_inches())
+    np.testing.assert_allclose(baseline["figure"].axes[0].get_position().bounds,
+                               selected["figure"].axes[0].get_position().bounds)
+    plt.close(baseline["figure"])
+    plt.close(selected["figure"])
+
+
+def test_comparison_options_validate_before_fitting(association_df):
+    with pytest.raises(ValueError, match="comparison_test"):
+        _plot(association_df, comparison_test="unknown")
+    with pytest.raises(ValueError, match="comparison_tail"):
+        _plot(association_df, comparison_test="ols_t", comparison_tail="one")
+    with pytest.raises(ValueError, match="two-sided"):
+        _plot(association_df, comparison_tail="less")
+
+
+def test_actual_interval_method_and_alpha_are_explained(association_df):
+    result = _plot(association_df, ci_method="ols", ci_alpha=.1)
+    text = _axis_text(result["figure"])
+    assert "90% OLS t confidence interval" in text
+    assert "95%" not in text
+    # The joint/interaction tests still use bootstrap uncertainty.
+    assert "Standard errors from the group-stratified bootstrap" in text
+    plt.close(result["figure"])
+
+
+def test_comparisons_support_other_columns_and_reference_labels(association_df):
+    frame = association_df.rename(columns={
+        "Diagnosis": "Arm", "Age": "Dose", "Volume": "Response", "Sex": "Batch",
+    }).copy()
+    frame["Arm"] = frame["Arm"].map({
+        "Control": "Baseline", "MCI": "Treatment A", "AD": "Treatment B",
+    })
+    result = plot_association_coefficients(
+        frame, associations={"Dose-response": {"x": "Dose", "y": "Response", "covariates": ["Batch"]}},
+        factor="Arm", group_col="Arm", subject_col="Subject",
+        group_order=["Baseline", "Treatment A", "Treatment B"], reference="Baseline",
+        comparison_test="ols_t", comparison_tail="greater", bootstrap_resamples=100,
+        column_labels={"Dose": "Exposure", "Response": "Measured response"},
+        save=False, return_data=True,
+    )
+    assert result["comparisons"]["reference"].eq("Baseline").all()
+    assert set(result["comparisons"]["group"]) == {"Treatment A", "Treatment B"}
+    assert result["comparisons"]["n"].eq(24).all()
+    text = _axis_text(result["figure"])
+    assert "Measured response ~ Exposure * Arm + Batch" in text
+    assert "one-sided: group slope > reference" in text
+    assert result["coefficients"]["x"].eq("Dose").all()
+    plt.close(result["figure"])
+
+
+def test_long_sidecar_does_not_overlap_title_and_subtitle(association_df):
+    result = _plot(association_df, comparison_test="ols_t", comparison_tail="less")
+    fig, ax = result["figure"], result["figure"].axes[0]
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    subtitle = next(text for text in ax.texts
+                    if text.get_text() == "Group-specific model slopes with confidence intervals.")
+    assert not ax._left_title.get_window_extent(renderer).overlaps(subtitle.get_window_extent(renderer))
+    plt.close(fig)
 
 
 def test_roi_and_specificity_queues(association_df, tmp_path):
@@ -259,7 +380,8 @@ def test_roi_and_specificity_queues(association_df, tmp_path):
         fig_path=tmp_path / "figures",
         summaries={"SCN": association_df, "PVN": association_df.copy()},
     )
-    roi_result = _plot(exp, roi=["SCN", "PVN"], return_data=False)
+    roi_result = _plot(exp, roi=["SCN", "PVN"], return_data=False,
+                      comparison_test="ols_t", comparison_tail="less")
     assert set(roi_result) == {"SCN", "PVN"}
     assert all(isinstance(figure, Figure) for figure in roi_result.values())
 
@@ -269,11 +391,38 @@ def test_roi_and_specificity_queues(association_df, tmp_path):
         roi="SCN",
         min_n=4,
         return_data=False,
+        comparison_test="ols_t",
+        comparison_tail="less",
     )
     assert len(specificity_result) == 2
     assert all(isinstance(figure, Figure) for figure in specificity_result.values())
     for figure in [*roi_result.values(), *specificity_result.values()]:
+        assert "one-sided: group slope < reference" in _axis_text(figure)
         plt.close(figure)
+
+
+def test_selected_comparisons_are_preserved_in_report_records(association_df):
+    report.start()
+    try:
+        result = _plot(association_df, comparison_test="ols_t", comparison_tail="less")
+        records = report.collect()
+    finally:
+        report.collect()
+    models = [record for record in records if record["kind"] == "linear_model"]
+    assert len(models) == 3
+    for model in models[:-1]:
+        comparisons = model["slope_comparisons"]
+        assert len(comparisons) == 2
+        assert all(row["method"] == "ols_t" and row["tail"] == "less" for row in comparisons)
+        assert all(row["n"] == 24 for row in comparisons)
+        for row in comparisons:
+            selected = result["comparisons"].loc[
+                result["comparisons"].association.eq(row["association"])
+                & result["comparisons"].group.eq(row["group"])
+            ].iloc[0]
+            assert row["p"] == pytest.approx(selected.p)
+        assert model["coefficients"]["interaction[MCI]"]["method"] == "pooled bootstrap-SE Wald z"
+    plt.close(result["figure"])
 
 
 def test_clear_validation_errors(association_df):

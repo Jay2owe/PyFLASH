@@ -1316,6 +1316,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         pyflash_savefig_kwargs,
     )
     apply_matplotlib_fast_path()
+    fixed_canvas = bool(getattr(figure, "_pyflash_fixed_canvas", False))
 
     def _windows_extended_path(path):
         if os.name != "nt":
@@ -1414,7 +1415,8 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         if getattr(Config, "USE_PYFLASH_LAYOUT", True):
             from PyFLASH.layout import apply_pyflash_layout
             apply_pyflash_layout(figure)
-        apply_pyflash_figure_geometry(figure, save_bbox=save_bbox)
+        if not fixed_canvas:
+            apply_pyflash_figure_geometry(figure, save_bbox=save_bbox)
 
         # Guarantee editable text at the single figure choke point regardless of
         # what rcParams the caller left active: every string stays a real <text>
@@ -1453,11 +1455,14 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         _companion_base_record = _prepared_record
         _variant_record = _prepared_record
         base_savefig_kwargs = pyflash_savefig_kwargs(
+            dpi=dpi,
             bbox_inches=save_bbox,
             pad_inches=pad_inches,
             bbox_extra_artists=extra_artist,
             transparent=bool(transparent),
         )
+        if fixed_canvas:
+            base_savefig_kwargs["bbox_inches"] = None
         for index, (carrier_path, save_carrier_path, extension) in enumerate(
             zip(full_paths, save_full_paths, selected_formats)
         ):
@@ -1474,7 +1479,8 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             os.unlink(temporary_path)
             temporary_save_path = _windows_extended_path(temporary_path)
             try:
-                with plt.rc_context({'svg.fonttype': 'none', 'mathtext.default': 'regular'}):
+                with plt.rc_context({'svg.fonttype': 'none', 'mathtext.default': 'regular',
+                                     **({'savefig.bbox': None} if fixed_canvas else {})}):
                     if _variant_record is None:
                         figure.savefig(
                             temporary_save_path,
@@ -1507,7 +1513,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
                             # below, after the final visual reference refresh.
                             proof_policy=None,
                         )
-                if extension == "svg":
+                if extension == "svg" and not fixed_canvas:
                     normalize_pyflash_svg_canvas(
                         temporary_save_path, save_bbox=save_bbox
                     )
