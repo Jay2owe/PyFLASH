@@ -1,5 +1,7 @@
 # PyFLASH
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21933060.svg)](https://doi.org/10.5281/zenodo.21933060)
+
 [![Documentation Status](https://readthedocs.org/projects/pyflash/badge/?version=latest)](https://pyflash.readthedocs.io/en/latest/)
 [![PyPI](https://img.shields.io/pypi/v/PyFLASH-analysis)](https://pypi.org/project/PyFLASH-analysis/)
 
@@ -36,7 +38,7 @@ and creating the environment. See [`demo/verification.json`](demo/verification.j
 
 PyFLASH is distributed under the BSD 3-Clause License. See `LICENSE`.
 
-**Requires:** Python ≥ 3.10
+**Requires:** Python â‰¥ 3.10
 
 **Required dependencies (minimum versions):** reprofig 0.5.1, pandas 1.5,
 numpy 1.23, matplotlib 3.6, seaborn 0.12, scipy 1.11, statsmodels 0.14,
@@ -333,20 +335,20 @@ the Alzheimer's Society, and Alzheimer's Research UK.
 
 ```
 Raw ImageJ exports (CSVs, ROI zips, images)
-    → Experiment.processData()     — import, clean, compute colocalisation, build summary
-    → Batch.processData()          — merge experiments, handle cross-experiment animals
-    → Analysis & visualisation     — plot_mean_bars(), plot_matrices(), stats, modelling
-    → Export                       — batch.export_all_excel(), save_state()
+    â†’ Experiment.processData()     â€” import, clean, compute colocalisation, build summary
+    â†’ Batch.processData()          â€” merge experiments, handle cross-experiment animals
+    â†’ Analysis & visualisation     â€” plot_mean_bars(), plot_matrices(), stats, modelling
+    â†’ Export                       â€” batch.export_all_excel(), save_state()
 ```
 
 ## Expected data layout
 
 ```
 Data Analysis/
-├── Objects/           # CSV files for objectMarker data
-├── Cells/             # CSV files for cellMarker data
-├── ROI Intensities/   # CSV files for ROI-level Antibody data
-├── Attributes/        # CSV files for generic Attribute data
-├── ROIs/              # ImageJ ROI zip files
-└── Images/            # Microscopy images organized by animal/marker
+â”œâ”€â”€ Objects/           # CSV files for objectMarker data
+â”œâ”€â”€ Cells/             # CSV files for cellMarker data
+â”œâ”€â”€ ROI Intensities/   # CSV files for ROI-level Antibody data
+â”œâ”€â”€ Attributes/        # CSV files for generic Attribute data
+â”œâ”€â”€ ROIs/              # ImageJ ROI zip files
+â””â”€â”€ Images/            # Microscopy images organized by animal/marker
 ```
