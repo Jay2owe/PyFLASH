@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -34,6 +35,8 @@ def _as_condition_list(conditions):
         ) from exc
     if len(values) == 0:
         raise ValueError("groups must contain at least one group.")
+    if any(not hasattr(value, "name") or not hasattr(value, "factor") for value in values):
+        raise TypeError("groups must contain PyFLASH group objects, not names or other values.")
     from PyFLASH.conditions import groupList
 
     return groupList(values)
@@ -214,18 +217,16 @@ def _auto_condition_list(
         if len(per_factor) == 1:
             cl = per_factor[0]
         else:
-            crossed = reduce(
+            cl = reduce(
                 lambda left, right: conditionList(list(zipConditionLists(left, right))),
                 per_factor,
             )
-            names = [cond.name for cond in crossed]
-            crossed.comparisons = _resolve_auto_comparisons(
-                names,
-                comparisons=comparisons,
-                comparison_mode=comparison_mode,
-                control=control,
-            )
-            cl = crossed
+        cl.comparisons = _resolve_auto_comparisons(
+            [cond.name for cond in cl],
+            comparisons=comparisons,
+            comparison_mode=comparison_mode,
+            control=control,
+        )
         return cl
 
     if condition_col is not None and condition_col in df.columns:
@@ -267,22 +268,23 @@ def _format_animal_name(value):
         text = value.strip()
         if text == "":
             return np.nan
-        numeric = pd.to_numeric(text, errors="coerce")
-        if (
-            pd.notna(numeric)
-            and np.isfinite(numeric)
-            and np.isclose(numeric, round(float(numeric)))
-        ):
-            return str(int(round(float(numeric))))
+        # Identifiers are exact. Approximate numeric equality can merge two
+        # different subjects, and a float conversion can lose integer digits.
+        if re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", text):
+            from decimal import Decimal, InvalidOperation
+            try:
+                numeric = Decimal(text)
+            except InvalidOperation:
+                return text
+            if (numeric.is_finite() and numeric.adjusted() <= 308
+                    and np.isfinite(float(numeric))
+                    and numeric == numeric.to_integral_value()):
+                return str(int(numeric))
         return text
     if isinstance(value, (int, np.integer)):
         return str(int(value))
-    if (
-        isinstance(value, (float, np.floating))
-        and np.isfinite(value)
-        and np.isclose(value, round(float(value)))
-    ):
-        return str(int(round(float(value))))
+    if isinstance(value, (float, np.floating)) and np.isfinite(value) and value == np.floor(value):
+        return str(int(value))
     text = str(value).strip()
     return text if text != "" else np.nan
 
@@ -309,15 +311,30 @@ def _lookup_from_names(values) -> dict[str, str]:
     return lookup
 
 
-def _condition_value_lookup(condition_list) -> dict[str, str]:
-    lookup = {}
+def _condition_value_lookup(condition_list, requested_values=None) -> dict[str, str]:
+    # Canonical identities own their records before optional display aliases.
+    lookup = {
+        str(cond.name).strip().casefold(): str(cond.name)
+        for cond in condition_list if getattr(cond, "name", None) is not None
+    }
+    aliases = {}
     for cond in condition_list:
-        for value in (getattr(cond, "name", None), getattr(cond, "label", None)):
-            if value is None:
-                continue
-            text = str(value).strip()
-            if text:
-                lookup[text.casefold()] = str(getattr(cond, "name", text))
+        value = getattr(cond, "label", None)
+        if value is None:
+            continue
+        text = str(value).strip()
+        key = text.casefold()
+        if text and key not in lookup:
+            aliases.setdefault(key, set()).add(str(cond.name))
+    ambiguous = {key for key, owners in aliases.items() if len(owners) > 1}
+    if requested_values is not None:
+        requested = {str(value).strip().casefold() for value in requested_values if pd.notna(value)}
+        if ambiguous & requested:
+            raise ValueError(
+                "A supplied condition label belongs to multiple groups. "
+                "Use each group's unique canonical name."
+            )
+    lookup.update({key: next(iter(owners)) for key, owners in aliases.items() if len(owners) == 1})
     return lookup
 
 
@@ -371,6 +388,7 @@ def _normalise_frame(
     animal_col="AnimalName",
     factor_mappings=None,
     require_condition=True,
+    infer_condition=True,
 ):
     if not isinstance(df, pd.DataFrame):
         raise TypeError("from_dataframe inputs must be pandas DataFrames.")
@@ -380,6 +398,10 @@ def _normalise_frame(
     factor_mappings = factor_mappings or {}
 
     for factor in factors:
+        # The canonical condition pass below owns this mapping. Apply a
+        # chained or cyclic client dictionary once to each supplied value.
+        if factor == "Condition" and condition_col == "Condition":
+            continue
         if factor not in out.columns:
             continue
         allowed = [
@@ -398,19 +420,19 @@ def _normalise_frame(
             factor_mappings.get("Condition", {}),
             allowed_values=_condition_value_lookup(condition_list).values(),
         )
-        lookup = _condition_value_lookup(condition_list)
+        lookup = _condition_value_lookup(condition_list, requested_values=out["Condition"])
         out["Condition"] = out["Condition"].map(
             lambda v: lookup.get(str(v).strip().casefold(), v)
             if pd.notna(v) else np.nan
         )
     elif "Condition" in out.columns:
-        lookup = _condition_value_lookup(condition_list)
+        lookup = _condition_value_lookup(condition_list, requested_values=out["Condition"])
         out["Condition"] = out["Condition"].map(
             lambda v: lookup.get(str(v).strip().casefold(), v)
             if pd.notna(v) else np.nan
         )
 
-    if "Condition" not in out.columns and factors and all(f in out.columns for f in factors):
+    if infer_condition and "Condition" not in out.columns and factors and all(f in out.columns for f in factors):
         condition_lookup = {}
         for cond in condition_list:
             components = _condition_components(cond)
@@ -426,7 +448,7 @@ def _normalise_frame(
 
         out["Condition"] = out.apply(_condition_from_row, axis=1)
 
-    if "Condition" not in out.columns:
+    if infer_condition and "Condition" not in out.columns:
         try:
             conds = list(condition_list)
         except TypeError:
@@ -434,26 +456,53 @@ def _normalise_frame(
         if len(conds) == 1 and str(getattr(conds[0], "name", "")) == "All":
             out["Condition"] = "All"
 
-    if require_condition and "Condition" not in out.columns:
+    return _require_condition_rows(out) if require_condition else out
+
+
+def _require_condition_rows(out):
+    if "Condition" not in out.columns:
         raise ValueError(
             "DataFrame input must include a Condition column, a condition_col, "
             "or all factor columns from the supplied conditions."
         )
-    if require_condition:
-        valid = out["Condition"].notna() & out["Condition"].astype(str).str.strip().ne("")
-        out = out.loc[valid].copy()
-
-    return out
+    valid = out["Condition"].notna() & out["Condition"].astype(str).str.strip().ne("")
+    return out.loc[valid].copy()
 
 
 def _merge_summary_metadata(df, summary, factors):
-    columns = ["AnimalName", "Condition"] + [f for f in factors if f in summary.columns]
-    columns = [c for c in columns if c in summary.columns and c not in df.columns]
-    if "AnimalName" not in df.columns or not columns:
+    fields = list(dict.fromkeys(["Condition"] + [f for f in factors if f in summary.columns]))
+    missing = [name for name in fields if name in summary.columns and name not in df.columns]
+    if "AnimalName" not in df.columns or not missing:
         return df
-    metadata_cols = ["AnimalName"] + columns
-    metadata = summary[metadata_cols].drop_duplicates(subset=["AnimalName"])
-    return df.merge(metadata, on="AnimalName", how="left")
+    context = [name for name in fields if name in df.columns and name in summary.columns]
+    # A missing supplied context value imposes no identity constraint. Handle
+    # only observed patterns and keep the common complete-context join batched.
+    if not context or df.empty:
+        groups = [((), np.arange(len(df)))]
+    else:
+        patterns, membership = np.unique(df[context].notna().to_numpy(), axis=0, return_inverse=True)
+        groups = [(pattern, np.flatnonzero(membership == position))
+                  for position, pattern in enumerate(patterns)]
+    row_position = object()
+    pieces = []
+    for pattern, positions in groups:
+        part = df.iloc[positions].copy()
+        part[row_position] = positions
+        keys = ["AnimalName"] + [name for name, present in zip(context, pattern) if present]
+        metadata = summary[keys + missing].drop_duplicates()
+        # Unrequested master records cannot make a requested measurement
+        # ambiguous. Native validation applies to the actual matched records.
+        requested = part[keys].drop_duplicates()
+        metadata = requested.merge(metadata, on=keys, how="inner").drop_duplicates()
+        if metadata.duplicated(subset=keys).any():
+            raise ValueError(
+                "Cannot infer measurement metadata uniquely from the supplied "
+                "subject and group context. Supply Condition or factor columns "
+                "that identify the measurement."
+            )
+        pieces.append(part.merge(metadata, on=keys, how="left", validate="many_to_one"))
+    joined = pd.concat(pieces, ignore_index=True)
+    return joined.sort_values(row_position, kind="stable").drop(columns=[row_position]).reset_index(drop=True)
 
 
 def _build_region_dict(summary, region_col=None):
@@ -463,9 +512,9 @@ def _build_region_dict(summary, region_col=None):
         return {}
     region_source = region_col if region_col in summary.columns else None
     region_dict = {}
-    for condition_name, cdf in summary.groupby("Condition", dropna=True):
+    for condition_name, cdf in summary.groupby("Condition", dropna=True, observed=True):
         animals = {}
-        for animal_name, adf in cdf.groupby("AnimalName", dropna=True):
+        for animal_name, adf in cdf.groupby("AnimalName", dropna=True, observed=True):
             if region_source is None:
                 regions = ["summary"]
             else:
@@ -528,6 +577,8 @@ class DataFrameExperiment:
         roi_base="SCN",
         region_col=None,
     ):
+        if not isinstance(summary, pd.DataFrame):
+            raise TypeError("from_dataframe inputs must be pandas DataFrames.")
         conditions, condition_col, factor_cols, animal_col = resolve_dataframe_aliases(
             conditions=conditions,
             condition_col=condition_col,
@@ -581,16 +632,22 @@ class DataFrameExperiment:
                 control=control,
             )
         )
+        canonical_names = [str(cond.name).strip().casefold() for cond in self.condition_list]
+        if len(set(canonical_names)) != len(canonical_names):
+            raise ValueError(
+                "Group names must be unique. Distinct groups cannot share a "
+                "canonical identifier; use unambiguous factor names or supplied groups."
+            )
         self.factorDict = getattr(self.condition_list, "factorDict", {})
         self.factor = list(getattr(self.condition_list, "factor", []) or [])
         self.aliases = aliases or {}
-        self.filePath = os.fspath(file_path or os.getcwd())
-        self.fig_path = os.fspath(
+        self.filePath = os.fsdecode(file_path or os.getcwd())
+        self.fig_path = os.fsdecode(
             fig_path
             if fig_path is not None
             else os.path.join(self.filePath, "Results", "Python Figures")
         )
-        self.data_path = os.fspath(
+        self.data_path = os.fsdecode(
             data_path
             if data_path is not None
             else os.path.join(self.filePath, "Results", "Data and Stats")
@@ -605,6 +662,7 @@ class DataFrameExperiment:
             source_values = [source_paths]
         else:
             source_values = list(source_paths)
+        source_values = [os.fsdecode(path) for path in source_values]
         self._provenance_sources = [
             {
                 "path": os.path.abspath(os.fspath(path)),
@@ -614,6 +672,20 @@ class DataFrameExperiment:
             }
             for path in source_values
         ]
+        consumed = summary.attrs.get("_pyflash_consumed_input")
+        if isinstance(consumed, Mapping) and consumed.get("path") and consumed.get("sha256"):
+            consumed_path = os.path.abspath(os.fsdecode(consumed["path"]))
+            matching = [item for item in self._provenance_sources if
+                os.path.normcase(item["path"]) == os.path.normcase(consumed_path)]
+            if not matching:
+                item = {"path": consumed_path, "role": "source_csv",
+                        "project_root": self.filePath, "uri": source_uri}
+                self._provenance_sources.append(item)
+                matching = [item]
+            for item in matching:
+                item["sha256"] = consumed["sha256"]
+                item["relative_path"] = os.path.basename(consumed_path)
+            self._pyflash_resident_input_sha256 = consumed["sha256"]
 
         self.summary = _normalise_frame(
             summary,
@@ -649,16 +721,23 @@ class DataFrameExperiment:
         self.data = {}
         for key, value in (data or {}).items():
             frame = value.df if hasattr(value, "df") else value
-            frame = _normalise_animal_column(pd.DataFrame(frame).dropna(how="all"), animal_col)
-            frame = _merge_summary_metadata(frame, self.summary, self.factor)
+            if not isinstance(frame, pd.DataFrame):
+                frame = pd.DataFrame(frame)
             frame = _normalise_frame(
-                frame,
+                frame.dropna(how="all"),
                 condition_list=self.condition_list,
                 condition_col="Condition",
-                animal_col="AnimalName",
+                animal_col=animal_col,
                 factor_mappings=factor_mappings,
-                require_condition=True,
+                require_condition=False,
+                infer_condition=False,
             )
+            # Borrowed summary metadata is already canonical. Normalize only
+            # the supplied cells, then require a complete condition after join.
+            measurement_attrs = deepcopy(frame.attrs)
+            frame = _merge_summary_metadata(frame, self.summary, self.factor)
+            frame.attrs = measurement_attrs
+            frame = _require_condition_rows(frame)
             self.data[str(key)] = DataFrameTable(str(key), frame)
 
         self.markers = set(self.data)
@@ -682,6 +761,16 @@ class DataFrameExperiment:
         ):
             os.makedirs(path, exist_ok=True)
         return self
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('_ui_initial_catalogue', None)
+        state.pop('_ui_source_version', None)
+        from PyFLASH._state_paths import portable_state
+        return portable_state(state)
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
     def getRegionDict(self, roi_base=None):
         """Return the condition -> animal -> region mapping used by iteration."""
@@ -715,9 +804,9 @@ def coerce_dataframe_input(
     obj,
     *,
     conditions=None,
-    condition_col="Condition",
+    condition_col=None,
     factor_cols=None,
-    animal_col="AnimalName",
+    animal_col=None,
     group_list=None,
     groups=None,
     group_col=None,
@@ -740,7 +829,7 @@ def coerce_dataframe_input(
     group_control=None,
     fig_path=None,
     data_path=None,
-    name="DataFrame",
+    name=None,
     dataframe_kwargs=None,
 ):
     """Wrap raw DataFrame inputs; leave existing PyFLASH-like objects unchanged."""

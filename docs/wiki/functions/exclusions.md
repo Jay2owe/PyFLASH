@@ -12,6 +12,15 @@ copied summary tables, a `.exclusions` ledger, and usually an
 `EXCLUDED_...` sentinel strings by default, and downstream numeric paths treat
 those sentinels as analysis-missing.
 
+Column filters choose which metrics detect outliers. With `scope="animal"`, a
+subject reaching the flag threshold is excluded from every numeric metric in
+the selected region, including metrics outside that detection filter. Marking
+records the same affected cells while leaving their values unchanged.
+
+Subjects are identified by `AnimalName`; repeated table row labels are supported
+and remain unchanged in the returned summaries. Set `roi` explicitly when a
+particular region is required.
+
 ## Signature
 
 ```python
@@ -140,7 +149,7 @@ mark_animals(experiment, animals, ...)
 | Option | Behavior |
 |---|---|
 | `"cell"` (default) | Blank each flagged metric cell. |
-| `"animal"` | Blank every selected metric for subjects flagged on enough metrics. This value is retained for compatibility with older naming. |
+| `"animal"` | Blank every numeric metric in the selected region for subjects flagged on enough detection metrics. This value is retained for compatibility with older naming. |
 
 ### `methods` options
 

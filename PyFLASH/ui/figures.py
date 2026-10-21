@@ -17,6 +17,7 @@ inside the function so importing this module never pulls in the UI dependency.
 
 import os
 import time
+from functools import lru_cache
 
 __all__ = [
     "locate_saved_figures",
@@ -24,11 +25,6 @@ __all__ = [
     "embed_figure",
     "is_figure",
 ]
-
-# Extensions ``plot_*`` / ``save_fig`` may write (SVG is the default; PNG/HTML
-# appear for some plot types and image exports).
-_FIGURE_EXTS = (".svg", ".png")
-
 
 def is_figure(obj) -> bool:
     """Return True when *obj* is a matplotlib ``Figure``.
@@ -45,7 +41,7 @@ def is_figure(obj) -> bool:
     )
 
 
-def locate_saved_figures(fig_path, since=None, exts=_FIGURE_EXTS,
+def locate_saved_figures(fig_path, since=None, exts=None,
                          limit=None) -> list:
     """Find recently-saved figure files under *fig_path*, newest first.
 
@@ -66,7 +62,7 @@ def locate_saved_figures(fig_path, since=None, exts=_FIGURE_EXTS,
         filesystem mtime granularity. ``None`` returns everything.
     exts : tuple of str
         File extensions to include (lowercased, dot-prefixed). Defaults to
-        ``(".svg", ".png")``.
+        The same direct carrier registry used by ``PyFLASH.utils.save_fig``.
     limit : int, optional
         Keep at most this many files (after newest-first sorting). ``None``
         returns all matches.
@@ -79,6 +75,10 @@ def locate_saved_figures(fig_path, since=None, exts=_FIGURE_EXTS,
     """
     if not fig_path or not os.path.isdir(fig_path):
         return []
+
+    if exts is None:
+        from PyFLASH.utils import _DIRECT_FIGURE_EXTENSIONS
+        exts = tuple('.' + extension for extension in _DIRECT_FIGURE_EXTENSIONS)
 
     cutoff = (since - 1) if since is not None else None
     found = []
@@ -121,16 +121,36 @@ def svg_to_png_bytes(svg_path):
         conversion fails.
     """
     try:
+        with open(svg_path, 'rb') as handle:
+            svg_data = handle.read()
+    except OSError:
+        return None
+    return _svg_to_png_bytes_cached(svg_data)
+
+
+@lru_cache(maxsize=12)
+def _svg_to_png_bytes_cached(svg_data):
+    """Reuse at most twelve previews; changed files always invalidate them."""
+    try:
         import cairosvg  # type: ignore
     except Exception:
         return None
     try:
-        return cairosvg.svg2png(url=svg_path)
+        return cairosvg.svg2png(bytestring=svg_data)
     except Exception:  # pragma: no cover - converter present but failed
         return None
 
 
-def embed_figure(result, fig_path, since=None, caption=None, limit=12):
+def preview_page(paths, page=0, limit=12):
+    """Bound rendering, preserving access to every item in a large result."""
+    if limit < 1:
+        raise ValueError('Preview page size must be positive.')
+    pages = max(1, (len(paths)+limit-1)//limit)
+    page = max(0, min(int(page), pages-1))
+    return list(paths[page*limit:(page+1)*limit]), page, pages
+
+
+def embed_figure(result, fig_path, since=None, caption=None, limit=12, paths=None, titles=None, default_columns=2):
     """Display a plot's output in Streamlit: returned ``Figure`` or saved files.
 
     The single rendering entry point for the Plots page. Strategy (matching the
@@ -138,10 +158,9 @@ def embed_figure(result, fig_path, since=None, caption=None, limit=12):
 
     1. If *result* is itself a ``Figure`` (rare — only some opt-in paths), show
        it directly with ``st.pyplot``.
-    2. Otherwise locate the files saved under *fig_path* since *since* and embed
-       each: PNG inline via ``st.image``; SVG converted to PNG when ``cairosvg``
-       is available, else rendered as inline SVG markup. A download button is
-       offered per file.
+    2. Otherwise locate saved files and display PNG or SVG through ``st.image``.
+       SVG stays a vector image, with its audit metadata preserved in the
+       downloadable original. A download button is offered per file.
 
     ``streamlit`` is imported lazily here so importing this module stays
     Streamlit-free (house rule 2). Returns the list of embedded file paths (empty
@@ -177,36 +196,49 @@ def embed_figure(result, fig_path, since=None, caption=None, limit=12):
         st.pyplot(result)
         return []
 
-    paths = locate_saved_figures(fig_path, since=since, limit=limit)
+    paths = locate_saved_figures(fig_path, since=since) if paths is None else list(paths)
     if not paths:
         return []
+    from PyFLASH.ui.controls import widget
+    import hashlib
+    identity = hashlib.sha256('\0'.join(map(str, paths)).encode()).hexdigest()[:16]
+    columns = 1
+    if len(paths) > 1:
+        strip = st.columns([2, 1], gap='small')
+        columns = widget(strip[1], 'selectbox', 'Columns', [1, 2, 3, 4], index=[1,2,3,4].index(default_columns),
+                         key='ui_preview_columns_'+identity,
+                         help='Same-sized panels; original image aspect ratios are preserved.')
+    visible, page, pages = preview_page(paths, limit=limit)
+    if pages > 1:
+        key = 'ui_preview_page_'+identity
+        page = widget(strip[0], 'selectbox', 'Result page', list(range(pages)), key=key,
+                      format_func=lambda index:f'{index+1} of {pages}',
+                      help='Browse every result without loading hundreds of images at once.')
+        visible, page, pages = preview_page(paths, page, limit)
 
-    for path in paths:
+    def show(path):
         name = os.path.basename(path)
         ext = os.path.splitext(path)[1].lower()
-        if ext == ".png":
-            st.image(path, caption=name, use_container_width=True)
-        elif ext == ".svg":
-            png = svg_to_png_bytes(path)
-            if png is not None:
-                st.image(png, caption=name, use_container_width=True)
-            else:
-                # st.image can't render SVG; inline the markup as HTML instead.
-                try:
-                    with open(path, encoding="utf-8") as fh:
-                        st.markdown(
-                            f"**{name}**<br>{fh.read()}",
-                            unsafe_allow_html=True,
-                        )
-                except Exception:  # pragma: no cover - defensive
-                    st.caption(f"Saved (could not inline-render): {name}")
+        if ext in {".png", ".svg", ".jpg", ".jpeg", ".jpe", ".webp", ".avif", ".tif", ".tiff"}:
+            # The supported Streamlit version renders local SVG as an image.
+            # Its embedded audit record stays in the download and never becomes
+            # visible HTML; no raster conversion is needed on the script thread.
+            st.image(path, caption=(titles or {}).get(path, name), width="stretch")
         try:
             with open(path, "rb") as fh:
-                st.download_button(
+                widget(st, 'download_button',
                     f"Download {name}", data=fh.read(),
                     file_name=name, key=f"dl_{path}",
                 )
         except OSError:  # pragma: no cover - defensive
             pass
-
-    return paths
+    for start in range(0, len(visible), columns):
+        row = visible[start:start+columns]
+        if columns == 1:
+            show(row[0])
+        else:
+            cells = st.columns(columns, gap='small')
+            for cell, path in zip(cells, row):
+                with cell:
+                    show(path)
+    return visible

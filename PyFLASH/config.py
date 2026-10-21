@@ -5,13 +5,11 @@ All the scattered globals from the notebook live here now.
 """
 
 import os
-import warnings
 import logging
 from collections import defaultdict
 
 from PyFLASH.palette import PIPELINE as PIPELINE_COLORS
 
-warnings.filterwarnings('ignore')
 logging.basicConfig(level=logging.ERROR)
 logging.getLogger('matplotlib').setLevel(logging.ERROR)
 
@@ -24,12 +22,12 @@ class Config:
     Usage:
         from PyFLASH.config import Config
         Config.THRESHOLD = 50
-        Config.PIXEL_SIZE = 3.52
+        Config.PIXEL_SIZE = 3.52  # pixels per micrometre
     """
 
     # ── Processing defaults ────────────────────────────────────────────
     THRESHOLD = 30
-    PIXEL_SIZE = 3.51998900003   # microns per pixel
+    PIXEL_SIZE = 3.51998900003   # pixels per micrometre (the reciprocal of micrometres per pixel)
     SECTION_THICKNESS_UM = 13.0  # legacy fallback when ROI volume is unavailable
 
     # ── Directory resolution ───────────────────────────────────────────
@@ -108,12 +106,27 @@ class Config:
     EFFECT_SIZES = True        # compute effect sizes alongside p-values
     EFFECT_CI = True           # bootstrap CIs for parametric pairwise effects
     EFFECT_CI_RESAMPLES = 5000  # bootstrap resamples for EFFECT_CI
+    EFFECT_CI_RANDOM_STATE = 0  # deterministic subject resampling for replay
 
     # ── Path aliases ──────────────────────────────────────────────────
     # User-defined overrides for specificity/factor abbreviations.
     # Auto-generated aliases are built at batch creation; manual entries
     # here take priority.  Example: {'WeekEight': 'W8', 'Genotype': 'GT'}
     ALIASES = {}
+
+
+def config_snapshot():
+    """Copy effective public settings for hash identities and standalone replay.
+
+    Settings must be JSON-compatible. Unsupported objects fail explicitly instead
+    of silently disappearing from a receipt or being replaced by a new RNG.
+    """
+    import copy
+    import json
+    values = {name: copy.deepcopy(value) for name, value in vars(Config).items()
+              if name.isupper() and not name.startswith("_")}
+    json.dumps(values, allow_nan=False)
+    return values
 
 
 _fast_path_applied = False

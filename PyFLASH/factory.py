@@ -140,7 +140,7 @@ def create_batch(name, conditions, batch_path, experiments=None,
     -------
     Batch
     """
-    threshold = threshold or Config.THRESHOLD
+    threshold = Config.THRESHOLD if threshold is None else threshold
     tracker = ProgressTracker(
         f"create_batch:{name}",
         total=5,
@@ -148,14 +148,8 @@ def create_batch(name, conditions, batch_path, experiments=None,
         enabled=progress,
     )
 
-    tracker.start_item("Check Pickle Cache")
-    if pickle_path is not None:
-        pkl_file = os.path.join(pickle_path, f"{name}.pkl")
-        if os.path.exists(pkl_file) and not rerun:
-            tracker.finish_item("Check Pickle Cache", detail=f"Loaded existing pickle: {pkl_file}")
-            tracker.close("Returned cached batch")
-            return load_state(pkl_file, verbose=False)
-    tracker.finish_item("Check Pickle Cache", detail="Rerun requested" if rerun else "No cached batch returned")
+    pkl_file = os.path.join(pickle_path, f"{name}.pkl") if pickle_path is not None else None
+    previous_batch = None
 
     tracker.start_item("Prepare Experiments")
     if experiments is None:
@@ -189,10 +183,25 @@ def create_batch(name, conditions, batch_path, experiments=None,
 
     tracker.finish_item("Prepare Experiments", detail=f"{len(exp_list)} experiments: {[e.name for e in exp_list]}")
 
+    tracker.start_item("Check Pickle Cache")
+    from PyFLASH._cache_identity import batch_identity
+    effective_import_images = bool(import_images or (rerun and reimport_images))
+    identity = batch_identity(exp_list, conditions, threshold=threshold,
+                              import_images=effective_import_images)
+    if pkl_file and os.path.exists(pkl_file):
+        previous_batch = load_state(pkl_file, verbose=False)
+        if not rerun and getattr(previous_batch, '_factory_cache_identity', None) == identity:
+            tracker.finish_item("Check Pickle Cache", detail=f"Verified source contents, settings and code: {pkl_file}")
+            tracker.close("Returned verified cached batch")
+            return previous_batch
+    tracker.finish_item("Check Pickle Cache", detail="Rebuild: cache absent, unverified or inputs/settings/code changed")
+
     tracker.start_item("Process Batch")
     batch = Batch(name, exp_list, conditions, batch_path)
-    effective_import_images = bool(import_images or (rerun and reimport_images))
     batch.processData(import_images=effective_import_images, progress=progress)
+    if batch_identity(exp_list, conditions, threshold=threshold, import_images=effective_import_images) != identity:
+        raise RuntimeError('Source contents or processing settings changed while building the batch; cache was not replaced.')
+    batch._factory_cache_identity = identity
     tracker.finish_item("Process Batch", detail=getattr(batch, "_last_process_summary", None))
 
     # Auto-generate path aliases from condition vocabulary
@@ -214,9 +223,8 @@ def create_batch(name, conditions, batch_path, experiments=None,
 
     tracker.start_item("Carry Over Representatives")
     rep_detail = "No previous representative selections found"
-    if pickle_path is not None and rerun and os.path.exists(pkl_file):
+    if previous_batch is not None:
         try:
-            previous_batch = load_state(pkl_file, verbose=False)
             copied_rows, copied_experiments = _carry_over_representatives(batch, previous_batch)
             copied_edit_rows, copied_edit_experiments = _carry_over_saved_image_edits(batch, previous_batch)
 

@@ -13,6 +13,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 import PyFLASH.plotting as plotting
 from PyFLASH.batch import Batch
@@ -542,12 +543,16 @@ def test_pie_bar_mode_styles_colliding_groups(tmp_path, monkeypatch):
         return original(wedges, style, color)
 
     monkeypatch.setattr(plotting, "_apply_pie_wedge_style", spy)
-    plotting.plot_pie_charts(
+    result=plotting.plot_pie_charts(
         batch, marker="Data", x_attr="Region", plot_format="bar", save=False)
 
     # Only the second of each colour pair (the Females) is hatched; Males stay solid.
     assert calls, "stacked-bar mode never applied the style channel"
     assert {style for style, _ in calls} == {"hollow"}
+    assert result['group']==['ADMale','ADFemale','ControlMale','ControlFemale']
+    assert result['pie_counts']==[[2,1]]*4
+    np.testing.assert_allclose(result['pie_percentages'],[[200/3,100/3]]*4,rtol=1e-12,atol=0.)
+    assert result['n_animals']==[3]*4
 
 
 # ── follow-up #3: standalone colour+style key ──────────────────────────────

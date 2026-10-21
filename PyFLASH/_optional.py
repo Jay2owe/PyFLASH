@@ -8,8 +8,8 @@ fully usable.
 The lightweight, standard scientific stack (numpy/scipy/pandas/matplotlib/
 seaborn/statsmodels/scikit-posthocs/scikit-learn/lmfit) is declared as a hard
 dependency in pyproject.toml and imported normally.  This module is only for
-the genuinely optional extras (currently ``pointpats`` for spatial statistics
-and ``dabest`` for estimation plots).
+optional feature dependencies, including ``pointpats`` for spatial statistics
+and ``mord`` for ordinal classification.
 """
 from __future__ import annotations
 

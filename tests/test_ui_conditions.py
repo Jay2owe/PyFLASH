@@ -34,7 +34,15 @@ from PyFLASH.ui.project_io import (
 
 def test_conditions_layers_do_not_import_streamlit():
     # project_io + services must be usable with no Streamlit installed.
-    assert "streamlit" not in sys.modules
+    # Other UI tests deliberately import Streamlit; test this guarantee in an
+    # independent interpreter rather than depending on test collection order.
+    import subprocess
+    from pathlib import Path
+    executable = Path(sys.prefix)/"python.exe"
+    result = subprocess.run([str(executable) if executable.is_file() else sys.executable,
+        "-c", "import sys; from PyFLASH.ui import project_io, services; assert 'streamlit' not in sys.modules"],
+        capture_output=True,text=True)
+    assert result.returncode == 0, result.stdout+result.stderr
 
 
 # ── Single-factor build + comparison resolution ─────────────────────────────

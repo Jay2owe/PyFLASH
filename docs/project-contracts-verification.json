@@ -1,0 +1,84 @@
+{
+  "project": "PyFLASH-analysis",
+  "engine_version": 1,
+  "date": "2026-10-06 19:33:52 UTC",
+  "initial_release_run_date": "2026-10-06T19:12:08.353886+00:00",
+  "verification_mode": "Initial release-group run plus focused rechecks of corrected or extended checks. Consolidated from observed verifier results.",
+  "issues": [],
+  "checks": [
+    {
+      "id": "architecture-and-live-catalogues",
+      "passed": true,
+      "returncode": 0,
+      "tests": 23,
+      "skipped": 0,
+      "executed_passes": 23,
+      "seconds": 21.469,
+      "verified_at": "2026-10-06T19:21:09.691253+00:00"
+    },
+    {
+      "id": "interface-actions-and-options",
+      "passed": true,
+      "returncode": 0,
+      "tests": 55,
+      "skipped": 0,
+      "executed_passes": 55,
+      "seconds": 47.687,
+      "verified_at": "2026-10-06T19:23:46.114681+00:00",
+      "evidence": "Observed project verifier result after correcting the navigation test fixture; all assertions retained."
+    },
+    {
+      "id": "saved-edits-and-recovery",
+      "passed": true,
+      "returncode": 0,
+      "tests": 44,
+      "skipped": 0,
+      "executed_passes": 44,
+      "seconds": 53.812
+    },
+    {
+      "id": "independent-scientific-references",
+      "passed": true,
+      "returncode": 0,
+      "tests": 147,
+      "skipped": 0,
+      "executed_passes": 147,
+      "seconds": 13.094
+    },
+    {
+      "id": "multi-group-statistics-and-corrections",
+      "passed": true,
+      "returncode": 0,
+      "tests": 4001,
+      "skipped": 0,
+      "executed_passes": 4001,
+      "seconds": 321.672,
+      "verified_at": "2026-10-06T19:26:05.767110+00:00"
+    },
+    {
+      "id": "registered-renderers-and-export",
+      "passed": true,
+      "returncode": 0,
+      "tests": 43,
+      "skipped": 0,
+      "executed_passes": 43,
+      "seconds": 43.078
+    },
+    {
+      "id": "headless-imports-and-loading",
+      "passed": true,
+      "returncode": 0,
+      "tests": 19,
+      "skipped": 0,
+      "executed_passes": 19,
+      "seconds": 23.859
+    }
+  ],
+  "structure_only": false,
+  "ok": true,
+  "total_executed_passes": 4332,
+  "total_skipped": 0,
+  "contract_sha256": "85964cf38747a8eeeab4437c64a3a6e445db019c0b1f1ce79f955d779260ff97",
+  "remote_workflows_executed": false,
+  "whole_package_alignment_certified": false
+}

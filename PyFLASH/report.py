@@ -126,7 +126,7 @@ def records_since(index, alive=None):
     try:
         records = _STATE["records"][int(index):]
         origins = _STATE["origins"][int(index):]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return []
     if alive is None:
         return list(records)
@@ -268,6 +268,8 @@ def coerce(obj, _depth: int = 0):
         if isinstance(obj, np.generic):
             return coerce(obj.item(), _depth + 1)
         if isinstance(obj, np.ndarray):
+            if obj.ndim == 0:
+                return coerce(obj.item(), _depth + 1)
             return [coerce(v, _depth + 1) for v in obj.tolist()]
 
     pd = _pd()
@@ -300,7 +302,8 @@ def _coerce_dataframe(df, _depth: int = 0):
     head = df.head(MAX_DF_ROWS)
     out["records"] = [
         {str(k): coerce(v, _depth + 1) for k, v in row.items()}
-        for row in head.to_dict(orient="records")
+        for row in (head.to_dict(orient="records") if len(df.columns)
+                    else [{} for _ in range(len(head))])
     ]
     if n > MAX_DF_ROWS:
         out["truncated"] = True
@@ -313,7 +316,7 @@ def _f(x):
     """Coerce to a finite float, or None."""
     try:
         v = float(x)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return None if (math.isnan(v) or math.isinf(v)) else v
 
@@ -321,7 +324,7 @@ def _f(x):
 def _i(x):
     try:
         return int(x)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -358,43 +361,28 @@ def significance_stars(p):
 
 
 # ── descriptive stats ────────────────────────────────────────────────────────
+"""Proposed complete report moments, preserving finite information across units."""
 def describe_group(name, values) -> dict:
-    """Descriptive statistics for one group's numeric values.
+    """Return finite group moments and linearly interpolated empirical quartiles."""
+    from fractions import Fraction
+    from PyFLASH._numeric_scaling import _rational_sqrt
+    measured=[]
+    for value in list(values) if values is not None else []:
+        try:number=float(value)
+        except (TypeError,ValueError,OverflowError):continue
+        if math.isfinite(number):measured.append(Fraction(number))
+    count=len(measured);result={'name':_s(name) or 'group','n':count}
+    if not count:return result
+    measured.sort();mean=sum(measured)/count
+    variance=sum((value-mean)**2 for value in measured)/(count-1) if count>1 else Fraction(0)
+    def quantile(fraction):
+        location=(count-1)*fraction;first=location.numerator//location.denominator;weight=location-first
+        return float(measured[first]*(1-weight)+measured[min(first+1,count-1)]*weight)
+    result.update(mean=float(mean),sd=_rational_sqrt(variance),sem=_rational_sqrt(variance/count),
+        median=quantile(Fraction(1,2)),min=float(measured[0]),max=float(measured[-1]),
+        q25=quantile(Fraction(1,4)),q75=quantile(Fraction(3,4)))
+    return result
 
-    ``values`` may be a pandas Series, numpy array, or iterable; non-numeric and
-    NaN entries are dropped. This is the "what the eye reads off the chart" layer
-    — the means and directions a p-value alone can't convey.
-    """
-    arr = []
-    for v in list(values) if values is not None else []:
-        fv = _f(v)
-        if fv is not None:
-            arr.append(fv)
-    n = len(arr)
-    rec = {"name": _s(name) or "group", "n": n}
-    if n == 0:
-        return rec
-    np = _np()
-    if np is not None:
-        a = np.asarray(arr, dtype=float)
-        sd = float(np.std(a, ddof=1)) if n > 1 else 0.0
-        rec.update(
-            mean=float(np.mean(a)),
-            sd=sd,
-            sem=(sd / math.sqrt(n)) if n > 1 else 0.0,
-            median=float(np.median(a)),
-            min=float(np.min(a)),
-            max=float(np.max(a)),
-            q25=float(np.percentile(a, 25)),
-            q75=float(np.percentile(a, 75)),
-        )
-    else:  # pragma: no cover - numpy effectively always present
-        mean = sum(arr) / n
-        var = sum((x - mean) ** 2 for x in arr) / (n - 1) if n > 1 else 0.0
-        sd = math.sqrt(var)
-        rec.update(mean=mean, sd=sd, sem=(sd / math.sqrt(n)) if n > 1 else 0.0,
-                   median=sorted(arr)[n // 2], min=min(arr), max=max(arr))
-    return rec
 
 
 def _parse_comparison(comp):
@@ -406,23 +394,21 @@ def _parse_comparison(comp):
         return None, None
 
 
+"""Proposed report direction preserves measured ordering and tied group names."""
 def _direction(groups):
-    """Plain-language direction summary from group means."""
-    ranked = [g for g in groups if g.get("mean") is not None]
-    if len(ranked) < 2:
-        return None
-    ranked.sort(key=lambda g: g["mean"])
-    lo, hi = ranked[0], ranked[-1]
-    if len(ranked) == 2:
-        a, b = groups[0], groups[1]
-        am, bm = a.get("mean"), b.get("mean")
-        if am is None or bm is None:
-            return None
-        if abs(am - bm) < 1e-12:
-            return f"{a['name']} ≈ {b['name']}"
-        rel = ">" if am > bm else "<"
-        return f"{a['name']} {rel} {b['name']}"
-    return f"highest: {hi['name']} ({hi['mean']:.4g}); lowest: {lo['name']} ({lo['mean']:.4g})"
+    """Describe finite group means without absolute-unit tie thresholds."""
+    measured=[group for group in groups if group.get('mean') is not None]
+    if len(measured)<2:return None
+    if len(measured)==2:
+        first,second=measured
+        relation='≈' if first['mean']==second['mean'] else '>' if first['mean']>second['mean'] else '<'
+        return f"{first['name']} {relation} {second['name']}"
+    minimum=min(group['mean'] for group in measured);maximum=max(group['mean'] for group in measured)
+    if minimum==maximum:return f'all groups equal ({minimum:.4g})'
+    lowest=', '.join(group['name'] for group in measured if group['mean']==minimum)
+    highest=', '.join(group['name'] for group in measured if group['mean']==maximum)
+    return f'highest: {highest} ({maximum:.4g}); lowest: {lowest} ({minimum:.4g})'
+
 
 
 # ── record builders ──────────────────────────────────────────────────────────
@@ -650,17 +636,14 @@ def build_multivariable_regression_record(
     rank_deficient=None,
 ):
     """Build a Tier-1 record for one multi-predictor regression model."""
-    if isinstance(predictors, str):
-        pred_list = [predictors]
-    else:
-        pred_list = list(predictors or [])
+    pred_list = _label_list(predictors)
     coeffs = {}
     if isinstance(coefficients, dict):
         coeffs = {str(k): _f(v) for k, v in coefficients.items()}
     record = {
         "kind": "multivariable_regression",
         "predictor_set": _s(predictor_set),
-        "predictors": [_s(v) for v in pred_list],
+        "predictors": pred_list,
         "y": _s(y),
         "group": _s(group),
         "n": _i(n),
@@ -716,20 +699,15 @@ def build_linear_model_record(
     means = {}
     if isinstance(adjusted_means, dict):
         means = {str(k): coerce(v) for k, v in adjusted_means.items()}
-    pred_list = list(predictors or [])
-    if covariates is None:
-        covar_list = []
-    elif isinstance(covariates, str):
-        covar_list = [covariates]
-    else:
-        covar_list = list(covariates)
+    pred_list = _label_list(predictors)
+    covar_list = _label_list(covariates)
     record = {
         "kind": "linear_model",
         "dependent_variable": _s(dependent_variable),
         "formula": _s(formula),
         "group": _s(group),
-        "predictors": [_s(v) for v in pred_list],
-        "covariates": [_s(v) for v in covar_list],
+        "predictors": pred_list,
+        "covariates": covar_list,
         "n": _i(n),
         "r2": _f(r2),
         "adj_r2": _f(adj_r2),
@@ -899,3 +877,8 @@ def _compact_params(params):
             sv = sv[:57] + "..."
         bits.append(f"{k}={sv}")
     return ", ".join(bits)
+
+def _label_list(values):
+    """One string names one variable; an ordered container names several."""
+    items = [values] if isinstance(values, str) else [] if values is None else list(values)
+    return [_s(value) for value in items]

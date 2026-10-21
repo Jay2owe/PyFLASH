@@ -100,8 +100,8 @@ def _resolve_base(experiment, roi):
 
 def _summary_for(experiment, base):
     summaries = getattr(experiment, "summaries", None)
-    if isinstance(summaries, dict) and base in summaries:
-        return summaries[base]
+    if isinstance(summaries, dict):
+        return summaries.get(base)
     return getattr(experiment, "summary", None)
 
 
@@ -111,7 +111,19 @@ def _clean_copy(experiment):
     The original is left untouched; only the (small) per-subject summary frames
     are duplicated, so the heavy raw data is shared by reference.
     """
-    exp = copy.copy(experiment)
+    if hasattr(experiment, "__dict__"):
+        # copy.copy invokes Experiment's persistence hooks, which rebind shared
+        # raw-data owners during __setstate__. This operation is an in-memory
+        # shallow copy, so copy state directly without saving or reloading it.
+        try:
+            exp = object.__new__(type(experiment))
+        except TypeError:
+            exp = type(experiment).__new__(type(experiment))
+        exp.__dict__.update(experiment.__dict__)
+        for key in ("animal_dict", "var_name", "_ui_initial_catalogue", "_ui_source_version"):
+            exp.__dict__.pop(key, None)
+    else:
+        exp = copy.copy(experiment)
     summaries = getattr(experiment, "summaries", None)
     if isinstance(summaries, dict):
         exp.summaries = {k: v.copy() for k, v in summaries.items()}
@@ -208,7 +220,7 @@ def _cells_from_outliers(outliers, scope, columns, animals_table, animal_min_fla
     return records
 
 
-def _write_cells(df, records, fill):
+def _write_cells(df, records, fill, *, original_from_source=False):
     """Blank ``records`` cells in ``df`` (in place on the copy); return updated ledger.
 
     Captures the original value per cell into the ledger before overwriting, so
@@ -218,6 +230,8 @@ def _write_cells(df, records, fill):
         raise ValueError(
             "exclusions need an 'AnimalName' column in the summary table.")
     ledger = []
+    regions = []
+    source_originals = {}
     by_animal = {str(a): (df["AnimalName"].astype(str) == str(a)) for a in
                  {r["AnimalName"] for r in records}}
     for rec in records:
@@ -227,30 +241,50 @@ def _write_cells(df, records, fill):
         mask = by_animal.get(rec["AnimalName"])
         if mask is None or not mask.any():
             continue
-        original = rec.get("original_value")
-        if original is None or (isinstance(original, float) and np.isnan(original)):
+        key = (rec["AnimalName"], col)
+        if key not in source_originals:
             vals = df.loc[mask, col].tolist()
-            original = vals[0] if vals else np.nan
+            source_originals[key] = vals[0] if vals else np.nan
+        # Outlier tables identify cells; they do not replace the selected
+        # source's evidence. Existing manual ledgers may retain an earlier
+        # reviewed original, so their explicit values keep their old meaning.
+        original = source_originals[key] if original_from_source else rec.get("original_value")
+        if original is None or (isinstance(original, float) and np.isnan(original)):
+            original = source_originals[key]
         token = _token_for(rec, fill)
         # Writing a string sentinel into a numeric column needs an object dtype,
         # else pandas warns (and will eventually raise) on the dtype mismatch.
         if isinstance(token, str) and not pd.api.types.is_object_dtype(df[col].dtype):
             df[col] = df[col].astype(object)
         df.loc[mask, col] = token
+        regions.append(rec.get("_roi"))
         ledger.append({
             "AnimalName": rec["AnimalName"], "column": col,
             "group": rec.get("group", ""), "original_value": original,
             "kind": rec.get("kind", ""), "reason": rec.get("reason", ""),
             "scope": rec.get("scope", ""), "fill": token,
         })
-    return pd.DataFrame(ledger, columns=_LEDGER_COLS)
+    result = pd.DataFrame(ledger, columns=_LEDGER_COLS)
+    result.attrs["_pyflash_exclusion_rois"] = regions
+    return result
 
 
 def _attach_ledger(exp, new_ledger, prior):
-    frames = [f for f in (prior, new_ledger)
-              if isinstance(f, pd.DataFrame) and not f.empty]
+    frames = [frame for frame in (prior, new_ledger)
+              if isinstance(frame, pd.DataFrame) and not frame.empty]
+    fallback = getattr(exp, "exclusion_summary", None)
+    fallback = fallback.get("roi") if isinstance(fallback, dict) else None
+    regions = []
+    for frame in frames:
+        captured = frame.attrs.get("_pyflash_exclusion_rois")
+        if captured is not None and len(captured) != len(frame):
+            raise ValueError("Exclusion region metadata does not match ledger rows.")
+        if captured is None:
+            captured = list(frame["roi"]) if "roi" in frame.columns else [fallback] * len(frame)
+        regions.extend(captured)
     exp.exclusions = (pd.concat(frames, ignore_index=True)
                       if frames else pd.DataFrame(columns=_LEDGER_COLS))
+    exp.exclusions.attrs["_pyflash_exclusion_rois"] = regions
     return exp
 
 
@@ -297,7 +331,7 @@ def _set_summary_and_save(exp, ledger, base, *, action, scope, save, run_label,
             "Exclusions")
         os.makedirs(out_dir, exist_ok=True)
         label = strip_name(str(run_label)) if run_label else f"{scope}_{base}"
-        ledger.to_csv(os.path.join(out_dir, f"exclusions_{label}.csv"), index=False)
+        _save_exclusion_ledger(ledger, os.path.join(out_dir, f"exclusions_{label}.csv"), base)
     if verbose:
         verb = "excluded" if action == "exclude" else "marked"
         _log.confirm(
@@ -315,6 +349,8 @@ def _apply_manual(experiment, *, cells=None, animals=None, columns=None,
     if df is None:
         raise ValueError("exclusions: experiment has no summary table.")
     records = _manual_records(df, cells, animals, columns, reason, kind)
+    for rec in records:
+        rec["_roi"] = base
     target = df if apply else df.copy()  # mark-only writes to a discarded copy
     ledger = _write_cells(target, records, fill)
     _attach_ledger(exp, ledger, getattr(experiment, "exclusions", None))
@@ -348,33 +384,57 @@ def apply_exclusions(experiment, *, cells=None, animals=None, subjects=None,
         alias_name="subjects",
     )
     if cells is None and animals is None:
-        base = _resolve_base(experiment, roi)
-        exp = _clean_copy(experiment)
-        df = _summary_for(exp, base)
-        if df is None:
-            raise ValueError("apply_exclusions: experiment has no summary table.")
         prior = getattr(experiment, "exclusions", None)
+        recorded = getattr(experiment, "exclusion_summary", None)
+        fallback = recorded.get("roi") if isinstance(recorded, dict) else None
+        captured = prior.attrs.get("_pyflash_exclusion_rois") if isinstance(prior, pd.DataFrame) else None
+        if captured is not None and len(captured) != len(prior):
+            raise ValueError("Exclusion region metadata does not match ledger rows.")
+        explicit = _resolve_base(experiment, roi) if roi is not None else None
         records = []
         if isinstance(prior, pd.DataFrame) and not prior.empty:
-            has_fill = "fill" in prior.columns
-            for _, row in prior.iterrows():
-                rec = {
-                    "AnimalName": str(row["AnimalName"]),
-                    "column": str(row["column"]),
-                    "group": row.get("group", ""),
-                    "original_value": row.get("original_value", np.nan),
-                    "kind": row.get("kind", "manual"),
-                    "reason": row.get("reason", ""),
-                    "scope": row.get("scope", ""),
-                }
-                if has_fill:
-                    # Preserve the originally-marked fill (e.g. np.nan) on apply.
+            for position, (_, row) in enumerate(prior.iterrows()):
+                column_region = row.get("roi")
+                if column_region is not None and pd.isna(column_region):
+                    column_region = None
+                captured_region = captured[position] if captured is not None else None
+                if column_region is not None and captured_region is not None and column_region != captured_region:
+                    raise ValueError("Exclusion region column contradicts captured ledger metadata.")
+                region = explicit or column_region or captured_region or fallback
+                rec = {"AnimalName": str(row["AnimalName"]), "column": str(row["column"]),
+                       "group": row.get("group", ""), "original_value": row.get("original_value", np.nan),
+                       "kind": row.get("kind", "manual"), "reason": row.get("reason", ""),
+                       "scope": row.get("scope", ""), "_roi": region}
+                if "fill" in prior.columns:
                     rec["fill"] = row["fill"]
                 records.append(rec)
-        ledger = _write_cells(df, records, fill)
-        _attach_ledger(exp, ledger, None)
+        known = {rec["_roi"] for rec in records if rec["_roi"] is not None}
+        if known and any(rec["_roi"] is None for rec in records):
+            raise ValueError("Mixed known and unknown exclusion regions require an explicit roi.")
+        default = explicit or (next(iter(known)) if len(known) == 1 else _resolve_base(experiment, None))
+        for rec in records:
+            if rec["_roi"] is None:
+                rec["_roi"] = default
+            if _summary_for(experiment, rec["_roi"]) is None:
+                raise ValueError("Exclusion region has no summary table: " + str(rec["_roi"]))
+        exp = _clean_copy(experiment)
+        ledgers = []
+        for rec in records:
+            ledgers.append(_write_cells(_summary_for(exp, rec["_roi"]), [rec], fill))
+        # Build through the same owner used by marking; preserve row order.
+        combined = pd.concat(ledgers, ignore_index=True) if ledgers else pd.DataFrame(columns=_LEDGER_COLS)
+        combined.attrs["_pyflash_exclusion_rois"] = [region for ledger in ledgers
+                                                   for region in ledger.attrs["_pyflash_exclusion_rois"]]
+        _attach_ledger(exp, combined, None)
+        ledger = exp.exclusions
+        regions = list(dict.fromkeys(ledger.attrs.get("_pyflash_exclusion_rois", [])))
+        base = regions[0] if regions else default
+        if _summary_for(exp, base) is None:
+            raise ValueError("apply_exclusions: experiment has no summary table.")
         _set_summary_and_save(exp, ledger, base, action="exclude", scope="ledger",
                               save=False, run_label=None, verbose=False)
+        if len(regions) > 1:
+            exp.exclusion_summary.update(roi="multiple", rois=sorted(regions))
         return exp
     return _apply_manual(experiment, cells=cells, animals=animals, columns=columns,
                          reason=reason, kind=kind, fill=fill, roi=roi, apply=True,
@@ -386,18 +446,25 @@ def _detect_outliers(experiment, *, filtered_columns, column_strings, regex_stri
                      mad_threshold, rout_q):
     """Reuse the data_overview detection path so flags match the QC report exactly."""
     from PyFLASH.pipeline import data_overview
+    from inspect import signature
+
+    # Share the overview's detector/preprocessing without running unrelated
+    # statistics or creating plots. Derive section switches from its public
+    # signature so newly added overview sections also remain disabled here.
+    sections = {
+        name: False for name, parameter in signature(data_overview).parameters.items()
+        if name.startswith(("include_", "plot_")) and isinstance(parameter.default, bool)
+    }
+    sections["include_outliers"] = True
 
     ov = data_overview(
         experiment,
         filtered_columns=filtered_columns, column_strings=column_strings,
         regex_string=regex_string, exclude=exclude,
         by=by, factor=factor, specificity=specificity, roi=roi,
-        include_inventory=False, include_group_counts=False,
-        include_descriptives=False, include_normality=False,
-        include_covariation=False, include_outliers=True,
         outlier_methods=methods, iqr_k=iqr_k, mad_threshold=mad_threshold,
         rout_q=rout_q,
-        save=False, plot_missingness=False, plot_covariation=False, verbose=False,
+        save=False, verbose=False, **sections,
     )
     return ov["outliers"], ov.get("outlier_animals"), ov.get("numeric_columns", [])
 
@@ -406,32 +473,46 @@ def _exclude_or_mark(experiment, *, apply, filtered_columns, column_strings,
                      regex_string, exclude, by, factor, specificity, scope,
                      methods, iqr_k, mad_threshold, rout_q, animal_min_flags,
                      fill, roi, outliers, save, run_label, verbose):
+    if not isinstance(scope, str) or scope not in ("cell", "animal"):
+        raise ValueError("scope must be 'cell' or 'animal'.")
+    from PyFLASH.aliases import _normalize_outlier_methods
+    methods = _normalize_outlier_methods(methods)
     base = _resolve_base(experiment, roi)
+    base_df = _summary_for(experiment, base)
     outlier_animals = None
-    numeric_cols = []
     if outliers is None:
-        outliers, outlier_animals, numeric_cols = _detect_outliers(
-            experiment, filtered_columns=filtered_columns,
+        detection_experiment = experiment
+        if not base_df.index.is_unique:
+            # Detection reports use row labels to recover AnimalName. Give the
+            # private detection view unique labels; preserve the caller's index
+            # and the returned summary, including repeated MultiIndex labels.
+            detection_experiment = _clean_copy(experiment)
+            detection_frame = _summary_for(detection_experiment, base)
+            detection_frame.index = pd.RangeIndex(len(detection_frame))
+        outliers, outlier_animals, _ = _detect_outliers(
+            detection_experiment, filtered_columns=filtered_columns,
             column_strings=column_strings, regex_string=regex_string,
             exclude=exclude, by=by, factor=factor, specificity=specificity,
             roi=roi, methods=methods, iqr_k=iqr_k,
             mad_threshold=mad_threshold, rout_q=rout_q)
 
-    base_df = _summary_for(experiment, base)
-    metric_cols = numeric_cols or _metric_columns(base_df)
+    # Filters choose detection metrics. Whole-animal exclusion still blanks
+    # every metric, just as it does when the identical flags are supplied.
+    metric_cols = _metric_columns(base_df)
     columns = None  # detection already restricted the column set
     records = _cells_from_outliers(
         outliers, scope, columns, outlier_animals, animal_min_flags, metric_cols)
     for rec in records:
         rec["scope"] = scope
+        rec["_roi"] = base
 
     exp = _clean_copy(experiment)
     df = _summary_for(exp, base)
     if apply:
-        ledger = _write_cells(df, records, fill)
+        ledger = _write_cells(df, records, fill, original_from_source=True)
     else:
         # Mark only: record the ledger (with original values) but blank nothing.
-        ledger = _write_cells(df.copy(), records, fill)  # df.copy() is discarded
+        ledger = _write_cells(df.copy(), records, fill, original_from_source=True)  # df.copy() is discarded
     _attach_ledger(exp, ledger, getattr(experiment, "exclusions", None))
 
     n_cells = int(len(ledger))
@@ -451,7 +532,7 @@ def _exclude_or_mark(experiment, *, apply, filtered_columns, column_strings,
             "Exclusions")
         os.makedirs(out_dir, exist_ok=True)
         label = strip_name(str(run_label)) if run_label else f"{scope}_{base}"
-        ledger.to_csv(os.path.join(out_dir, f"exclusions_{label}.csv"), index=False)
+        _save_exclusion_ledger(ledger, os.path.join(out_dir, f"exclusions_{label}.csv"), base)
 
     if verbose:
         verb = "excluded" if apply else "marked"
@@ -662,3 +743,15 @@ def clear_exclusions(experiment):
         except Exception:
             exp.exclusion_summary = None
     return exp
+
+
+def _save_exclusion_ledger(ledger, path, base):
+    """Keep region ownership in CSV transport as well as saved-state metadata."""
+    from PyFLASH._persistence import atomic_text
+    transport = ledger.copy()
+    regions = ledger.attrs.get("_pyflash_exclusion_rois", [base] * len(ledger))
+    if len(regions) != len(ledger):
+        raise ValueError("Exclusion region metadata does not match ledger rows.")
+    transport["roi"] = regions
+    with atomic_text(path, newline="") as stream:
+        transport.to_csv(stream, index=False)

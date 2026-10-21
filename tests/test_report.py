@@ -360,8 +360,7 @@ def test_multiple_comparisons_emits_record():
 
 
 def test_multiple_comparisons_aligns_labels_when_group_empty():
-    """An empty input group is dropped from valid_groups; the captured labels
-    must stay aligned to the surviving groups, not slide onto the wrong values."""
+    """Empty groups retain their declared positions and recorded sample counts."""
     from PyFLASH import stats
 
     empty = pd.Series([], dtype=float)
@@ -378,11 +377,13 @@ def test_multiple_comparisons_aligns_labels_when_group_empty():
 
     assert len(records) == 1
     groups = records[0]["groups"]
-    # 'A' was empty and dropped; surviving groups must be labelled B and C with
-    # B's mean ~6 and C's mean ~2 (NOT mislabelled as A,B).
-    assert [g["name"] for g in groups] == ["B", "C"]
-    assert groups[0]["mean"] == pytest.approx(6.0)
-    assert groups[1]["mean"] == pytest.approx(2.0)
+    assert [g["name"] for g in groups] == ["A", "B", "C"]
+    assert groups[0] == {"name":"A","n":0}
+    assert groups[1]["mean"] == pytest.approx(6.0)
+    assert groups[2]["mean"] == pytest.approx(2.0)
+    assert records[0]['pairwise'][0]['a']=='A'
+    assert records[0]['pairwise'][0]['b']=='B'
+    assert records[0]['pairwise'][0]['p'] is None
 
 
 def test_emit_record_names_two_way_interaction_and_residual():

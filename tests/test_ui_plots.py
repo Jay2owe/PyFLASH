@@ -77,15 +77,16 @@ def _load_local_pyflash_runner(module_name):
 
 def _patch_runner_for_fake_plot(monkeypatch, runner, tmp_path):
     import PyFLASH
+    import pandas as pd
 
     pkl_path = tmp_path / "human.pkl"
-    pkl_path.write_text("fake pickle placeholder", encoding="utf-8")
     fig_root = tmp_path / "Results" / "Python Figures"
     fig_root.mkdir(parents=True)
-    batch = types.SimpleNamespace(fig_path=str(fig_root), experiment_list=[])
+    batch = types.SimpleNamespace(name="Owned notebook fixture", data={}, summary=pd.DataFrame(), fig_path=str(fig_root), experiment_list=[])
+    import pickle
+    pkl_path.write_bytes(pickle.dumps(batch))
 
     monkeypatch.setattr(runner, "resolve_pickle", lambda _batch: str(pkl_path))
-    monkeypatch.setattr(PyFLASH, "load_state", lambda _path: batch)
     monkeypatch.setattr(runner, "_install_save_fig_hook", lambda: None)
 
     def fake_plot(_target, **_kwargs):
@@ -116,11 +117,12 @@ def test_available_plots_matches_registry():
 def test_available_plots_does_not_eagerly_import_plotting():
     # Calling available_plots() only touches PLOT_REGISTRY's string refs; it
     # must not drag in the heavy plotting module.
-    sys.modules.pop("PyFLASH.plotting", None)
-    sys.modules.pop("PyFLASH.pipeline", None)
-    services.available_plots()
-    assert "PyFLASH.plotting" not in sys.modules
-    assert "PyFLASH.pipeline" not in sys.modules
+    import subprocess
+    from reproducibility.run import python_command
+    subprocess.run(python_command() + ['-c',
+        "import sys; from PyFLASH.ui import services; services.available_plots(); "
+        "assert 'PyFLASH.plotting' not in sys.modules; "
+        "assert 'PyFLASH.pipeline' not in sys.modules"], check=True)
 
 
 # ── _build_plot_kwargs (no plot call) ───────────────────────────────────────
@@ -201,7 +203,7 @@ def test_resolve_func_supports_pipeline_module_targets():
     assert scatter.__name__ == "plot_scatter_3d"
 
 
-def test_pyflash_runner_resolves_pipeline_registry_aliases():
+def test_pyflash_runner_resolves_pipeline_registry_aliases(tmp_path):
     runner_path = _pyflash_runner_path()
     if runner_path is None:
         pytest.skip("pyflash runner lives in gitignored .claude/; skip on public clones")
@@ -214,7 +216,9 @@ def test_pyflash_runner_resolves_pipeline_registry_aliases():
         "func": "adjusted_correlation_pipeline",
         "kwargs": {"endpoints": ["A", "B"], "save": False},
     }
-    script = runner.build_equivalent_script(req, "human.pkl")
+    source = tmp_path / "human.pkl"
+    source.write_bytes(b"owned source for script identity")
+    script = runner.build_equivalent_script(req, str(source))
     assert "from PyFLASH.pipeline import adjusted_correlation as _pyflash_func" in script
     assert "_pyflash_func(batch, endpoints=['A', 'B'], save=False)" in script
 
@@ -646,6 +650,36 @@ def test_locate_saved_figures_newest_first(tmp_path):
     assert found[0] == str(b)  # newest first
 
 
+def test_saved_preview_cache_invalidates_when_figure_changes(tmp_path, monkeypatch):
+    svg = tmp_path / "preview.svg"
+    svg.write_text("<svg></svg>")
+    calls = []
+    def convert(**kwargs):
+        calls.append(kwargs)
+        return svg.read_bytes()
+    monkeypatch.setitem(sys.modules, "cairosvg", types.SimpleNamespace(svg2png=convert))
+    figures._svg_to_png_bytes_cached.cache_clear()
+    assert figures.svg_to_png_bytes(svg) == b"<svg></svg>"
+    assert figures.svg_to_png_bytes(svg) == b"<svg></svg>"
+    assert len(calls) == 1
+    svg.write_text("<svg>changed</svg>")
+    assert figures.svg_to_png_bytes(svg) == b"<svg>changed</svg>"
+    assert len(calls) == 2
+    figures._svg_to_png_bytes_cached.cache_clear()
+
+
+def test_saved_figure_display_uses_worker_paths_without_rescanning(tmp_path, monkeypatch):
+    png = tmp_path / "already-generated.png"
+    png.write_bytes(b"fixture")
+    shown = []
+    fake = types.SimpleNamespace(image=lambda *a, **k: shown.append(a[0]), download_button=lambda *a, **k: None)
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "streamlit", fake)
+        patch.setattr(figures, "locate_saved_figures", lambda *a, **k: pytest.fail("UI rescanned the output tree"))
+        assert figures.embed_figure(None, tmp_path, paths=[str(png)]) == [str(png)]
+    assert shown == [str(png)]
+
+
 def test_is_figure_duck_types():
     assert figures.is_figure(None) is False
     assert figures.is_figure(object()) is False
@@ -664,9 +698,15 @@ def test_is_figure_duck_types():
 
 
 def test_importing_services_is_streamlit_and_plotting_free():
-    # Stage 07 must not regress the import contract.
-    assert "streamlit" not in sys.modules
-    assert not hasattr(services, "st")
+    # Measure the import in a clean process, regardless of other UI tests.
+    import subprocess
+    from pathlib import Path
+    actual = Path(sys.prefix) / 'python.exe'
+    executable = str(actual) if os.name == 'nt' and actual.is_file() else sys.executable
+    subprocess.run([executable, '-c',
+        "import sys; from PyFLASH.ui import services; "
+        "assert 'streamlit' not in sys.modules; "
+        "assert 'matplotlib.pyplot' not in sys.modules; assert not hasattr(services, 'st')"], check=True)
 
 
 def test_plots_page_parses_as_valid_python():

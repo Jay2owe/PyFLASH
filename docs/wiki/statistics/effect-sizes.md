@@ -28,6 +28,10 @@ test. For pairwise group comparisons, direction is computed from the ordered
 comparison: the group value is contrasted against the reference value. In
 pipeline tables, `reference` and `group` show the direction that was used.
 
+Direct `cohens_d()` and `hedges_g()` calls require one ordered, one-dimensional
+sample per group. Scalars, matrices and image stacks raise `ValueError` before
+calculation; they cannot be silently flattened into an effect estimate.
+
 Bootstrap confidence intervals require enough independent sample values to
 resample. If the interval cannot be estimated reliably, PyFLASH leaves the
 interval as missing rather than inventing a bound.
@@ -45,10 +49,17 @@ PyFLASH can report:
 - `interpretation`: a magnitude label such as negligible, small, medium, or
   large.
 
-Magnitude labels use conventional numeric bands. For standardized differences
-and correlations, values below 0.2 are negligible, below 0.5 are small, below
-0.8 are medium, and 0.8 or above is large. For omnibus variance-style effects,
-values below 0.06 are small, below 0.14 are medium, and 0.14 or above is large.
+Magnitude labels use conventional numeric bands. For standardized differences,
+absolute values below 0.2 are negligible, below 0.5 are small, below 0.8 are
+medium, and 0.8 or above is large. For correlations, including rank-biserial
+correlation, the corresponding cutoffs are 0.1, 0.3 and 0.5. For omnibus
+variance-style effects, values below 0.01 are negligible, below 0.06 are small,
+below 0.14 are medium, and 0.14 or above is large. Negative squared-effect
+estimates remain in the negligible band; undefined values have no magnitude band.
+
+Standardized differences and their bootstrap intervals are unchanged by finite
+measurement-unit changes. PyFLASH uses common exact binary scaling internally
+to prevent the pooled variance from overflowing or underflowing.
 
 ## Interpretation
 

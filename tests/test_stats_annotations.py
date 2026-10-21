@@ -25,6 +25,170 @@ class _Condition:
         self.name = name
 
 
+@pytest.mark.parametrize(
+    "test,overall,metadata,expected",
+    [
+        ("One-Way ANOVA", (5.64167573668336, 0.02962305736047075),
+         {"symbol": "F", "df": [2, 8]}, "Group: F(2, 8)=5.64168, p=0.0296231"),
+        ("Welch ANOVA", (4.1, 1e-12), {"symbol": "F", "df": [2, 7.1234567]},
+         "Group: F(2, 7.12346)=4.1, p=1e-12"),
+        ("Kruskal-Wallis", (7.2, 0.02), {"symbol": "H", "df": [2]},
+         "Group: H(2)=7.2, p=0.02"),
+        ("Welch's t-test", (-2.4, 0.04), {"symbol": "t", "df": [5.2]},
+         "Group: t(5.2)=-2.4, p=0.04"),
+        ("Mann-Whitney U", ([2.5], [0.1]), {"symbol": "U"},
+         "1-2: U=2.5, p=0.1"),
+        ("Linear Model", (9.4, 0.009), {"symbol": "chi2", "df": [2]},
+         "Group: chi2(2)=9.4, p=0.009"),
+    ],
+)
+def test_shared_summary_displays_actual_test_statistic(test, overall, metadata, expected):
+    # Use a line plot to keep the annotation contract independent of bars.
+    fig, ax = plt.subplots()
+    try:
+        ax.plot([0, 1], [0, 1])
+        _annotate_stats_summary(
+            ax, test, "Example", overall, ["1-2"], [0.04], ["A", "B"],
+            raw_stats={"_group_test": metadata},
+        )
+        text = ax.texts[-1].get_text()
+        assert expected in text
+        assert "A vs B: p=0.04" in text
+    finally:
+        plt.close(fig)
+
+
+def test_summary_recovers_anova_degrees_for_older_cache():
+    fig, ax = plt.subplots()
+    try:
+        _annotate_stats_summary(
+            ax, "One-Way ANOVA", "Tukey", (5.0, 0.02), [], [], [],
+            group_values=[[1, 2, 3, None], [2, 3, 4], [3, 4, 5]],
+        )
+        assert "F(2, 6)=5" in ax.texts[-1].get_text()
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("equal_var", [True, False])
+def test_ttest_metadata_matches_scipy_degrees_and_results(equal_var):
+    from scipy.stats import ttest_ind
+    g1, g2 = pd.Series([1., 2., 3., 4.]), pd.Series([0., 3., 8., 15., 19.])
+    expected = ttest_ind(g1, g2, equal_var=equal_var)
+    _, _, overall, raw, _ = runITTest(g1, g2, {}, equal_var=equal_var)
+    assert overall == pytest.approx((expected.statistic, expected.pvalue))
+    assert raw["_group_test"]["df"] == pytest.approx([expected.df])
+
+
+def test_welch_anova_metadata_retains_fractional_degrees():
+    from PyFLASH.stats import runWelchOWA
+    from statsmodels.stats.oneway import anova_oneway
+    groups = [[1., 2., 3., 4.], [1., 4., 8., 12., 17.], [3., 4., 5., 6.]]
+    expected = anova_oneway(groups, use_var="unequal", welch_correction=True)
+    _, _, overall, raw, _ = runWelchOWA(groups, ["1-2"], {})
+    assert overall == pytest.approx((expected.statistic, expected.pvalue))
+    assert raw["_group_test"]["df"] == pytest.approx([expected.df_num, expected.df_denom])
+
+
+@pytest.mark.parametrize("cov_type,symbol,df", [(None, "F", [2, 9]), ("HC3", "chi2", [2])])
+def test_linear_model_metadata_uses_actual_wald_distribution(cov_type, symbol, df):
+    from PyFLASH.stats import runLinearModel
+    from statsmodels.formula.api import ols
+    frame = pd.DataFrame({
+        "Group": [g for g in "ABC" for _ in range(4)],
+        "Y": [1., 2., 3., 4., 2., 4., 5., 8., 5., 6., 8., 10.],
+    })
+    fit = ols("Y ~ C(Group)", data=frame).fit(**({"cov_type": cov_type} if cov_type else {}))
+    expected = fit.wald_test("C(Group)[T.B] = 0, C(Group)[T.C] = 0", scalar=True)
+    _, _, overall, raw, _ = runLinearModel(frame, "Y", "Group", ["1-2"], {}, cov_type=cov_type)
+    assert overall == pytest.approx((float(expected.statistic), float(expected.pvalue)))
+    assert raw["_group_test"] == {"symbol": symbol, "df": df}
+
+
+def test_two_way_summary_uses_f_values_instead_of_legacy_sums_of_squares():
+    from PyFLASH.stats import runTWA
+    from statsmodels.formula.api import ols
+    import statsmodels.api as sm
+    rows = [
+        {"Genotype": g, "Time": t, "Condition": g + t,
+         "Value": 2 * gi + ti + gi * ti + v}
+        for gi, g in enumerate(["A", "B"])
+        for ti, t in enumerate(["Early", "Late"])
+        for v in [0.1, 0.4, 0.9]
+    ]
+    df = pd.DataFrame(rows)
+    conditions = [_Condition(g + t) for g in ["A", "B"] for t in ["Early", "Late"]]
+    exp = SimpleNamespace(summary=df, condition_list=conditions)
+    expected = sm.stats.anova_lm(ols("Value ~ C(Genotype) * C(Time)", data=df).fit(), typ=2)
+    _, _, overall, raw, _ = runTWA(exp, "Value", ["Genotype", "Time"], ["1-2"])
+    terms = raw["_group_test"]["terms"]
+    assert [term["name"] for term in terms] == ["Genotype", "Time", "Interaction"]
+    assert [term["statistic"] for term in terms] == pytest.approx(expected["F"].iloc[:3].tolist())
+    assert terms[0]["statistic"] != pytest.approx(overall[0][0])
+    from PyFLASH import stats, report
+    report.start()
+    stats._emit_comparison_record(
+        valid_groups=[df.loc[df["Condition"] == c.name, "Value"] for c in conditions],
+        group_labels=[c.name for c in conditions], cond_list=conditions,
+        test="Two-Way ANOVA", post_hoc="Tukey", overall=overall,
+        comparisons=["1-2"], results=[0.04], effect_strings=[], results_dict=raw,
+        normal=True, factor_list=["Genotype", "Time"],
+    )
+    assert report.collect()[0]["test"]["terms"] == terms
+    fig, ax = plt.subplots()
+    try:
+        _annotate_stats_summary(ax, "Two-Way ANOVA", "Tukey", overall, [], [], [], raw_stats=raw)
+        text = ax.texts[-1].get_text()
+        assert "Genotype: F(1, 8)=" in text
+        assert "Time: F(1, 8)=" in text
+        assert "Interaction: F(1, 8)=" in text
+        assert "Residual" not in text
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("annotate_summary", [True, False])
+def test_shared_summary_and_report_match_on_fresh_and_cached_results(monkeypatch, annotate_summary):
+    from PyFLASH import stats, report
+    from PyFLASH.config import Config
+    from scipy.stats import f_oneway
+    monkeypatch.setattr(Config, "STATS_CACHE", True)
+    monkeypatch.setattr(Config, "EFFECT_SIZES", False)
+    monkeypatch.setattr(Config, "CORRECTION_AUDIT", False)
+    stats.clear_stats_cache()
+    groups = [pd.Series([1., 2., 3., 4.]), pd.Series([2., 3., 4.]), pd.Series([4., 5., 6., 7.])]
+    exp = SimpleNamespace(condition_list=[_Condition(x) for x in "ABC"])
+    collected, figures, texts = [], [], []
+    try:
+        for _ in range(2):
+            fig, ax = plt.subplots()
+            figures.append(fig)
+            ax.scatter([0, 1, 2], [g.mean() for g in groups])
+            report.start()
+            multipleComparisons(
+                exp, groups, ax, fig, None, None, stats_test="anova", auto_welch=False,
+                comparisons=["1-2", "1-3"], group_labels=list("ABC"),
+                cache_key=("shared-summary-regression", annotate_summary),
+                annotate_summary=annotate_summary,
+            )
+            collected.append(report.collect()[0])
+            texts.append([text.get_text() for text in ax.texts if "Test:" in text.get_text()])
+        assert collected[0]["test"] == collected[1]["test"]
+        assert collected[0]["pairwise"] == collected[1]["pairwise"]
+        assert collected[0]["test"]["symbol"] == "F"
+        assert collected[0]["test"]["df"] == [2, 8]
+        assert collected[0]["test"]["statistic"] == pytest.approx(f_oneway(*groups).statistic)
+        assert texts[0] == texts[1]
+        assert bool(texts[0]) is annotate_summary
+        if annotate_summary:
+            assert "Group: F(2, 8)=" in texts[0][0]
+    finally:
+        report.collect()
+        stats.clear_stats_cache()
+        for fig in figures:
+            plt.close(fig)
+
+
 def test_stats_summary_annotation_uses_right_offset_anchor():
     fig, ax = plt.subplots()
     try:
@@ -321,7 +485,20 @@ def test_multiple_comparisons_linear_model_with_covariate():
 
     assert test == "Linear Model"
     assert posthoc == "model contrasts HC3 Uncorrected"
-    assert results_dict["Linear Model"][1] < 0.001
+    # Exactly fitted outcomes have zero HC3 uncertainty: joint Wald p is undefined.
+    import hashlib,json,math
+    assert math.isnan(results_dict["Linear Model"][1])
+    from pathlib import Path
+    from reproducibility import comparison_parent_inference_reference as reference
+    from reproducibility.comparison_parent_inference_adapter import production
+    from reproducibility.one_way_contract import clean,equal
+    root=Path(__file__).resolve().parents[1]/'reproducibility'
+    frozen=json.loads((root/'fixtures/exact_model_annotation_reference.json').read_text(encoding='utf-8'))
+    for path,expected_hash in frozen['source_manifest'].items():
+        assert hashlib.sha256((root/path).read_bytes()).hexdigest()==expected_hash
+    assert equal(reference.report(frozen['case']),frozen['expected'])
+    assert equal(production(frozen['case']),frozen['expected'])
+    assert results_dict["_group_test"] == frozen['expected']['results_dict']['_group_test']
     assert "Linear-Model-Contrasts-Uncorrected" in results_dict
 
 

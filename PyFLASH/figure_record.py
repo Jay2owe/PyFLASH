@@ -377,11 +377,24 @@ def capture_stack_sources() -> list[SourceReference]:
         if id(value) in visited:
             return
         visited.add(id(value))
-        for item in getattr(value, "_provenance_sources", []) or []:
-            declared.append(item)
         state_path = getattr(value, "_state_path", None)
+        consumed_hash = getattr(value, "_pyflash_resident_input_sha256", None)
+        for item in getattr(value, "_provenance_sources", []) or []:
+            # The current saved-state owner knows the bytes it consumed.
+            # Do not replace that evidence with a later filesystem hash.
+            if state_path and consumed_hash and isinstance(item, Mapping):
+                path = item.get("path")
+                if (path and item.get("role") == "batch_pickle" and
+                        os.path.normcase(os.path.abspath(path)) ==
+                        os.path.normcase(os.path.abspath(state_path))):
+                    continue
+            declared.append(item)
         if state_path:
-            declared.append({"path": state_path, "role": "batch_pickle"})
+            if consumed_hash:
+                declared.append(SourceReference(role="batch_pickle",
+                    relative_path=Path(state_path).name, sha256=consumed_hash))
+            else:
+                declared.append({"path": state_path, "role": "batch_pickle"})
         for experiment in getattr(value, "experiment_list", []) or []:
             visit(experiment)
 

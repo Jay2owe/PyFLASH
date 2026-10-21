@@ -100,9 +100,14 @@ class Project:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Project":
-        # Only accept known fields so forward-compatible files don't crash.
+        # Legacy version zero had the same fields but no version declaration.
+        schema = data.get("schema_version", 0)
+        if type(schema) is not int or not 0 <= schema <= SCHEMA_VERSION:
+            raise ValueError(f"Unsupported project schema: {schema!r}")
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in data.items() if k in known})
+        values = {k: v for k, v in data.items() if k in known}
+        values["schema_version"] = SCHEMA_VERSION
+        return cls(**values)
 
     # ── JSON round-tripping (Stage 04 contract) ─────────────────────────────
 
@@ -226,12 +231,35 @@ def build_condition_list(spec):
 
 
 def save_project(project: Project, path: str) -> None:
-    """Write *project* to *path* as UTF-8 JSON."""
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(project.to_json())
+    """Atomically write a project, keeping in-project paths portable."""
+    from pathlib import Path
+    from PyFLASH.ui.workspace import write_json
+    root = Path(path).resolve().parent
+    data = project.to_dict()
+    def portable(value):
+        if not value:
+            return value
+        try:
+            return str(Path(value).resolve().relative_to(root))
+        except ValueError:
+            return str(Path(value).resolve())
+    for key in ("batch_path", "pickle_path"):
+        data[key] = portable(data[key])
+    data["experiment_paths"] = [portable(p) for p in data["experiment_paths"]]
+    data["experiments"] = {n: portable(p) for n, p in data["experiments"].items()}
+    write_json(path, data)
 
 
 def load_project(path: str) -> Project:
     """Read a project JSON file from *path*."""
     with open(path, "r", encoding="utf-8") as f:
-        return Project.from_json(f.read())
+        project = Project.from_json(f.read())
+    from pathlib import Path
+    root = Path(path).resolve().parent
+    def resolved(value):
+        return str((root / value).resolve()) if value and not Path(value).is_absolute() else value
+    project.batch_path = resolved(project.batch_path)
+    project.pickle_path = resolved(project.pickle_path)
+    project.experiment_paths = [resolved(p) for p in project.experiment_paths]
+    project.experiments = {n: resolved(p) for n, p in project.experiments.items()}
+    return project

@@ -11,6 +11,7 @@ from matplotlib import pyplot as plt
 from PyFLASH._logging import logger as _log
 from PyFLASH.dataframe import coerce_dataframe_input
 from PyFLASH.aliases import (
+    _normalize_outlier_methods,
     normalize_filter_by,
     prefer_alias,
     resolve_data_column_aliases,
@@ -4545,6 +4546,7 @@ def data_overview(
     mirror the other pipelines. Outputs land in
     ``Python Figures/Data Overview Pipeline/<run>/``.
     """
+    outlier_methods = _normalize_outlier_methods(outlier_methods)
     filtered_columns, column_strings, regex_string, exclude = resolve_data_column_aliases(
         filtered_columns=filtered_columns,
         column_strings=column_strings,
@@ -5744,11 +5746,12 @@ def group_comparison(
     - Test selection for the ``'auto'`` engine routes through the shared
       :func:`PyFLASH.stats.multipleComparisons` engine (so the headline figures
       and the secondary bar charts agree). For exactly **two** groups it uses an
-      independent two-sample t-test (the shared engine applies a heuristic
-      equal-variance check to pick Student's vs Welch's; Mann-Whitney U only when
-      a group has < 2 values);
-      normality-based and ``force_nonparametric`` switching applies to designs
-      with **>= 3** groups, where it picks One-Way ANOVA vs Kruskal-Wallis.
+      independent two-sample t-test when the pooled normality check passes and
+      both groups have at least two observations; the variance check selects
+      Student's or Welch's test. Failed normality, a smaller group or
+      ``force_nonparametric`` selects Mann-Whitney U. With **>= 3** groups,
+      normality and variance checks select ordinary/unequal-variance One-Way
+      ANOVA or Kruskal-Wallis. Constant tested markers are explicitly skipped.
       Crossed (factorial) designs are compared as their condition groups
       (always one-way); true two-way interaction screening is left to a future
       pipeline.
@@ -5977,6 +5980,13 @@ def group_comparison(
                     fallback_reason = "nested fit failed"
 
         if engine == "auto" or fell_back:
+            # A pooled constant marker carries no contrast information. Its
+            # exclusion is independent of a normality heuristic or rank tail.
+            measured = [float(value) for label in involved
+                        for value in arrays[label] if np.isfinite(value)]
+            if measured and all(value == measured[0] for value in measured):
+                skipped.append({"marker": str(col), "reason": "constant marker in the tested groups"})
+                continue
             try:
                 test, post_hoc, _ann, results_dict = _run_auto(col, arrays, involved, tokens)
             except Exception as exc:
@@ -6170,7 +6180,7 @@ def group_comparison(
                         try:
                             experiment.fig_path = fig_dir
                             plot_mean_bars(
-                                experiment, filtered_columns=[m], by=by, factor=factor,
+                                experiment, filtered_columns=[m], split_by=by, factor=factor,
                                 specificity=specificity,
                                 roi=_roi_base, force_nonparametric=force_nonparametric,
                                 posthoc=posthoc, posthoc_correction=posthoc_correction,
@@ -6600,8 +6610,11 @@ def _lm_linear_function_summary(fit, linvec, *, alpha):
     ci_low = np.nan
     ci_high = np.nan
     distribution = "normal"
-    if std_error > 0:
-        statistic = estimate / std_error
+    if std_error >= 0:
+        if std_error > 0:
+            statistic = estimate / std_error
+        elif estimate != 0:
+            statistic = float(np.copysign(np.inf, estimate))
         try:
             if use_t and np.isfinite(df_resid):
                 from scipy import stats as sp_stats
@@ -6621,7 +6634,7 @@ def _lm_linear_function_summary(fit, linvec, *, alpha):
         "std_error": std_error,
         "ci_low": float(ci_low) if np.isfinite(ci_low) else np.nan,
         "ci_high": float(ci_high) if np.isfinite(ci_high) else np.nan,
-        "statistic": float(statistic) if np.isfinite(statistic) else np.nan,
+        "statistic": float(statistic) if not np.isnan(statistic) else np.nan,
         "p_value": float(p_value) if np.isfinite(p_value) else np.nan,
         "df_resid": df_resid,
         "reference_distribution": distribution,
@@ -6784,6 +6797,15 @@ def _lm_sanitize_comparisons(comparisons, n_groups):
     return valid
 
 
+def _lm_adjustment_method(value):
+    """Keep owning-engine method names; accept existing hyphenated FDR names."""
+    method = str(value).strip().lower()
+    if method in {"", "none", "no", "false", "raw", "uncorrected"}:
+        return "none"
+    # Holm-Sidak and Simes-Hochberg require their hyphens in the owning engine.
+    return method.replace("-", "_") if method.startswith("fdr") else method
+
+
 def _lm_adjusted_mean_comparisons_table(
     experiment, fit_result, dependent_variables, group_col,
     *,
@@ -6843,8 +6865,8 @@ def _lm_adjusted_mean_comparisons_table(
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    method = str(adjusted_mean_p_adjust).strip().lower().replace("-", "_")
-    if method in {"", "none", "no", "false", "raw", "uncorrected"}:
+    method = _lm_adjustment_method(adjusted_mean_p_adjust)
+    if method == "none":
         out["p_adjusted"] = pd.to_numeric(out["p_value"], errors="coerce")
         out["reject_adjusted"] = out["p_adjusted"] <= float(alpha)
         out["p_adjust_method"] = "none"
@@ -6854,22 +6876,19 @@ def _lm_adjusted_mean_comparisons_table(
         families = out["dependent_variable"].astype(str).tolist()
     else:
         families = ["all"] * len(out)
-    try:
-        from PyFLASH.stats_extra import apply_fdr
-        adjusted = apply_fdr(
-            out["p_value"].tolist(),
-            labels=list(out.index),
-            families=families,
-            method=method,
-            alpha=float(alpha),
-        )
-        for _, row in adjusted.iterrows():
-            idx = row["label"]
-            out.loc[idx, "p_adjusted"] = float(row["p_adjusted"])
-            out.loc[idx, "reject_adjusted"] = bool(row["reject"])
-    except Exception:
-        out["p_adjusted"] = pd.to_numeric(out["p_value"], errors="coerce")
-        out["reject_adjusted"] = out["p_adjusted"] <= float(alpha)
+    from PyFLASH.stats_extra import apply_fdr
+    # A failed correction must not be reported as a successful adjusted result.
+    adjusted = apply_fdr(
+        out["p_value"].tolist(),
+        labels=list(out.index),
+        families=families,
+        method=method,
+        alpha=float(alpha),
+    )
+    for _, row in adjusted.iterrows():
+        idx = row["label"]
+        out.loc[idx, "p_adjusted"] = float(row["p_adjusted"])
+        out.loc[idx, "reject_adjusted"] = bool(row["reject"])
     out["p_adjust_method"] = method
     return out
 
@@ -6980,6 +6999,13 @@ def linear_model(
     _slug_specificity=None,
 ):
     """Adjusted linear-model pipeline with coefficient and adjusted-mean plots."""
+    if adjusted_means:
+        method = _lm_adjustment_method(adjusted_mean_p_adjust)
+        if method != "none":
+            from PyFLASH.stats_extra import apply_fdr
+            # Validate before fitting or clearing an existing saved run, even
+            # when the input will yield no group comparisons.
+            apply_fdr([], method=method, alpha=alpha)
     dependent_variables = prefer_alias(
         dependent_variables,
         data_cols,
@@ -7063,24 +7089,58 @@ def linear_model(
         raise ValueError("linear_model needs at least one predictor or group.")
     categorical_arg = _lm_categorical_arg(scope_df, model_predictors, categorical, group_col)
 
+    from PyFLASH._cache_identity import analysis_identity, analysis_value
+    settings = {
+        "categorical": categorical_arg,
+        "reference_levels": reference_levels or {},
+        "interactions": list(interactions or []),
+        "medication_columns": medication_columns,
+        "medication_mode": medication_mode,
+        "medication_min_count": medication_min_count,
+        "exclude": exclude,
+        "cov_type": str(cov_type or "nonrobust"),
+        "cov_kwds": cov_kwds or {},
+        "alpha": float(alpha),
+        "fdr_method": fdr_method,
+        "fdr_family": fdr_family,
+        "adjusted_means": bool(adjusted_means),
+        "covariate_profile": covariate_profile,
+        "adjusted_mean_weights": adjusted_mean_weights,
+        "adjusted_mean_p_adjust": adjusted_mean_p_adjust,
+        "adjusted_mean_p_family": adjusted_mean_p_family,
+        "plot_adjusted_means": bool(plot_adjusted_means),
+        "plot_raw_values": bool(plot_raw_values),
+        "plot_coefficients": bool(plot_coefficients),
+        "coefficient_gate": coefficient_gate,
+        "max_coefficient_terms": max_coefficient_terms,
+        "tick_label_size": tick_label_size,
+        "montage": bool(montage),
+        "tag_specificity": bool(_tag_specificity),
+    }
+    from PyFLASH.aesthetics import get_pyflash_style
+    context = {"aliases": getattr(experiment, "aliases", None),
+               "colors": _lm_group_colors(experiment, group_col) if group_col else {},
+               "style": get_pyflash_style()}
+    request = {"pipeline": "linear_model", "dependent_variables": dep_vars,
+               "group": group_col, "predictors": model_predictors,
+               "specificity": specificity, "roi": _roi_base, "settings": settings}
+    try:
+        request_identity = analysis_identity(scope_df, request, context=context)
+    except TypeError as exc:
+        # An arbitrary callable/object is valid for some upstream options, but
+        # its hidden state cannot safely authenticate reuse of saved results.
+        from uuid import uuid4
+        request_identity = {"schema_version": 1, "reusable": False,
+                            "reason": str(exc), "fresh_request_id": uuid4().hex,
+                            "parameters": analysis_value(request, allow_opaque=True),
+                            "context": analysis_value(context, allow_opaque=True)}
+        if save:
+            _log.warn(f"[linear_model] Saved reuse unavailable: {exc}")
     label = run_label or _lm_slug(
         dep_vars, group_col, model_predictors,
         (_slug_specificity if _slug_specificity is not None else specificity),
         _roi_base,
-        settings={
-            "categorical": categorical_arg,
-            "reference_levels": reference_levels or {},
-            "interactions": [str(x) for x in (interactions or [])],
-            "cov_type": str(cov_type or "nonrobust"),
-            "alpha": float(alpha),
-            "fdr_family": str(fdr_family),
-            "adjusted_means": bool(adjusted_means),
-            "covariate_profile": str(covariate_profile),
-            "adjusted_mean_weights": str(adjusted_mean_weights),
-            "adjusted_mean_p_adjust": str(adjusted_mean_p_adjust),
-            "adjusted_mean_p_family": str(adjusted_mean_p_family),
-            "plot_raw_values": bool(plot_raw_values),
-        },
+        settings={"request_identity": request_identity},
     )
     if _run_dirs is not None:
         fig_dir, data_dir, resolved_label = _run_dirs
@@ -7094,8 +7154,13 @@ def linear_model(
         reuse_existing = False
 
     manifest_path = os.path.join(data_dir, "manifest.json") if data_dir else None
+    if reuse_existing and (not manifest_path or not _pio.isfile(manifest_path)):
+        raise ValueError("Cannot reuse a saved run without a verified manifest. "
+                         "Use if_exists='version' to compute a new run.")
     if reuse_existing and manifest_path and _pio.isfile(manifest_path):
         cached = _pio.read_json(manifest_path)
+        _pio.verify_cached_run(cached, request_identity, data_dir)
+        cached = _pio.resolve_run_record(cached, data_dir)
         _log.hint(f"[linear_model] Reusing run {resolved_label!r} (if_exists='skip').")
         cached["reused"] = True
         return cached
@@ -7230,6 +7295,10 @@ def linear_model(
         "data_dir": data_dir,
         "adjusted_means_dir": adjusted_means_dir,
         "pipeline": "linear_model",
+        "schema_version": 1,
+        "request_identity": request_identity,
+        "completion_status": "finishing" if save and write_manifest else "complete",
+        "cov_kwds": _pio._canon(cov_kwds or {}),
         "n_rows": int(len(scope_df)),
         "dependent_variables": dep_vars,
         "n_models": int(len(dep_vars)),
@@ -7261,7 +7330,8 @@ def linear_model(
         "reused": False,
     }
     if save and write_manifest and manifest_path:
-        _pio.write_json(manifest, manifest_path)
+        manifest["output_sha256"] = _pio.output_identity(data_dir)
+        _pio.write_run_record(manifest, data_dir)
         _lm_append_runs_index(experiment, manifest)
 
     if verbose:
@@ -7539,7 +7609,7 @@ def rhythm(
             raise ValueError(
                 f"rhythm (cosinor mode): none of columns {cosinor_cols} found in the data.")
 
-    gcol = group_col if (group_col and group_col in df.columns) else None
+    gcol = group_col if (group_col is not None and group_col in df.columns) else None
     if gcol is not None:
         df = df[df[gcol].notna()]
         groups = [g for g in dict.fromkeys(df[gcol].astype(str))]

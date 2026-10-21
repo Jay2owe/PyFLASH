@@ -23,6 +23,34 @@ filters.
 
 ## Accepted Values
 
+### Shared statistics side panel
+
+Any plot using the shared group-comparison statistics panel displays the overall
+test statistic, its degrees of freedom when available, and its p-value. This is
+part of the shared helper rather than a bar-plot-only annotation. For example:
+
+```text
+Test: One-Way ANOVA
+Post-hoc: Tukey
+Group: F(2, 8)=5.64168, p=0.0296231
+```
+
+The statistic matches the test: `F` for analysis of variance, `H` for
+Kruskal-Wallis, `t` for Student's or Welch's t-test, `U` for Mann-Whitney, and
+`F` or `chi2` for a linear model's actual group Wald test. Welch degrees of
+freedom may be fractional. Two-way analysis of variance displays separate F
+tests for each factor and their interaction.
+
+Overall statistics and p-values use six significant digits; small p-values use
+scientific notation rather than rounding to zero. Structured comparison records
+retain full numeric precision, the statistic symbol, and degrees of freedom.
+Fresh and cached results use the same display. Older cached results show degrees
+of freedom only when they can be recovered without repeating the test.
+
+Pairwise comparisons, significance stars, and effect sizes retain their existing
+behavior. `multipleComparisons(..., annotate_summary=False)` hides the panel;
+`draw=False` calculates statistics without drawing annotations.
+
 | Parameter | Meaning | Aliases |
 |---|---|---|
 | `comparisons` | Selects group contrasts in the current group order. | Some matrix-difference functions also accept explicit pair forms. |
@@ -35,6 +63,19 @@ filters.
 | `gate` | Chooses whether raw p-values or adjusted q-values define significance. | Strict screen-based gates usually accept only `"p"` and `"fdr"`; correlation-style gates also accept FDR aliases `q`, `qvalue`, `q_value`, `q-value`, `fdr_bh`, and `bh`. |
 | `fdr_method` | Chooses the multiple-testing correction method. | Some helpers call this `method` in lower-level correction contexts. |
 | `test` | Chooses the correlation method. | `tests` for multiple methods; `correlation` in plotting wrappers. |
+
+### Linear-model inference
+
+Linear-model pairwise statistics report the second requested group minus the
+first. Their normal or Student tail follows the fitted covariance policy;
+Student inference uses adjusted cluster/panel degrees of freedom when supplied.
+Group Wald tests follow that same policy. Group order is preserved, including
+explicit empty requests; finite outcomes, numeric covariates and observed
+categorical covariates share one retained-row scope. Covariance grouping arrays
+are aligned from the original or retained row order. A rank-deficient design or
+no residual degrees of freedom is rejected before fitting. Exact-zero residual
+covariance leaves pairwise inference undefined and gives the group covariance
+rank zero; small positive residuals remain positive.
 
 ### `force_nonparametric` options
 
@@ -50,6 +91,20 @@ filters.
 | `"One-Way"` | Uses one-way ANOVA when the parametric multi-group path is allowed. |
 | `"Two-Way"` | Uses the two-way ANOVA path in the shared bar-statistics engine. |
 
+Two-factor analysis requires exactly two distinct factor columns. It uses
+hierarchical (Type II) sums of squares: each main factor after the other in the
+additive model, followed by the interaction; every F test uses the full model's
+residual variance. Degrees of freedom reflect identifiable categorical columns.
+Terms without numerator or residual degrees of freedom have undefined F tests.
+Exactly zero residual variance gives an infinite F and zero probability only
+when the tested sum of squares is nonzero.
+
+Both overall and Tukey condition comparisons use the same rows: requested
+conditions with a finite outcome and both factors present. Every requested
+condition needs two observations. Tukey compares condition means using their
+pooled one-way residual variance. Passing `comparisons=[]` leaves pairwise
+results empty; `comparisons=None` generates comparisons from the condition count.
+
 ### `posthoc` options
 
 | Option | Behavior |
@@ -64,6 +119,31 @@ filters.
 | `"Dunn"` | Uses Dunn post-hoc comparisons after Kruskal-Wallis. |
 | `"Nemenyi"` | Uses Nemenyi rank-based all-pairs comparisons after Kruskal-Wallis. |
 | `"DSCF"` | Uses Dwass-Steel-Critchlow-Fligner all-pairs comparisons after Kruskal-Wallis. |
+
+Dunnett uses deterministic integration of the common-control Student
+distribution. Its lower-level `dunnett_vs_control` function accepts `two-sided`,
+`greater` and `less` alternatives, omits nonfinite observations and returns
+ordered comparison labels, statistics and adjusted p-values. Its compatibility
+`random_state` argument is validated without consuming random draws. The shared
+one-way posthoc path uses this same calculation with a two-sided alternative.
+
+Structured one-way reports contain actual comparison statistics: Fisher LSD
+and Tamhane report signed t statistics; Scheffe reports its F statistic;
+Games-Howell reports the nonnegative studentised-range threshold. Tukey retains
+the first-minus-second mean difference in the original measurement units.
+Finite ratios are evaluated before conversion to the reported floating-point
+statistic: an unrepresentably large displayed statistic can still accompany a
+representable positive probability. Exactly zero uncertainty remains a separate
+mathematical limit. Empty requested groups retain their original positions and
+invalid comparison requests are rejected before inference or report changes.
+
+Rank reports contain Dunn's nonnegative z magnitude, Conover's signed t
+statistic, Nemenyi's tie-corrected chi-square statistic or the nonnegative
+Dwass-Steel-Critchlow-Fligner Gaussian range threshold. Nemenyi uses the
+chi-square approximation with one fewer degree of freedom than the group count.
+The latter range method re-ranks each pair separately. All-tied inputs retain
+complete undefined fields; Conover additionally needs positive residual degrees
+of freedom. Permutation corrections count ties using exact rank strengths.
 
 ### `posthoc_correction` options
 
@@ -85,10 +165,40 @@ filters.
 
 ### `ns` options
 
+Significance labels accept finite scalar probabilities between zero and one.
+Invalid, undefined, Boolean and non-scalar inputs use the missing-result label;
+numeric `"p"` presentation keeps an undefined result as `NaN`.
+
 | Option | Behavior |
 |---|---|
 | `"ns"` | Annotates non-significant comparisons as `ns`. |
 | `"p"` | Prints a rounded p-value for non-significant comparisons. |
+
+### Equal-variance screens and independent t-tests
+
+Variance screens preserve requested group positions and omit nonfinite
+observations. Every screened group needs at least two retained observations;
+insufficient or unidentified inference leaves the variance decision undefined.
+The significance threshold must be a finite real number in `[0, 1]`, and the
+explicit Student/Welch choice must be Boolean or `None` for automatic selection.
+Invalid options are rejected even when a forced test would otherwise bypass the
+screen. Automatic selection uses Welch when the variance decision is undefined.
+
+Complete t-test reports retain their fields and undefined probabilities for
+insufficient samples. Exact common binary scaling keeps finite observations in
+very large or small units from overflowing variance calculations. Exact
+constant groups preserve the distinction between equal and different means.
+
+The Fligner-Killeen screen computes ranks from exact binary observations and
+their median residuals. This preserves mathematical ties that floating-point
+subtraction can split. The unchanged R kernel agrees when given equivalent exact
+signed-rank geometry; discrepancies from R's rounded raw residuals are retained
+as diagnostics. Its rank-based equation is documented in the
+[R statistics reference](https://stat.ethz.ch/R-manual/R-patched/library/stats/html/fligner.test.html).
+
+Statistics cache keys include an immutable snapshot of any configured or nested
+NumPy random stream. Advancing the stream invalidates cached confidence intervals
+without consuming extra draws merely to construct a key.
 
 ### `gate` options
 
@@ -130,10 +240,10 @@ most relevant to PyFLASH summary plots:
 
 Known Prism features that are not yet represented in this shared path are
 repeated-measures ANOVA, three-way ANOVA, the Prism linear-trend post-test,
-Newman-Keuls, and the full unequal-variance one-way ANOVA workflow
-(Brown-Forsythe/Welch omnibus with Dunnett T3 or Games-Howell). `Tamhane T2`
-is available as an unequal-variance-style post-hoc option, but the omnibus
-selection is still PyFLASH's existing one-way ANOVA/Kruskal-Wallis decision.
+Newman-Keuls, Brown-Forsythe omnibus testing and Dunnett T3. Welch one-way
+ANOVA is available through `runWelchOWA`, with Tamhane T2 or Games-Howell
+posthoc comparisons. Brown-Forsythe remains available as an equal-variance
+screen; that screen is distinct from a Brown-Forsythe omnibus group test.
 
 ## Examples
 

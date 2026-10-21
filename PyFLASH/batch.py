@@ -4,6 +4,7 @@ Batch class — combines multiple Experiments under shared conditions.
 
 import os
 import re
+import inspect
 import pandas as pd
 import numpy as np
 from functools import reduce
@@ -17,6 +18,8 @@ from PyFLASH.experiment import (
 )
 from PyFLASH.markers import objectMarker, cellMarker, Antibody
 from PyFLASH.export import (
+    _grouped_column_table,
+    _literal_excel_writer,
     _raw_name_cache,
     write_conditions_table_sheet,
     convert_raw_name_cached,
@@ -30,18 +33,28 @@ from PyFLASH.export import (
     is_registered_summary_export_column,
     extra_summary_sheet_name,
 )
-from PyFLASH.utils import ProgressTracker
+from PyFLASH.utils import ProgressTracker, extract_region_base
 
 
 NOT_INCLUDED_SENTINEL = "NOT_INCLUDED_IN_EXPERIMENT"
 JON = "JON"
 
+_EXPORT_FILTER_LABELS = {
+    "export_IF_summary_excel": "IF summary",
+    "export_extended_data_excel": "IF extended",
+    "export_behavior_summary_excel": "behavior",
+    "export_extra_summary_excel": "extra summary",
+    "export_unregistered_summary_excel": "extra summary",
+}
+
 
 def _normalize_regex_patterns(patterns):
-    if patterns is None or patterns == "":
+    if patterns is None:
         return []
     if isinstance(patterns, str):
         return [patterns] if patterns != "" else []
+    if isinstance(patterns, set):
+        patterns = sorted(patterns, key=lambda value: str(value).strip())
     if isinstance(patterns, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
         out = []
         for pat in patterns:
@@ -110,6 +123,27 @@ def _resolve_export_paths(save_path, save_name, *, default_stem):
     workbook_path = os.path.join(save_path, f"{stem}.xlsx")
     regex_report_path = os.path.join(save_path, f"{stem}_RegexFilters.txt")
     return workbook_path, regex_report_path, stem
+
+
+def _validate_excel_export_requests(requests):
+    """Refuse output collisions using the owning exporters' declared defaults."""
+    destinations = {}
+    for method_name, directory, options in requests:
+        default_stem = getattr(Batch, method_name).__kwdefaults__["save_name"]
+        paths = _resolve_export_paths(directory, options["save_name"], default_stem=default_stem)
+        for path in paths[:2]:
+            key = os.path.normcase(os.path.realpath(os.path.abspath(path)))
+            if key in destinations:
+                raise ValueError(
+                    f"Selected Excel exports would overwrite one another at {path!r}. "
+                    "Choose different save names for the selected exports."
+                )
+            destinations[key] = method_name
+    # Refuse every active filter before the first workbook is published. Keep
+    # destination-collision precedence and ignore disabled export options.
+    for method_name, _, options in requests:
+        _prepare_export_regex_filters(include=options.get("include"),
+            exclude=options.get("exclude"), label=_EXPORT_FILTER_LABELS[method_name])
 
 
 def _write_export_regex_report(
@@ -216,52 +250,52 @@ class Batch(Experiment):
         return os.path.join(self.export_path, save_path)
 
     def processData(self, import_images=True, progress=True):
-        tracker = ProgressTracker(
-            f"{self.name} processData",
-            total=len(self.experiment_list) + 7,
-            unit="step",
-            enabled=progress,
-        )
-        for exp in self.experiment_list:
-            tracker.start_item(f"Experiment {exp.name}")
-            exp.processData(import_images=import_images, progress=progress)
-            tracker.finish_item(f"Experiment {exp.name}", detail=getattr(exp, "_last_process_summary", None))
-        tracker.start_item("Apply Conditions")
-        for exp in self.experiment_list:
-            exp.set_condition_list(self.condition_list)
-        tracker.finish_item("Apply Conditions", detail=f"{len(self.experiment_list)} experiments updated")
-        tracker.start_item("Create Data Dict")
-        self._create_data_dict()
-        tracker.finish_item("Create Data Dict", detail=f"{len(self.data)} data tables")
-        self.markers = reduce(
-            lambda a, b: a | b,
-            [exp.markers for exp in self.experiment_list]
-        )
-        tracker.start_item("Create Batch Summary")
-        self._create_batch_summary()
-        n_rois = len(self.summaries)
-        n_animals = max((s.shape[0] for s in self.summaries.values()), default=0)
-        tracker.finish_item("Create Batch Summary", detail=f"{n_rois} ROI(s) | {n_animals} subjects")
-        tracker.start_item("Set Batch Conditions")
-        self.set_condition_list(self.condition_list)
-        tracker.finish_item("Set Batch Conditions")
-        tracker.start_item("Create Save Paths")
-        self.createSavePaths()
-        tracker.finish_item("Create Save Paths", detail="Output paths configured")
-        tracker.start_item("Import Images" if import_images else "Skip Images")
-        if import_images:
-            self.importImages(progress=progress)
-            image_detail = getattr(self, "_last_image_import_summary", None)
-        else:
-            self.images = None
-            self.imagesDict = {}
-            image_detail = "Skipped image import"
-        tracker.finish_item("Import Images" if import_images else "Skip Images", detail=image_detail)
-        tracker.start_item("Assign Regions")
-        self.assign_region()
-        tracker.finish_item("Assign Regions", detail=getattr(self, "_last_region_summary", None))
-        self._last_process_summary = f"{len(self.experiment_list)} experiments | {self.summary.shape[0]} subjects"
-        tracker.close(self._last_process_summary)
+            tracker = ProgressTracker(
+                f"{self.name} processData",
+                total=len(self.experiment_list) + 7,
+                unit="step",
+                enabled=progress,
+            )
+            for exp in self.experiment_list:
+                tracker.start_item(f"Experiment {exp.name}")
+                exp.processData(import_images=import_images, progress=progress)
+                tracker.finish_item(f"Experiment {exp.name}", detail=getattr(exp, "_last_process_summary", None))
+            tracker.start_item("Apply Conditions")
+            for exp in self.experiment_list:
+                exp.set_condition_list(self.condition_list)
+            tracker.finish_item("Apply Conditions", detail=f"{len(self.experiment_list)} experiments updated")
+            tracker.start_item("Create Data Dict")
+            self._create_data_dict()
+            tracker.finish_item("Create Data Dict", detail=f"{len(self.data)} data tables")
+            self.markers = reduce(
+                lambda a, b: a | b,
+                [exp.markers for exp in self.experiment_list] or [set()]
+            )
+            tracker.start_item("Create Batch Summary")
+            self._create_batch_summary()
+            n_rois = len(self.summaries)
+            n_animals = max((s.shape[0] for s in self.summaries.values()), default=0)
+            tracker.finish_item("Create Batch Summary", detail=f"{n_rois} ROI(s) | {n_animals} subjects")
+            tracker.start_item("Set Batch Conditions")
+            self.set_condition_list(self.condition_list)
+            tracker.finish_item("Set Batch Conditions")
+            tracker.start_item("Create Save Paths")
+            self.createSavePaths()
+            tracker.finish_item("Create Save Paths", detail="Output paths configured")
+            tracker.start_item("Import Images" if import_images else "Skip Images")
+            if import_images:
+                self.importImages(progress=progress)
+                image_detail = getattr(self, "_last_image_import_summary", None)
+            else:
+                self.images = None
+                self.imagesDict = {}
+                image_detail = "Skipped image import"
+            tracker.finish_item("Import Images" if import_images else "Skip Images", detail=image_detail)
+            tracker.start_item("Assign Regions")
+            self.assign_region()
+            tracker.finish_item("Assign Regions", detail=getattr(self, "_last_region_summary", None))
+            self._last_process_summary = f"{len(self.experiment_list)} experiments | {self.summary.shape[0]} subjects"
+            tracker.close(self._last_process_summary)
 
     def importImages(self, progress=True):
         image_tables = []
@@ -312,15 +346,19 @@ class Batch(Experiment):
         return super().getImageTable(include_summary=include_summary)
 
     def _create_data_dict(self):
+        # Reserve authored names before creating duplicate suffixes.
+        reserved = {name for experiment in self.experiment_list for name in experiment.data}
         result, counts = {}, {}
-        for exp in self.experiment_list:
-            for k, v in exp.data.items():
-                if k not in counts:
-                    counts[k] = 0
-                    result[k] = v
-                else:
-                    counts[k] += 1
-                    result[f"{k}_{counts[k]}"] = v
+        for experiment in self.experiment_list:
+            for name, carrier in experiment.data.items():
+                if name not in result:
+                    result[name] = carrier
+                    continue
+                suffix = counts.get(name, 0) + 1
+                while f"{name}_{suffix}" in result or f"{name}_{suffix}" in reserved:
+                    suffix += 1
+                counts[name] = suffix
+                result[f"{name}_{suffix}"] = carrier
         self.data = result
 
     def _dedup_columns(self, df):
@@ -368,9 +406,11 @@ class Batch(Experiment):
             create_summary = getattr(exp, "createSummary", None)
             if callable(create_summary):
                 try:
-                    create_summary(progress=False)
+                    inspect.signature(create_summary).bind(progress=False)
                 except TypeError:
                     create_summary()
+                else:
+                    create_summary(progress=False)
 
         if not self._promote_legacy_summary(self):
             self._create_batch_summary()
@@ -563,44 +603,37 @@ class Batch(Experiment):
         if_summary_save_name="IF_Summary",
         unregistered_summary_save_name="Extra_Summary",
     ):
-        save_path = self._resolve_export_save_path(save_path)
+        save_path = os.path.abspath(self._resolve_export_save_path(save_path))
+        requests = []
 
         if if_summary or if_extended:
             summaries = self._ensure_batch_summaries_for_export()
             for roi_base in summaries:
                 roi_path = os.path.join(save_path, roi_base.lower())
                 if if_summary:
-                    self.export_IF_summary_excel(
-                        roi_path,
-                        roi_base=roi_base,
-                        include=if_summary_include,
-                        exclude=if_summary_exclude,
-                        save_name=if_summary_save_name,
-                    )
+                    requests.append(("export_IF_summary_excel", roi_path, dict(
+                        roi_base=roi_base, include=if_summary_include,
+                        exclude=if_summary_exclude, save_name=if_summary_save_name)))
                 if if_extended:
-                    self.export_extended_data_excel(
-                        roi_path,
-                        roi_base=roi_base,
-                        include=if_extended_include,
-                        exclude=if_extended_exclude,
-                        save_name=if_extended_save_name,
-                    )
+                    requests.append(("export_extended_data_excel", roi_path, dict(
+                        roi_base=roi_base, include=if_extended_include,
+                        exclude=if_extended_exclude, save_name=if_extended_save_name)))
 
         if behaviour:
-            self.export_behavior_summary_excel(
-                save_path,
-                include=behaviour_include,
-                exclude=behaviour_exclude,
-                save_name=behaviour_save_name,
-            )
-
+            requests.append(("export_behavior_summary_excel", save_path, dict(
+                include=behaviour_include, exclude=behaviour_exclude,
+                save_name=behaviour_save_name)))
         if unregistered_summary:
-            self.export_extra_summary_excel(
-                save_path,
+            requests.append(("export_extra_summary_excel", save_path, dict(
                 include=unregistered_summary_include,
                 exclude=unregistered_summary_exclude,
-                save_name=unregistered_summary_save_name,
-            )
+                save_name=unregistered_summary_save_name)))
+
+        _validate_excel_export_requests(requests)
+        outputs = []
+        for method_name, directory, options in requests:
+            outputs.extend(getattr(self, method_name)(directory, **options) or [])
+        return outputs
 
     def export_all_excel(self, save_path=None, **kwargs):
         return self.export_excel(save_path=save_path, **kwargs)
@@ -619,7 +652,7 @@ class Batch(Experiment):
         save_path = self._resolve_export_save_path(save_path)
         os.makedirs(save_path, exist_ok=True)
         import time
-        regex_filters = _prepare_export_regex_filters(include=include, exclude=exclude, label="IF extended")
+        regex_filters = _prepare_export_regex_filters(include=include, exclude=exclude, label=_EXPORT_FILTER_LABELS["export_extended_data_excel"])
         workbook_path, regex_report_path, workbook_stem = _resolve_export_paths(
             save_path,
             save_name,
@@ -656,7 +689,7 @@ class Batch(Experiment):
         candidate_metric_total = 0
         exported_metric_total = 0
 
-        with pd.ExcelWriter(workbook_path, engine="xlsxwriter") as writer:
+        with _literal_excel_writer(workbook_path) as writer:
             if verbose and not use_tqdm:
                 _log.status("  Writing Conditions sheet...")
             write_conditions_table_sheet(writer, self.conditions, sheet_name="Conditions")
@@ -699,13 +732,18 @@ class Batch(Experiment):
                         ab = key.split("_ROI")[0]
                         sheet_suffix = ab
                     
-                    df = obj.df
+                    df = _extended_export_region_frame(obj.df, roi_base)
+                    if roi_base is not None and df.empty:
+                        skipped_sheet_details.append(
+                            f"Experiment {exp_idx}_{sheet_suffix}: no rows match ROI base {roi_base}"
+                        )
+                        continue
                     
                     if "AnimalName" not in df.columns:
                         continue
 
                     # Column selection
-                    id_cols = [c for c in ["Condition", "AnimalName", "SCN"] if c in df.columns]
+                    id_cols = [c for c in ["Condition", "AnimalName", "ROI"] if c in df.columns]
                     metric_cols = [c for c in df.columns if c.startswith(f"{ab}_")]
                     candidate_metric_total += len(metric_cols)
                     metric_cols, skipped_metric_cols = _apply_export_regex_filters(metric_cols, regex_filters)
@@ -789,15 +827,13 @@ class Batch(Experiment):
                         id_cols_present = [c for c in id_column_names if c in out.columns]
                         data_cols = [c for c in out.columns if c not in id_column_names]
                         
-                        # Create a categorical type for Condition with the desired order
-                        out["Condition"] = pd.Categorical(out["Condition"], categories=condition_order, ordered=True)
-                        
-                        # Sort by Condition, then reorder columns: ID cols first, then data cols
-                        out = out.sort_values("Condition")
+                        # Use group ranks only to sort. Replacing the actual
+                        # identities with a categorical discards unlisted groups
+                        # and changes missing labels into the literal text nan.
+                        ranks = pd.Categorical(out["Condition"], categories=condition_order, ordered=True).codes
+                        ranks = np.where(ranks < 0, len(condition_order), ranks)
+                        out = out.iloc[np.argsort(ranks, kind="stable")]
                         out = out[id_cols_present + data_cols]
-                        
-                        # Convert Condition back to string to avoid fillna issues with Categorical
-                        out["Condition"] = out["Condition"].astype(str)
                     
                     out.to_excel(writer, sheet_name=sheet, index=False, startrow=1, header=False)
                     ws = writer.sheets[sheet]
@@ -852,12 +888,13 @@ class Batch(Experiment):
         )
 
         _log.confirm(f"Exported extended IF data to {workbook_path}")
+        return [workbook_path, regex_report_path]
 
     def export_IF_summary_excel(self, save_path=None, roi_base=None, *, include=None, exclude=None, save_name="IF_Summary"):
         save_path = self._resolve_export_save_path(save_path)
         os.makedirs(save_path, exist_ok=True)
         self._ensure_batch_summaries_for_export()
-        regex_filters = _prepare_export_regex_filters(include=include, exclude=exclude, label="IF summary")
+        regex_filters = _prepare_export_regex_filters(include=include, exclude=exclude, label=_EXPORT_FILTER_LABELS["export_IF_summary_excel"])
         workbook_path, regex_report_path, workbook_stem = _resolve_export_paths(
             save_path,
             save_name,
@@ -872,14 +909,17 @@ class Batch(Experiment):
         candidate_columns = [
             col for col in summary.columns
             if col not in ['Condition', 'AnimalName'] + factors
-            and any(data in col for data in self.data.keys())
+            and (
+                is_registered_summary_export_column(str(col))
+                or any(data in col for data in self.data.keys())
+            )
         ]
         columns_to_save, skipped_columns = _apply_export_regex_filters(candidate_columns, regex_filters)
         columns_to_save = sort_if_summary_columns(columns_to_save)
 
         cols_not_included = []
         exported_sheet_details = []
-        with pd.ExcelWriter(workbook_path, engine='xlsxwriter') as writer:
+        with _literal_excel_writer(workbook_path) as writer:
             write_conditions_table_sheet(writer, self.conditions, sheet_name="Experimental Conditions")
             write_experiment_data_list_sheet(
                 writer,
@@ -903,12 +943,7 @@ class Batch(Experiment):
                     # Avoid reusing the same worksheet when Excel truncates or duplicates labels.
                     sheet_name = safe_sheet_name(label, used_sheet_names)
                     exported_sheet_details.append(f"{sheet_name}: {col}")
-                    column_data = {
-                        cond.name: summary_by_condition[cond.name][col]
-                        for cond in condition_list
-                    }
-                    column_df = pd.DataFrame(column_data)
-                    column_df_cleaned = pd.DataFrame({column: column_df[column].dropna().reset_index(drop=True) for column in column_df.columns})
+                    column_df_cleaned = _grouped_column_table(summary_by_condition, col)
                     column_df_cleaned.to_excel(writer, sheet_name=sheet_name, index=False)
                     
                     worksheet = writer.sheets[sheet_name]
@@ -959,6 +994,7 @@ class Batch(Experiment):
         _log.confirm(f"Exported IF summary to {workbook_path}")
         if cols_not_included:
             _log.hint(f"Columns not included (no name map): {cols_not_included}")
+        return [workbook_path, regex_report_path]
 
     def export_unregistered_summary_excel(
         self,
@@ -971,15 +1007,15 @@ class Batch(Experiment):
     ):
         save_path = self._resolve_export_save_path(save_path)
         os.makedirs(save_path, exist_ok=True)
-        regex_filters = _prepare_export_regex_filters(include=include, exclude=exclude, label="extra summary")
+        regex_filters = _prepare_export_regex_filters(include=include, exclude=exclude, label=_EXPORT_FILTER_LABELS["export_unregistered_summary_excel"])
         workbook_path, regex_report_path, workbook_stem = _resolve_export_paths(
             save_path,
             save_name,
             default_stem="Extra_Summary",
         )
 
+        summaries = self._ensure_batch_summaries_for_export()
         if roi_base is not None:
-            summaries = self._ensure_batch_summaries_for_export()
             summary = summaries.get(roi_base, self.summary)
         else:
             summary = self.summary
@@ -1019,7 +1055,7 @@ class Batch(Experiment):
             sheet_name = safe_sheet_name(label, used_sheet_names)
             sheet_plan.append((col, label, sheet_name))
 
-        with pd.ExcelWriter(workbook_path, engine="xlsxwriter") as writer:
+        with _literal_excel_writer(workbook_path) as writer:
             write_conditions_table_sheet(writer, conditions, sheet_name=conditions_sheet)
 
             index_rows = [
@@ -1044,16 +1080,7 @@ class Batch(Experiment):
                 index_ws.set_column(j, j, min(max_len + 2, 70))
 
             for col, _label, sheet_name in sheet_plan:
-                column_data = {
-                    condition_name: group[col]
-                    for condition_name, group in summary_by_condition.items()
-                    if col in group.columns
-                }
-                column_df = pd.DataFrame(column_data)
-                column_df_cleaned = pd.DataFrame({
-                    column: column_df[column].dropna().reset_index(drop=True)
-                    for column in column_df.columns
-                })
+                column_df_cleaned = _grouped_column_table(summary_by_condition, col)
                 column_df_cleaned.to_excel(writer, sheet_name=sheet_name, index=False)
                 exported_sheet_details.append(f"{sheet_name}: {col}")
 
@@ -1086,6 +1113,7 @@ class Batch(Experiment):
             ],
         )
         _log.confirm(f"Exported extra summary to {workbook_path}")
+        return [workbook_path, regex_report_path]
 
     def export_extra_summary_excel(self, save_path=None, roi_base=None, *, include=None, exclude=None, save_name="Extra_Summary"):
         return self.export_unregistered_summary_excel(
@@ -1100,12 +1128,30 @@ class Batch(Experiment):
     def export_behavior_summary_excel(self, save_path=None, *, include=None, exclude=None, save_name="Behavior_Summary"):
         save_path = self._resolve_export_save_path(save_path)
         try:
-            beh_df = self.data["Behaviour"].df
-        except:
+            data = self.data
+        except AttributeError:
+            missing = object()
+            if inspect.getattr_static(self, "data", missing) is missing:
+                return
+            raise
+        try:
+            behavior_table = data["Behaviour"]
+        except KeyError as error:
+            if error.args != ("Behaviour",):
+                raise
             return
+        try:
+            beh_df = behavior_table.df
+        except AttributeError:
+            # A missing optional field is different from a declared property
+            # failing while it reads the table. Preserve the original error.
+            missing = object()
+            if inspect.getattr_static(behavior_table, "df", missing) is missing:
+                return
+            raise
         os.makedirs(save_path, exist_ok=True)
         conditions = self.condition_list
-        regex_filters = _prepare_export_regex_filters(include=include, exclude=exclude, label="behavior")
+        regex_filters = _prepare_export_regex_filters(include=include, exclude=exclude, label=_EXPORT_FILTER_LABELS["export_behavior_summary_excel"])
         workbook_path, regex_report_path, workbook_stem = _resolve_export_paths(
             save_path,
             save_name,
@@ -1117,7 +1163,7 @@ class Batch(Experiment):
         columns_to_save, skipped_columns = _apply_export_regex_filters(candidate_columns, regex_filters)
         exported_sheet_details = []
 
-        with pd.ExcelWriter(workbook_path, engine="xlsxwriter") as writer:
+        with _literal_excel_writer(workbook_path) as writer:
             write_conditions_table_sheet(writer, self.conditions, sheet_name="Conditions")
             used_sheet_names = set(writer.sheets)
             behavior_by_condition = {
@@ -1135,52 +1181,39 @@ class Batch(Experiment):
                     cols_not_included.append(col)
                     continue
 
-                try:
-                    label, desc = convert_behavior_name(col, truncate=False)
-                    # Avoid reusing the same worksheet when Excel truncates or duplicates labels.
-                    sheet_name = safe_sheet_name(label, used_sheet_names)
-                    exported_sheet_details.append(f"{sheet_name}: {col}")
+                label, desc = convert_behavior_name(col, truncate=False)
+                # Avoid reusing the same worksheet when Excel truncates or duplicates labels.
+                sheet_name = safe_sheet_name(label, used_sheet_names)
+                exported_sheet_details.append(f"{sheet_name}: {col}")
 
-                    # Organize by condition (same pattern as imaging)
-                    column_data = {
-                        cond.name: behavior_by_condition[cond.name][col]
-                        for cond in conditions
-                    }
+                # Organize by condition (same pattern as imaging)
+                column_df_cleaned = _grouped_column_table(behavior_by_condition, col)
 
-                    column_df = pd.DataFrame(column_data)
-                    column_df_cleaned = pd.DataFrame({
-                        c: column_df[c].dropna().reset_index(drop=True)
-                        for c in column_df.columns
-                    })
+                # Write table
+                column_df_cleaned.to_excel(writer, sheet_name=sheet_name, index=False)
 
-                    # Write table
-                    column_df_cleaned.to_excel(writer, sheet_name=sheet_name, index=False)
+                worksheet = writer.sheets[sheet_name]
 
-                    worksheet = writer.sheets[sheet_name]
+                # Column widths
+                for i, c in enumerate(column_df_cleaned.columns):
+                    worksheet.set_column(i, i, max(len(str(c)) + 4, 14))
 
-                    # Column widths
-                    for i, c in enumerate(column_df_cleaned.columns):
-                        worksheet.set_column(i, i, max(len(str(c)) + 4, 14))
+                # ---- Description BELOW the data ----
+                if desc and len(column_df_cleaned.columns) > 0:
+                    last_data_row = len(column_df_cleaned) + 1
+                    desc_row = last_data_row + 1
 
-                    # ---- Description BELOW the data ----
-                    if desc and len(column_df_cleaned.columns) > 0:
-                        last_data_row = len(column_df_cleaned) + 1
-                        desc_row = last_data_row + 1
+                    worksheet.merge_range(
+                        desc_row, 0,
+                        desc_row, len(column_df_cleaned.columns) - 1,
+                        desc,
+                        desc_format
+                    )
 
-                        worksheet.merge_range(
-                            desc_row, 0,
-                            desc_row, len(column_df_cleaned.columns) - 1,
-                            desc,
-                            desc_format
-                        )
+                    # Row height for multiline text
+                    n_lines = max(desc.count("\n") + 1, len(desc) // 80 + 1)
+                    worksheet.set_row(desc_row, 18 * n_lines)
 
-                        # Row height for multiline text
-                        n_lines = max(desc.count("\n") + 1, len(desc) // 80 + 1)
-                        worksheet.set_row(desc_row, 18 * n_lines)
-
-                except Exception as e:
-                    cols_not_included.append(col)
-                    _log.warn(f"Behavior export failed for {col}: {e}")
 
         _write_export_regex_report(
             regex_report_path,
@@ -1203,6 +1236,7 @@ class Batch(Experiment):
 
         _log.confirm(f"Exported Behavior summary to {workbook_path}")
         _log.hint(f"Behavior columns not included: {cols_not_included}")
+        return [workbook_path, regex_report_path]
 
     # ── Iteration ──────────────────────────────────────────────────────
 
@@ -1220,7 +1254,10 @@ class Batch(Experiment):
         state.pop('images', None)
         state.pop('image_root', None)
         state.pop('var_name', None)
-        return state
+        state.pop('_ui_initial_catalogue', None)
+        state.pop('_ui_source_version', None)
+        from PyFLASH._state_paths import portable_state
+        return portable_state(state)
 
     def __setstate__(self, state):
         self.__dict__.update(state)
@@ -1232,3 +1269,22 @@ class Batch(Experiment):
         for obj in self.data.values():
             if hasattr(obj, 'experiment'):
                 obj.experiment = self
+
+
+def _extended_export_region_frame(frame, roi_base):
+    """Use acquired region metadata for export; never infer an unlabelled ROI."""
+    if 'ROI' in frame.columns:
+        out = frame
+    elif 'SCN' in frame.columns:
+        out = frame.rename(columns={'SCN': 'ROI'})
+    elif 'Region' in frame.columns:
+        out = frame.assign(ROI=frame['Region'])
+    elif frame.index.name == 'Region':
+        out = frame.assign(ROI=frame.index)
+    else:
+        return frame if roi_base is None else frame.iloc[:0]
+    if roi_base is None:
+        return out
+    source = out['ROI']
+    matching = source.notna() & source.map(extract_region_base).eq(str(roi_base))
+    return out.loc[matching]

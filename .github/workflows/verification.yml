@@ -1,0 +1,205 @@
+name: Scientific regression checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frozen-references-and-recovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install package and verification dependencies
+        run: python -m pip install -e '.[ui,classification]' -r reproducibility/requirements.txt -r scripts/contracts-requirements.txt pytest
+      - name: Check independently frozen answers and interruption recovery
+        env:
+          MPLBACKEND: Agg
+        run: >-
+          python -m pytest tests/test_independent_references.py
+          tests/test_bootstrap_reference.py
+          tests/test_bootstrap_options_contract.py
+          tests/test_scale_interval_contract.py
+          tests/test_anderson_contract.py tests/test_association_specs_contract.py
+          tests/test_normality_parent_complete_contract.py
+          tests/test_group_normality_boundary_contract.py
+          tests/test_group_pipeline_bar_execution.py
+          tests/test_comparison_parent_inference_contract.py
+          tests/test_comparison_parent_routing_contract.py
+          tests/test_comparison_parent_model_scope_contract.py
+          tests/test_comparison_parent_auto_scope_contract.py
+          tests/test_comparison_parent_effect_contract.py
+          tests/test_parent_interval_contract.py
+          tests/test_comparison_parent_cache_contract.py
+          tests/test_comparison_parent_record_contract.py
+          tests/test_comparison_geometry_contract.py
+          tests/test_mean_bars_contract.py
+          tests/test_group_description_contract.py
+          tests/test_comparison_record_contract.py
+          tests/test_comparison_record_audit_contract.py
+          tests/test_report_builder_contract.py
+          tests/test_report_serialization_contract.py
+          tests/test_record_digest_contract.py
+          tests/test_collector_contract.py
+          tests/test_ordinal_parameter_contract.py
+          tests/test_ordinal_zero_contract.py
+          tests/test_ordinal_response_contract.py
+          tests/test_ordinal_constant_contract.py
+          tests/test_shared_replay_guards.py
+          tests/test_consumed_input_guards.py
+          tests/test_exclusion_region_ownership.py
+          tests/test_manual_exclusion_reference.py
+          tests/test_loaded_figure_source_identity.py
+          tests/test_figure_preview_owner.py
+          tests/test_partial_figure_formats.py
+          tests/test_cached_delivery_compatibility.py
+          tests/test_outlier_complete_contract.py
+          tests/test_effect_report_complete_contract.py
+          tests/test_dunnett_complete_contract.py tests/test_dunnett_parent_contract.py
+          tests/test_finite_scale_contract.py
+          tests/test_interaction_slope_complete_contract.py
+          tests/test_native_reference_timeout.py
+          tests/test_native_reference_staging.py
+          tests/test_verification_bootstrap.py
+          tests/test_reference_family_runner.py
+          tests/test_support_parameter_metadata.py tests/test_support_actions.py
+          tests/test_marker_distance_grouping.py
+          tests/test_experiment_layout_labels.py
+          tests/test_region_assignment_contract.py
+          tests/test_experiment_path_reference.py
+          tests/test_scientific_geometry_reference.py
+          tests/test_ventricle_row_ownership.py
+          tests/test_reproducibility_dependency_versions.py
+          tests/test_resident_input_cache.py
+          tests/test_runner_source_identity.py
+          tests/test_classifier_selections.py
+          tests/test_reference_family_isolation.py
+          tests/test_parent_record_state_isolation.py
+          tests/test_evidence_source_revision.py
+          tests/test_development_budget_stage.py
+          tests/test_verification_stage_recovery.py
+          tests/test_reference_execution_recovery.py
+          tests/test_reproducibility_checkpoints.py
+          tests/test_stats_lazy_engines.py
+          tests/test_scalar_input_contract.py
+          tests/test_presentation_cache_complete_contract.py
+          tests/test_variance_student_complete_contract.py
+          tests/test_mann_whitney_complete_contract.py
+          tests/test_print_export_complete_contract.py tests/test_atomic_text_export.py
+          tests/test_before_answer_identity.py
+          tests/test_one_way_complete_contract.py tests/test_studentized_range_tails.py
+          tests/test_welch_one_way_complete_contract.py
+          tests/test_extreme_inference_complete_contract.py
+          tests/test_rank_complete_contract.py
+          tests/test_fraction_cache_ownership.py
+          tests/test_two_way_complete_contract.py
+          tests/test_audit_parent_complete_contract.py
+          tests/test_linear_model_complete_contract.py
+          tests/test_scalar_multiplicity_complete_contract.py
+          tests/test_extended_references.py
+          tests/test_scalar_contract_references.py
+          tests/test_helper_contract_references.py
+          tests/test_cauchy_contract_reference.py
+          tests/test_native_power_reference.py
+          tests/test_power_integral_reference.py tests/test_proportion_contract.py
+          tests/test_proportion_input_contract.py
+          tests/test_auc_contract.py
+          tests/test_multiplicity_contract.py tests/test_power_count_domain.py
+          tests/test_fdr_family_contract.py
+          tests/test_circular_contract.py
+          tests/test_circular_linear_contract.py
+          tests/test_watson_williams_contract.py
+          tests/test_dispersion_contract.py
+          tests/test_plot_presentation.py tests/test_loader_initial_hash.py
+          tests/test_bootstrap_replay.py tests/test_state_atomicity.py
+          tests/test_atomic_replace_retry.py
+          tests/test_failure_receipts.py tests/test_export_result_scripts.py
+          tests/test_factory_cache_identity.py tests/test_state_portability.py
+          tests/test_workspace_edits.py tests/test_resumable_queue.py
+          tests/test_workspace_folder_move.py
+          tests/test_job_folder_move.py tests/test_cli_optional_source.py
+          tests/test_iteration_recovery.py
+          tests/test_iteration_contract.py
+          tests/test_iteration_run_contract.py tests/test_iteration_preflight.py
+          tests/test_conditions_contract.py tests/test_condition_design_recovery.py
+          tests/test_dataframe_nested_alignment.py tests/test_growth_selected_alignment.py
+          tests/test_growth_full_contract.py
+          tests/test_stats_cache_alignment.py tests/test_grid_alignment_boundaries.py
+          tests/test_cached_analysis_paths.py tests/test_cached_project_paths.py
+          tests/test_cached_container_paths.py
+          tests/test_cached_result_preflight.py tests/test_comparison_index_contract.py
+          tests/test_effect_magnitude_contract.py
+          tests/test_permutation_contract.py tests/test_correction_audit.py
+          tests/test_cosinor_contract.py tests/test_rhythm.py
+          tests/test_group_rhythm_contract.py
+          tests/test_population_rhythm_contract.py
+          tests/test_mixed_rhythm_contract.py
+          tests/test_mixed_variance_boundary_contract.py
+          tests/test_cosinor_table_contract.py
+          tests/test_image_io_contract.py tests/test_ui_images.py
+          tests/test_minp_contract.py
+          tests/test_value_permutation_contract.py
+          tests/test_correction_report_contract.py
+          tests/test_bounded_cache.py tests/test_stats_cache_budget.py
+          tests/test_verification_source_inventory.py
+          tests/test_ui_preparation.py tests/test_ui_readiness.py tests/test_ui_lazy_measurements.py
+          tests/test_ui_damaged_state.py
+          tests/test_cli_project_move.py
+          tests/test_action_grid.py tests/test_ui_sweeps.py tests/test_operation_replay.py
+          tests/test_image_input_receipts.py tests/test_reference_reuse.py tests/test_control_cli.py -q
+      - name: Check retained direct utilities and lifecycle contracts
+        env:
+          MPLBACKEND: Agg
+        run: python scripts/verify.py --group release --check direct-utilities-and-lifecycle-contracts --json
+      - name: Check batch workbook routing and current source guards
+        env:
+          MPLBACKEND: Agg
+        run: >-
+          python -m pytest tests/test_excel_orchestration_contract.py
+          tests/test_excel_workbook_schema_contract.py
+          tests/test_excel_literal_cell_contract.py
+          tests/test_excel_coupled_contract.py
+          tests/test_excel_measurement_map_contract.py
+          tests/test_excel_all_mapping_workbook_contract.py
+          tests/test_excel_positive_label_semantics_contract.py
+          tests/test_excel_mean_wording_semantics_contract.py
+          tests/test_excel_distance_presentation_contract.py
+          tests/test_surface_volume_unit_contract.py
+          tests/test_excel_workbook_coverage_gate.py
+          tests/test_dataframe_condition_recoding.py
+          tests/test_dataframe_metadata_ownership.py
+          tests/test_dataframe_comparison_requests.py
+          tests/test_dataframe_whole_client.py
+          tests/test_dataframe_table_protocol.py
+          tests/test_dataframe_whole_coverage_gate.py
+          tests/test_ui_launch.py tests/test_aiify_rollout.py
+          tests/test_excel_export_filename_ownership.py
+          tests/test_excel_export_typed_filters.py
+          tests/test_excel_export_row_order_contract.py
+          tests/test_excel_region_selection_contract.py
+          tests/test_unregistered_summary_export.py
+          tests/test_ui_catalogue_source_identity.py
+          tests/test_linear_forest_native_drawing.py
+          tests/test_linear_forest_uncertainty.py
+          tests/test_linear_forest_report_failures.py
+          tests/test_linear_forest_probability_gates.py -q
+      - name: Check native association intervals and reproducibility resources
+        env:
+          MPLBACKEND: Agg
+        run: python scripts/verify.py --group release --check association-confidence-levels --json
+      - name: Check direct CSV exports and unavailable Fisher inference
+        env:
+          MPLBACKEND: Agg
+        run: python scripts/verify.py --group release --check direct-exports-and-inference-boundaries --json
+      - name: Check exact subject identifiers through both table constructors
+        env:
+          MPLBACKEND: Agg
+        run: python scripts/verify.py --group release --check exact-subject-identifiers --json

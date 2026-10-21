@@ -2,3 +2,23 @@ include CITATION.cff
 include README_AI.md
 include pyflash_context.json
 include scripts/generate_agent_context.py
+include architecture.yaml
+include architecture.lock.json
+include architecture.schema.json
+include mkdocs.yml
+include .readthedocs.yaml
+include .streamlit/config.toml
+recursive-include scripts *.py *.json *.txt
+recursive-include .github/workflows *.yml *.yaml
+recursive-include tests *
+recursive-include docs *.md *.json *.yml *.yaml *.html *.css *.js
+recursive-include docs *.svg *.png *.jpg *.jpeg *.webp *.gif *.pages *.txt
+recursive-include demo *
+recursive-include reproducibility *.py *.json *.md *.txt
+recursive-include reproducibility *.mjs
+recursive-include reproducibility/fixtures *
+recursive-include reproducibility/reference-sources *
+global-exclude *.py[cod]* *.pyc* *.pyo* *.pyd*
+global-exclude __pycache__
+prune demo/output
+prune reproducibility/results

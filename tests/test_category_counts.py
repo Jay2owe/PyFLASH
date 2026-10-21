@@ -103,6 +103,16 @@ def test_category_order_and_labels(tmp_path):
     plt.close(fig)
 
 
+def test_column_label_list_binds_positional_category_name(tmp_path):
+    exp = _season_experiment(tmp_path)
+    fig = plot_category_counts(
+        exp, "season", category_order=ORDER,
+        column_labels=["Seasonal phase"], save=False,
+    )
+    assert fig.axes[0].get_title() == "Seasonal phase"
+    plt.close(fig)
+
+
 def test_missing_category_raises(tmp_path):
     exp = _season_experiment(tmp_path)
     with pytest.raises(ValueError):

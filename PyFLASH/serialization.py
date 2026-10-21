@@ -5,6 +5,8 @@ Pickle-based save/load for Experiment and Batch objects.
 import os
 import re
 import pickle
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
@@ -15,6 +17,30 @@ from PyFLASH._logging import logger as _log
 LEGACY_IMAGE_CACHE_SUFFIX = ".images.pkl"
 _LEGACY_MODULE_ROOT = "IF_analysis"
 _CURRENT_MODULE_ROOT = "PyFLASH"
+STATE_SCHEMA_VERSION = 2
+
+
+def _migrate_v0_to_v1(obj):
+    obj._state_schema_version = 1
+
+
+def _migrate_v1_to_v2(obj):
+    # Older absolute paths remain supported. A new save records relative paths.
+    obj._state_schema_version = 2
+
+
+def _migrate_state(obj):
+    """Stamp legacy states in memory; reject versions this reader cannot handle."""
+    current = getattr(obj, "_state_schema_version", 0)
+    if type(current) is not int or current < 0 or current > STATE_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported analysis state schema version: {current!r}")
+    # Version 0 is the historical unversioned Experiment/Batch pickle. Existing
+    # array/column migrations below remain responsible for that payload.
+    migrations = {0: _migrate_v0_to_v1, 1: _migrate_v1_to_v2}
+    while current < STATE_SCHEMA_VERSION:
+        migrations[current](obj)
+        current += 1
+    return obj
 
 
 def _remap_legacy_module(module):
@@ -42,9 +68,43 @@ class _PyFLASHUnpickler(pickle.Unpickler):
         return super().find_class(_remap_legacy_module(module), name)
 
 
+class _ContentHashReader:
+    """Hash every byte consumed by the unpickler, without retaining the file."""
+    def __init__(self, raw):
+        from hashlib import sha256
+        self.raw = raw
+        self.digest = sha256()
+
+    def read(self, size=-1):
+        content = self.raw.read(size)
+        self.digest.update(content)
+        return content
+
+    def readline(self, size=-1):
+        content = self.raw.readline(size)
+        self.digest.update(content)
+        return content
+
+    def readinto(self, buffer):
+        count = self.raw.readinto(buffer)
+        if count:
+            self.digest.update(memoryview(buffer)[:count])
+        return count
+
+
+def _read_pickle(filename, with_hash=False):
+    with open(filename, "rb") as raw:
+        stream = _ContentHashReader(raw) if with_hash else raw
+        obj = _PyFLASHUnpickler(stream).load()
+        if with_hash:
+            while stream.read(1024 * 1024):
+                pass
+            return obj, stream.digest.hexdigest()
+        return obj, None
+
+
 def _load_pickle(filename):
-    with open(filename, "rb") as f:
-        return _PyFLASHUnpickler(f).load()
+    return _read_pickle(filename)[0]
 
 
 def _resolve_existing_path(path):
@@ -149,7 +209,7 @@ def normalize_paths(obj, verbose=True):
     return _normalize_loaded_paths(obj, verbose=verbose)
 
 
-def save_state(obj, filename=None, verbose=True):
+def save_state(obj, filename=None, verbose=True, *, project_root=None):
     """
     Save an Experiment or Batch to disk.
 
@@ -158,10 +218,14 @@ def save_state(obj, filename=None, verbose=True):
     obj : Experiment or Batch
     filename : str, optional
         Defaults to '{csv_path}/{name}.pkl'
+    project_root : path-like, optional
+        Root moved with this state. Defaults to the analysis root when the
+        destination is inside it; otherwise to the destination's folder.
     """
     if filename is None:
         filename = os.path.join(obj.csv_path, f"{obj.name}.pkl")
 
+    _migrate_state(obj)
     obj._state_path = filename
     sources = list(getattr(obj, "_provenance_sources", []) or [])
     state_source = {
@@ -172,9 +236,51 @@ def save_state(obj, filename=None, verbose=True):
     if state_source not in sources:
         sources.append(state_source)
     obj._provenance_sources = sources
+    from PyFLASH._state_paths import SAVE_ROOT
+    destination = Path(filename).resolve()
+    root = Path(project_root).resolve() if project_root is not None else Path(
+        getattr(obj, 'source_root', None) or getattr(obj, 'filePath', None) or destination.parent).resolve()
+    if project_root is None and not destination.is_relative_to(root):
+        root = destination.parent
+    obj._state_path_manifest = {'schema_version': 1,
+                                'root_from_state': os.path.relpath(root, destination.parent)}
+    from PyFLASH.config import config_snapshot
+    from PyFLASH._persistence import code_identity
+    from PyFLASH.dependencies import check
+    obj._state_environment = {'configuration': config_snapshot(), 'code': code_identity(),
+                              'versions': {entry['package']: entry['version'] for entry in check()}}
+    from PyFLASH._cache_identity import file_hash
+    candidates = {}
+    for target in [obj, *list(getattr(obj, 'experiment_list', []) or [])]:
+        for source in getattr(target, '_provenance_sources', []) or []:
+            if source.get('role') != 'batch_pickle' and source.get('path'):
+                candidates[os.fspath(source['path'])] = source.get('role', 'source')
+        for path in getattr(target, 'source_paths', []) or []:
+            candidates[os.fspath(path)] = 'source'
+    obj._state_inputs = [{'path': path, 'role': role,
+                          'sha256': file_hash(path) if Path(path).is_file() else None}
+                         for path, role in sorted(candidates.items())]
     os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
-    with open(filename, 'wb') as f:
-        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=os.path.dirname(os.path.abspath(filename)), prefix=".pyflash-state-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, 'wb') as f:
+            token = SAVE_ROOT.set(root)
+            try:
+                pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+            finally:
+                SAVE_ROOT.reset(token)
+            f.flush()
+            os.fsync(f.fileno())
+        from PyFLASH._persistence import atomic_replace
+        atomic_replace(temporary, filename)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
     legacy_cache = f"{filename}{LEGACY_IMAGE_CACHE_SUFFIX}"
     if os.path.exists(legacy_cache):
@@ -185,7 +291,7 @@ def save_state(obj, filename=None, verbose=True):
         _log.confirm(f"Saved '{obj.name}' to {filename} ({size_mb:.1f} MB)")
 
 
-def load_state(filename, normalize_paths=True, resave_if_rebased=False, verbose=True):
+def load_state(filename, normalize_paths=True, resave_if_rebased=False, verbose=True, *, resave_if_migrated=True):
     """
     Load an Experiment or Batch from disk.
 
@@ -198,12 +304,30 @@ def load_state(filename, normalize_paths=True, resave_if_rebased=False, verbose=
         using `check_directory`, then refresh derived save paths.
     resave_if_rebased : bool, default False
         If True, overwrite the pickle after path rebasing.
+    resave_if_migrated : bool, default True
+        Persist historical column/image migrations. Set False for a read-only
+        inspection: migrations still run in memory without replacing the source.
 
     Returns
     -------
     Experiment or Batch
     """
-    obj = _load_pickle(filename)
+    from PyFLASH._cache_identity import file_hash
+    raw, consumed_hash = _read_pickle(filename, with_hash=True)
+    if file_hash(filename) != consumed_hash:
+        raise RuntimeError("Saved batch changed while loading; retry the request.")
+    obj = _restore_loaded_state(raw, filename, normalize_paths, resave_if_rebased,
+                                verbose, resave_if_migrated)
+    obj._pyflash_resident_input_sha256 = consumed_hash
+    return obj
+
+
+def _restore_loaded_state(obj, filename, normalize_paths, resave_if_rebased,
+                          verbose, resave_if_migrated):
+    """Apply the existing migration/path logic to one already loaded object."""
+    obj = _migrate_state(obj)
+    from PyFLASH._state_paths import restore_paths
+    portable_rebased = restore_paths(obj, filename)
 
     obj._state_path = filename
     sources = list(getattr(obj, "_provenance_sources", []) or [])
@@ -217,12 +341,12 @@ def load_state(filename, normalize_paths=True, resave_if_rebased=False, verbose=
     obj._provenance_sources = sources
     legacy_arrays_removed = _strip_legacy_image_arrays(obj)
     exp_suffix_migrated = _migrate_exp_suffix_columns(obj)
-    rebased = False
+    rebased = portable_rebased
     if normalize_paths:
-        rebased = _normalize_loaded_paths(obj, verbose=verbose)
+        rebased = _normalize_loaded_paths(obj, verbose=verbose) or rebased
 
     legacy_cache = f"{filename}{LEGACY_IMAGE_CACHE_SUFFIX}"
-    should_resave = legacy_arrays_removed or exp_suffix_migrated or os.path.exists(legacy_cache) or (rebased and resave_if_rebased)
+    should_resave = (resave_if_migrated and (legacy_arrays_removed or exp_suffix_migrated or os.path.exists(legacy_cache))) or (rebased and resave_if_rebased)
     if should_resave:
         save_state(obj, filename, verbose=False)
 
@@ -233,3 +357,44 @@ def load_state(filename, normalize_paths=True, resave_if_rebased=False, verbose=
         if hasattr(obj, 'condition_list'):
             _log.status(f"  Conditions: {[c.name for c in obj.condition_list]}")
     return obj
+
+
+def _restore_captured_state(snapshot, filename, consumed_sha256):
+    """Restore an owned, already hashed snapshot through the ordinary owner.
+
+    Internal callers must own the frozen stream and verify the original file
+    again before admitting this object. No paths or migrations are duplicated.
+    """
+    raw = _PyFLASHUnpickler(snapshot).load()
+    batch = _restore_loaded_state(raw, os.fspath(filename), True, False, False, False)
+    batch._pyflash_resident_input_sha256 = consumed_sha256
+    return batch
+
+
+def _load_cached_state(filename, cache=None, *, expected_sha256=None, verify_current=True, verbose=True):
+    """Verify consumed saved bytes and optionally reuse a resident object.
+
+    Callers skipping the final file check must provide their captured expected
+    digest and own a later check before admitting a result.
+    """
+    if not verify_current and expected_sha256 is None:
+        raise ValueError("An expected input hash is required when deferring verification.")
+    from PyFLASH._cache_identity import file_hash
+    filename = os.fspath(filename)
+    if cache is not None and filename in cache:
+        current_hash = file_hash(filename)
+        if expected_sha256 is not None and current_hash != expected_sha256:
+            raise RuntimeError("Saved batch changed while loading; retry the request.")
+        batch = cache[filename]
+        if getattr(batch, "_pyflash_resident_input_sha256", None) == current_hash:
+            return batch
+    raw, loaded_hash = _read_pickle(filename, with_hash=True)
+    if expected_sha256 is not None and loaded_hash != expected_sha256:
+        raise RuntimeError("Saved batch changed while loading; retry the request.")
+    batch = _restore_loaded_state(raw, filename, True, False, verbose, False)
+    if verify_current and file_hash(filename) != loaded_hash:
+        raise RuntimeError("Saved batch changed while loading; retry the request.")
+    batch._pyflash_resident_input_sha256 = loaded_hash
+    if cache is not None:
+        cache[filename] = batch
+    return batch

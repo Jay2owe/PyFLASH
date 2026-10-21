@@ -45,6 +45,7 @@ plot_condition_key(
 | `Batch` | Yes | Uses `condition_list` and `fig_path`. |
 | `Experiment` | Yes | Works when a group list is present. |
 | `MiniExperiment` | Yes | Works when loaded into a PyFLASH-like object with conditions. |
+| `DataFrameExperiment` | Yes | Uses the conditions supplied with the table-backed experiment. |
 | `pandas.DataFrame` | No | Raw tables do not carry condition style metadata. |
 
 ## Parameters
@@ -65,18 +66,25 @@ plot_condition_key(
 
 | Return value | Type | Meaning |
 |---|---|---|
-| `path` | `str` | Returned when `save=True`. Path to the saved PNG. |
+| `path` | Path-like | Returned when `save=True`. The existing saved carrier path. |
 | `fig` | `matplotlib.figure.Figure` | Returned when `save=False`. |
 
 ## Saved Outputs
 
-With `save=True`, the function saves a PNG. By default the path is:
+With `save=True`, the default format is PNG. By default the path is:
 
 ```text
 <experiment.fig_path>/condition_key.png
 ```
 
-When `save_path` is provided, the figure is written exactly there.
+When `save_path` is provided, its extension selects SVG, PDF, PNG, JPEG, TIFF,
+WebP, AVIF or HEIF. Extensionless paths receive `.png`. Hyphens and underscores
+in the requested name are retained. Saving closes the allocated figure even
+when writing fails; `save=False` returns a figure that the caller must close.
+
+Long labels enlarge the canvas instead of being shortened or clipped. Legend
+text inherits the shared PyFLASH font settings. Proof-enabled exports also
+capture the legend labels and swatches so changes can be checked independently.
 
 ## Examples
 
@@ -116,8 +124,7 @@ plot_condition_key(
 - The function raises `ValueError` when no condition handles can be built.
 - `auto_style=None` uses the active style default and is useful for crossed
   designs where two groups share a colour but differ by hatch or fill style.
-- Unlike most PyFLASH figure saves, this function writes a PNG directly with
-  `fig.savefig()` rather than `save_fig()`.
+- Saved formats use `PyFLASH.utils.save_fig`, including embedded figure evidence.
 
 ## See Also
 

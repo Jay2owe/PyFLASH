@@ -277,9 +277,24 @@ class Context:
         # Order by condition list, then add any extras
         ordered = []
         for cond in self.experiment.condition_list:
-            match = next((v for v in values if v in cond.name), None)
-            if match and match not in ordered:
-                ordered.append(match)
+            if 'Condition' in self.summary.columns:
+                matches = self.summary.loc[
+                    self.summary['Condition'] == cond.name, factor_name
+                ].dropna().unique()
+            else:
+                components = getattr(cond, 'conditionsList', [cond])
+                declared = [part.name for part in components
+                            if getattr(part, 'factor', None) == factor_name]
+                matches = [v for v in values if v in declared]
+                if not declared:
+                    # Legacy summaries omit condition metadata. Match the
+                    # longest string first so 'male' cannot capture 'female'.
+                    candidates = sorted((v for v in values if isinstance(v, str)),
+                                        key=len, reverse=True)
+                    matches = next(([v] for v in candidates if v in str(cond.name)), [])
+            for match in matches:
+                if match not in ordered:
+                    ordered.append(match)
         for v in values:
             if v not in ordered:
                 ordered.append(v)
@@ -362,16 +377,42 @@ def run(experiment, over, action,
     """
     if isinstance(over, str):
         over = [over]
+    else:
+        try:
+            over = list(over)
+        except TypeError as error:
+            raise TypeError('over must be an iteration level or a sequence of levels') from error
+    if any(not isinstance(level, str) or level not in _ITER_MAP for level in over):
+        raise ValueError(f'Unknown iteration level; choose from {list(_ITER_MAP)}')
+    for name, callback in [('action', action), ('setup', setup), ('teardown', teardown)]:
+        if (name == 'action' or callback is not None) and not callable(callback):
+            raise TypeError(f'{name} must be callable')
+    if 'columns' in over:
+        if columns is None or isinstance(columns, (str, bytes)):
+            raise ValueError('columns must be a sequence of column names when iterating columns')
+        columns = list(columns)
+    if 'factors' in over:
+        if factor is None or factor not in Context(experiment, roi_base=roi_base).summary.columns:
+            raise ValueError('factor must name a summary column when iterating factors')
+    subject_level_seen = False
+    for level in over:
+        subject_level_seen |= level in ('subjects', 'animals')
+        if level in ('regions', 'scns') and not subject_level_seen:
+            raise ValueError('Region iteration requires an outer subjects or animals level')
+    labels = normalize_column_labels(columns, column_labels)
 
     # Apply specificity filter
     _orig_summaries = None
     if specificity is not None:
         if hasattr(experiment, 'summaries') and experiment.summaries:
-            _orig_summaries = {k: v.copy() for k, v in experiment.summaries.items()}
-            for k, v in experiment.summaries.items():
+            _orig_summaries = experiment.summaries
+            filtered_summaries = {}
+            for k, v in _orig_summaries.items():
                 filtered = filter_df_by_specificity(v, specificity)
-                if len(filtered) < len(v):
-                    experiment.summaries[k] = filtered.copy()
+                filtered_summaries[k] = filtered.copy() if len(filtered) < len(v) else v
+            # Preflight every region before replacing anything; a later
+            # filtering error must not leave an earlier region modified.
+            experiment.summaries = filtered_summaries
         else:
             _orig_summaries = {'_legacy': experiment.summary}
             filtered = filter_df_by_specificity(experiment.summary, specificity)
@@ -389,26 +430,26 @@ def run(experiment, over, action,
         for key, value in result.items():
             all_results.setdefault(key, []).append(value)
 
-    def _recurse(ctx, levels):
+    def _recurse(ctx, levels, depth=0):
         if not levels:
             result = action(ctx, state, **action_kwargs)
             _accumulate(result)
             return
 
         current, *remaining = levels
-        is_outer = (current == over[0])
+        is_outer = depth == 0
 
         for child_ctx in _ITER_MAP[current](ctx, iter_kwargs):
             if is_outer and setup is not None:
                 setup(child_ctx, state)
 
-            _recurse(child_ctx, remaining)
+            _recurse(child_ctx, remaining, depth + 1)
 
             if is_outer and teardown is not None:
                 teardown(child_ctx, state, all_results)
 
     try:
-        with column_label_overrides(normalize_column_labels(columns, column_labels)):
+        with column_label_overrides(labels):
             _recurse(root, over)
     finally:
         # Always restore summary, even if plotting/stats raises.

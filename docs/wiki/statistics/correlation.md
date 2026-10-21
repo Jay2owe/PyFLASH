@@ -60,6 +60,17 @@ For grouped matrix differences, PyFLASH uses a Fisher r-to-z probability test
 for Pearson correlations. Spearman and Kendall grouped differences are reported
 as descriptive coefficient deltas, not as inferential Fisher tests.
 
+`PyFLASH.stats.interaction_slope_difference` compares the fitted slopes of two
+groups, optionally with ranked data, standardized variables and numeric or
+categorical covariates. It omits incomplete paired observations and reports each
+group slope, their difference, its standard error, Student statistic and
+probability, residual degrees of freedom and retained sample count. Balanced
+columns preserve the fit under finite changes of units and predictor origin;
+unstandardized coefficients are returned in the original outcome/predictor units.
+Singular or saturated models return undefined inferential fields. Exactly
+identified zero-noise fits have zero standard error; a nonzero contrast has an
+infinite statistic, whereas significance of a zero contrast remains undefined.
+
 ## Limitations
 
 Correlation does not identify cause, mechanism, or direction of effect. Shared

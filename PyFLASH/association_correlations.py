@@ -18,53 +18,10 @@ COVARIATE_ADJUSTMENTS = ("rank_then_residual", "residual_then_correlation")
 
 
 def normalize_specs(associations):
-    """Normalize named or unnamed ``{x, y, covariates}`` specifications."""
-    if isinstance(associations, Mapping):
-        items = list(associations.items())
-    elif isinstance(associations, (list, tuple)):
-        items = [(None, spec) for spec in associations]
-    else:
-        raise ValueError(
-            "associations must be a mapping of {name: {x, y, covariates}} "
-            "or a list of specification mappings"
-        )
-    if not items:
-        raise ValueError("associations cannot be empty")
+    """Normalize association specifications through the shared request schema."""
+    from PyFLASH._association_specs import normalize_association_specs
+    return normalize_association_specs(associations, include_label=True)
 
-    normalized = []
-    for index, (name, spec) in enumerate(items):
-        if not isinstance(spec, Mapping):
-            raise ValueError(f"association {index + 1} must be a mapping")
-        x = spec.get("x")
-        y = spec.get("y")
-        if x is None or y is None:
-            raise ValueError(f"association {index + 1} requires 'x' and 'y'")
-        if str(x) == str(y):
-            raise ValueError(f"association {index + 1} has identical x and y")
-        covariates = spec.get("covariates", [])
-        if covariates is None:
-            covariates = []
-        elif isinstance(covariates, str):
-            covariates = [covariates]
-        else:
-            covariates = list(covariates)
-        if any(str(column) in {str(x), str(y)} for column in covariates):
-            raise ValueError(f"association {index + 1} repeats x or y as a covariate")
-        label = str(name) if name is not None else f"{x} vs {y}"
-        normalized.append(
-            {
-                "name": None if name is None else str(name),
-                "label": label,
-                "x": str(x),
-                "y": str(y),
-                "covariates": [str(column) for column in covariates],
-            }
-        )
-
-    names = [spec["name"] for spec in normalized if spec["name"] is not None]
-    if len(names) != len(set(names)):
-        raise ValueError("association names must be unique")
-    return normalized
 
 
 def _normalize_test(test):
@@ -385,7 +342,7 @@ def _compute_heterogeneity(correlations):
     return pd.DataFrame(rows).sort_values("association_order", kind="mergesort").reset_index(drop=True)
 
 
-def _compute_contrasts(correlations, boot, group_order, reference):
+def _compute_contrasts(correlations, boot, group_order, reference, ci_alpha=0.05):
     rows = []
     for association, subset in correlations.groupby("association", sort=False):
         by_group = subset.set_index("group")
@@ -399,14 +356,20 @@ def _compute_contrasts(correlations, boot, group_order, reference):
             grp_col = f"{int(row['association_order'])}__{group}"
             if len(boot) and ref_col in boot.columns and grp_col in boot.columns:
                 boot_delta = boot[grp_col].to_numpy(dtype=float) - boot[ref_col].to_numpy(dtype=float)
-                delta_low, delta_high = np.percentile(boot_delta, [2.5, 97.5])
+                delta_low, delta_high = np.percentile(boot_delta, [100.0 * float(ci_alpha) / 2.0, 100.0 * (1.0 - float(ci_alpha) / 2.0)])
             else:
                 delta_low, delta_high = np.nan, np.nan
-            var_ref = 1.0 / (float(ref["n"]) - float(ref["covariate_df"]) - 3.0)
-            var_group = 1.0 / (float(row["n"]) - float(row["covariate_df"]) - 3.0)
-            se = float(np.sqrt(var_ref + var_group))
-            z_diff = float((_fisher_z(row["estimate"]) - _fisher_z(ref["estimate"])) / se)
-            p_value = float(2.0 * stats.norm.sf(abs(z_diff)))
+            information_ref = float(ref["n"]) - float(ref["covariate_df"]) - 3.0
+            information_group = float(row["n"]) - float(row["covariate_df"]) - 3.0
+            if (information_ref > 0 and information_group > 0
+                    and np.isfinite(ref["estimate"]) and np.isfinite(row["estimate"])):
+                var_ref = 1.0 / information_ref
+                var_group = 1.0 / information_group
+                se = float(np.sqrt(var_ref + var_group))
+                z_diff = float((_fisher_z(row["estimate"]) - _fisher_z(ref["estimate"])) / se)
+                p_value = float(2.0 * stats.norm.sf(abs(z_diff)))
+            else:
+                se = z_diff = p_value = np.nan
             rows.append(
                 {
                     "association_order": int(row["association_order"]),
@@ -485,7 +448,7 @@ def analyze(
     )
     correlations = _add_bootstrap_intervals(correlations, boot, ci_alpha)
     heterogeneity = _compute_heterogeneity(correlations)
-    contrasts = _compute_contrasts(correlations, boot, group_order, reference)
+    contrasts = _compute_contrasts(correlations, boot, group_order, reference, ci_alpha)
     return {
         "schemas": specs,
         "correlations": correlations,

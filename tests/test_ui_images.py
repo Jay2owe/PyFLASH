@@ -171,18 +171,16 @@ def test_set_representative_selections_overwrites():
 
 
 def test_importing_services_is_streamlit_and_plotting_free():
-    # Stage 08 must not regress the import contract: importing services alone
-    # must not load streamlit OR PyFLASH.plotting (the wrappers import plotting
-    # lazily inside their bodies).
-    sys.modules.pop("PyFLASH.plotting", None)
-    sys.modules.pop("streamlit", None)
-    import importlib
-
-    importlib.reload(services)
-    assert "streamlit" not in sys.modules
-    assert "PyFLASH.plotting" not in sys.modules
-    assert not hasattr(services, "st")
-    assert not hasattr(services, "plotting")
+    # Removing an initialized Streamlit module leaves its singleton alive and
+    # breaks later browser tests. Measure the real import in a fresh process.
+    import subprocess
+    from reproducibility.run import python_command
+    subprocess.run(python_command() + ['-c',
+        "import sys; from PyFLASH.ui import services; "
+        "assert 'streamlit' not in sys.modules; "
+        "assert 'PyFLASH.plotting' not in sys.modules; "
+        "assert not hasattr(services, 'st'); assert not hasattr(services, 'plotting')"],
+        check=True)
 
 
 def test_images_page_parses_as_valid_python():

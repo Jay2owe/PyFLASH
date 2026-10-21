@@ -60,6 +60,8 @@ plot_scatter_3d(
     share_axes=True,
     point_edge=None,
     point_linewidth=None,
+    column_labels=None,
+    interactive=False,
 )
 ```
 
@@ -94,6 +96,7 @@ plot_scatter_3d(
 | `elevation`, `azimuth` | number or `None` | `None` | 3D camera view angles. |
 | `figsize` | tuple | `(10, 8)` | Figure size in inches. |
 | `share_axes` | `bool` | `True` | Share ranges across queued sibling combinations when the same column repeats. |
+| `interactive` | `bool` | `False` | Add movable Plotly figures and, when saving, self-contained HTML files. Requires the `interactive` extra. |
 
 ## Parameter Options
 
@@ -118,6 +121,34 @@ figures include `(Combined)` in the file name. Separate figures include the
 condition or factor value.
 
 No statistics tables are written.
+
+With `interactive=True`, the normal static exports are accompanied by HTML
+files with the same names. Open one in a browser: drag to rotate, scroll to
+zoom, and hover over a point for its participant identifier and values. The
+JavaScript is embedded, so internet access and a Python server are unnecessary.
+The returned `interactive` list contains the Plotly figures; `interactive_outputs`
+contains their saved paths. `save=False` creates no files.
+
+Install the optional dependency with `pip install "PyFLASH-analysis[interactive]"`.
+
+### Movable views with each group's own ranges
+
+```python
+result = plot_scatter_3d(
+    batch, x="x1", y="x2", z="Signal", factor="Genotype",
+    combine=False, share_axes=False, interactive=True,
+)
+```
+
+Values stay in their original units. Separate groups naturally fit their own
+data when explicit limits and experiment-level registered bounds are absent.
+`share_axes=False` also disables shared ranges for queued column combinations.
+An explicit `x_range`, `y_range` or `z_range` still takes precedence. Changing
+axis ranges changes apparent slopes, so compare numeric values across groups.
+The interactive view uses the native renderer's complete cases, normalization,
+group colours, marker sizes, labels and ranges. ROI and filter queues work in
+both modes. The accepted input object types are unchanged; adapt raw tables
+through `from_dataframe`.
 
 ## Examples
 

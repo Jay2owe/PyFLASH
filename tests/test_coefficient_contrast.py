@@ -85,7 +85,7 @@ def test_invalid_tail_raises():
 
 def test_interaction_requires_exactly_two_groups():
     df = pd.DataFrame({"x": range(9), "y": range(9), "g": list("AAABBBCCC")})
-    with pytest.raises(ValueError, match="exactly two groups"):
+    with pytest.raises(ValueError, match="(?i)exactly two groups"):
         interaction_slope_difference(df.x, df.y, df.g)
 
 

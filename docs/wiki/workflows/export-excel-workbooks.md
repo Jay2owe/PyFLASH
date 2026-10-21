@@ -71,6 +71,11 @@ batch.export_all_excel(
 5. Filter exported columns by internal PyFLASH column names. Regex filters are
    case-insensitive.
 
+   Supply a pattern string or a collection of patterns. Tuples, one-dimensional
+   NumPy arrays, pandas Series/Index objects and sets are also accepted. Collection
+   entries are trimmed; empty entries and `None` are ignored. Sets produce reports
+   in lexicographic pattern order. Include patterns are applied before exclusions.
+
 ```python
 batch.export_all_excel(
     if_summary_include=["GFAP", "IBA1"],
@@ -108,16 +113,19 @@ Common outputs include:
 | `Extra_Summary.xlsx` | Summary columns not covered by standard IF summary mappings. |
 | `*_RegexFilters.txt` | Audit report for filters, exported sheets, skipped columns, and notes. |
 
-`batch.export_all_excel()` returns whatever `batch.export_excel()` returns
-currently, which is normally `None`. Treat the workbooks and reports as the
-main output.
+`batch.export_all_excel()` and `batch.export_excel()` return an ordered list of
+workbook and filter-report paths, or an empty list when nothing is exported.
 
 ## Troubleshooting
 
 - No export folder appears: all workbook toggles may be disabled, or the
   behavior workbook may be requested when no behavior table exists.
 - A regex error stops export: test simpler include/exclude patterns. Unbalanced
-  brackets such as `[` are invalid regex.
+  brackets such as `[` are invalid regex. All active families' patterns are
+  checked before the request writes its first workbook or filter report.
+  Disabled families ignore their filter options.
+- Absent optional behavior data produces no behavior workbook. Errors reading
+  declared behavior data propagate rather than being reported as absence.
 - Expected columns are missing: filters match internal column names, not Excel
   display labels.
 - The workbook cannot be overwritten on Windows: close it in Excel and rerun.

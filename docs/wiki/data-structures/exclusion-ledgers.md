@@ -10,6 +10,11 @@ kind of exclusion, and fill value used when exclusions are applied.
 The original experiment or batch is not modified. Exclusion helpers return a
 shallow copy with copied summary tables and shared heavy raw data.
 
+Fresh outlier ledgers capture the selected source cell's value before any writes.
+Stale numeric values in a supplied flag table do not replace that source evidence,
+and repeated entries keep the same pre-operation original. Reapplying an already
+reviewed ledger preserves its recorded historical original values.
+
 ## Where It Appears
 
 - `cleaned.exclusions` after calling exclusion helpers.

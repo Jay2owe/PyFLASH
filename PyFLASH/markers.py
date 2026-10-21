@@ -8,16 +8,14 @@ import re
 import numpy as np
 import pandas as pd
 from collections import defaultdict
-try:
-    from scipy.spatial import cKDTree
-except Exception:
-    cKDTree = None
+_TREE_PENDING = object()
+cKDTree = _TREE_PENDING
 
 from PyFLASH.config import Config
 from PyFLASH._logging import logger as _log
 from PyFLASH.utils import (
     clean_column_name, add_suffix, get_columns,
-    convert_microns_to_pixels, trace_downward_nearest,
+    convert_microns_to_pixels, convert_pixels_to_microns, trace_downward_nearest,
     moving_average, points_to_polyline_distance, save_fig,
 )
 
@@ -69,7 +67,7 @@ def _extract_raw_coloc_descriptor(colname, marker_name):
     if m is not None:
         return "Vol", str(m.group("target"))
 
-    m = re.match(rf"^{re.escape(marker_s)}_Coloc(?P<target>(?!Count)[^_].+)$", col_s)
+    m = re.match(rf"^{re.escape(marker_s)}_Coloc(?P<target>(?!Count)[^_].*)$", col_s)
     if m is not None:
         return "Vol", str(m.group("target"))
 
@@ -129,8 +127,8 @@ def _coerce_coloc_positive(series, threshold):
     if len(valid) > 0:
         unique_vals = {float(v) for v in valid.unique().tolist()}
         if unique_vals.issubset({0.0, 1.0}):
-            return numeric.fillna(0.0).ne(0.0)
-        return numeric > float(threshold)
+            return (numeric.notna() & numeric.ne(0.0)).fillna(False).astype(bool)
+        return numeric.gt(float(threshold)).fillna(False).astype(bool)
 
     text = series.astype(str).str.strip().str.casefold()
     mapped = text.map({
@@ -195,7 +193,7 @@ class Antibody(Attribute):
         if isinstance(self, (cellMarker, objectMarker)):
             self._adjust_coordinates()
         if isinstance(self, objectMarker):
-            self.addColocData(Config.THRESHOLD)
+            self.addColocData(getattr(self, 'threshold', Config.THRESHOLD))
         self.df.set_index('Region', inplace=True)
         _log.confirm(f'{self.name} data processing complete.')
         return self.df
@@ -218,13 +216,15 @@ class Antibody(Attribute):
             ]
             if label_map:
                 self.df['AnimalName'] = self.df['AnimalName'].map(lambda x: label_map.get(x, x))
-            self.df['Condition'] = [
+            self.df['Condition'] = pd.Series([
                 ''.join(filter(str.isalpha, n)) for n in self.df['AnimalName']
-            ]
+            ], index=self.df.index, dtype=object)
         else:
             # Object/cell marker data
             protected_cols = ['Region', 'Hemisphere', 'ROI', 'Animal Name', 'Count']
-            self.df['Count'] = np.where(self.df['Volume (micron^3)'] > 0, 1, 0)
+            self.df['Count'] = np.where(
+                (self.df['Volume (micron^3)'] > 0).fillna(False).to_numpy(dtype=bool), 1, 0
+            )
             no_data_mask = self.df['Count'] == 0
             cols_to_nan = self.df.columns.difference(protected_cols)
             self.df.loc[no_data_mask, cols_to_nan] = np.nan
@@ -237,9 +237,9 @@ class Antibody(Attribute):
             self.df = add_suffix(self.df, int_den_cols, 'IntDen')
             if label_map:
                 self.df['AnimalName'] = self.df['AnimalName'].map(lambda x: label_map.get(x, x))
-            self.df['Condition'] = [
+            self.df['Condition'] = pd.Series([
                 ''.join(filter(str.isalpha, n)) for n in self.df['AnimalName']
-            ]
+            ], index=self.df.index, dtype=object)
             self.df[f'{self.name}_SAtoVolumeRatio'] = (
                 self.df[f'{self.name}_Surface'] / self.df[f'{self.name}_Volume']
             )
@@ -247,8 +247,30 @@ class Antibody(Attribute):
 
     def _adjust_coordinates(self):
         name = self.name
-        self.df[f'{name}_RawYM'] = self.df[f'{name}_YM'] / Config.PIXEL_SIZE
-        self.df[f'{name}_RawXM'] = self.df[f'{name}_XM'] / Config.PIXEL_SIZE
+        scales = self._source_coordinate_scales(self.df)
+        if scales is None:
+            # Validate the same physical domain as the public unit converter
+            # before inserting either output column. Keep the existing pandas
+            # division below so accepted column storage remains unchanged.
+            axes = [f'{name}_XM', f'{name}_YM']
+            if f'{name}_ZM' in self.df.columns:
+                axes.append(f'{name}_ZM')
+            acquired = self._real_coordinate_values(self.df, axes)
+            planar = acquired[:, :2]
+            convert_pixels_to_microns(planar[np.isfinite(planar)])
+            self.df[f'{name}_RawYM'] = self.df[f'{name}_YM'] / Config.PIXEL_SIZE
+            self.df[f'{name}_RawXM'] = self.df[f'{name}_XM'] / Config.PIXEL_SIZE
+        else:
+            # FLASH exports voxel coordinates and their individual axis pitches.
+            # Preserve acquired ZM and retain a separate physical depth column.
+            acquired = self._real_coordinate_values(self.df, [f'{name}_{axis}M' for axis in ('X', 'Y', 'Z')])
+            with np.errstate(over='ignore', under='ignore', invalid='ignore'):
+                physical = acquired * scales
+            if (np.isfinite(acquired) & ~np.isfinite(physical)).any():
+                raise ValueError('Source calibration coordinates exceed the finite micrometre range.')
+            self.df[f'{name}_RawYM'] = physical[:, 1]
+            self.df[f'{name}_RawXM'] = physical[:, 0]
+            self.df[f'{name}_RawZM'] = physical[:, 2]
         try:
             _log.status(f"Adjusting coordinates for {name} points...")
             roi_props = self.experiment.data.get('ROI Properties')
@@ -286,6 +308,68 @@ class Antibody(Attribute):
             warnings.warn(f'No Area Data provided; coordinates not adjusted {k}', stacklevel=2)
         return self.df
 
+    def _source_coordinate_scales(self, frame):
+        """Return declared row-wise micrometres per voxel, or legacy absence."""
+        name = self.name
+        columns = [f'{name}_SourcePixel{axis}' for axis in ('Width', 'Height', 'Depth')]
+        if not any(column in frame.columns for column in columns):
+            return None
+        if not all(column in frame.columns for column in columns):
+            raise ValueError('Source calibration requires width, height and depth together.')
+        scales = self._real_coordinate_values(frame, columns).copy()
+        count_column = f'{name}_Count'
+        measured = (frame[count_column].to_numpy() > 0 if count_column in frame.columns
+                    else np.ones(len(frame), dtype=bool))
+        if not np.isfinite(scales[measured]).all() or (scales[measured] <= 0).any():
+            raise ValueError('Source calibration pitches must be positive and finite.')
+        units = {
+            'micron': 1., 'microns': 1., 'micrometre': 1., 'micrometres': 1.,
+            'micrometer': 1., 'micrometers': 1., 'um': 1., 'µm': 1., 'μm': 1.,
+            'nm': .001, 'nanometre': .001, 'nanometer': .001,
+            'mm': 1000., 'millimetre': 1000., 'millimeter': 1000.,
+        }
+        for axis, letter in enumerate(('X', 'Y', 'Z')):
+            column = f'{name}_SourcePixel{letter}Unit'
+            if column not in frame.columns:
+                column = f'{name}_SourcePixelUnit'
+            if column not in frame.columns:
+                raise ValueError('Source calibration requires physical axis units.')
+            factors = frame[column].map(lambda value: units.get(str(value).strip().lower(), np.nan)).to_numpy(dtype=float)
+            if not np.isfinite(factors[measured]).all():
+                raise ValueError('Source calibration units must identify micrometres, nanometres or millimetres.')
+            with np.errstate(over='ignore', under='ignore', invalid='ignore'):
+                scales[:, axis] *= factors
+        if not np.isfinite(scales[measured]).all() or (scales[measured] <= 0).any():
+            raise ValueError('Source calibration cannot be represented in micrometres.')
+        return scales
+
+    def _spatial_coordinate_data(self, frame):
+        name = self.name
+        calibrated = f'{name}_RawZM' in frame.columns
+        depth = f'{name}_RawZM' if calibrated else f'{name}_ZM'
+        coords = self._real_coordinate_values(frame, [f'{name}_RawXM', f'{name}_RawYM', depth])
+        valid = np.isfinite(coords).all(axis=1)
+        if not calibrated:
+            valid &= coords[:, 2] != 0
+        if f'{name}_Count' in frame.columns:
+            valid &= frame[f'{name}_Count'].to_numpy() > 0
+        return coords, valid
+
+    @staticmethod
+    def _real_coordinate_values(frame, columns):
+        values = frame[columns].to_numpy(copy=False)
+        if values.dtype.kind in ('c', 'O'):
+            values = values.astype(object, copy=True)
+            for position, value in np.ndenumerate(values):
+                if value is pd.NA:
+                    values[position] = np.nan
+                    continue
+                if isinstance(value, (complex, np.complexfloating)):
+                    if value.imag != 0:
+                        raise ValueError('Spatial coordinates and calibration must be real.')
+                    values[position] = value.real
+        return np.asarray(values, dtype=float)
+
     def set_df(self, new_df):
         self.df = new_df
         return self.df
@@ -310,18 +394,67 @@ class Antibody(Attribute):
         if len(group_cols) == 0:
             return {('__all__',): np.arange(len(df), dtype=int)}
         grouped = df.groupby(group_cols, sort=False, dropna=False).indices
+        # Missing labels form a real group (dropna=False). Pandas emits NaN
+        # keys whose equality is false, so independently grouped marker frames
+        # need the same stable missing-label key before they can be matched.
         return {
-            key if isinstance(key, tuple) else (key,): np.asarray(pos, dtype=int)
+            tuple(None if pd.isna(value) else value
+                  for value in (key if isinstance(key, tuple) else (key,))):
+                np.asarray(pos, dtype=int)
             for key, pos in grouped.items()
         }
 
     @staticmethod
     def _nearest_neighbor_query(query_coords, reference_coords):
-        if cKDTree is not None:
+        global cKDTree
+        if cKDTree is _TREE_PENDING:
+            try:
+                from scipy.spatial import cKDTree as tree_type
+            except Exception:
+                cKDTree = None
+            else:
+                cKDTree = tree_type
+        # Squared distances in the tree can underflow or overflow even though
+        # the Euclidean distance itself is representable. Keep normal imaging
+        # coordinates on the tree and use bounded robust norms at those limits.
+        absolute = np.concatenate((np.abs(query_coords).ravel(), np.abs(reference_coords).ravel()))
+        extreme = np.any((absolute > 1e150) | ((absolute > 0) & (absolute < 1e-150)))
+        if cKDTree is not None and not extreme:
             tree = cKDTree(reference_coords)
-            distances, idx = tree.query(query_coords, k=1)
-            return np.asarray(distances, dtype=float), np.asarray(idx, dtype=int)
+            if len(reference_coords) == 1:
+                distances, idx = tree.query(query_coords, k=1)
+                distances = np.hypot.reduce(reference_coords[0] - query_coords, axis=1)
+                return np.asarray(distances, dtype=float), np.asarray(idx, dtype=int)
+            # Counts are attributed to the selected reference row, so equal
+            # distances must use the same first-row rule as the bounded
+            # fallback. A tree's traversal order is not a scientific tie rule.
+            neighbors, indices = tree.query(query_coords, k=2)
+            distances = np.asarray(neighbors[:, 0], dtype=float)
+            idx = np.asarray(indices[:, 0], dtype=int)
+            for position in np.flatnonzero(neighbors[:, 0] == neighbors[:, 1]):
+                candidates = sorted(tree.query_ball_point(
+                    query_coords[position], np.nextafter(distances[position], np.inf)
+                ))
+                candidate_distances = np.hypot.reduce(
+                    reference_coords[candidates] - query_coords[position], axis=1
+                )
+                selected = int(np.argmin(candidate_distances))
+                distances[position] = candidate_distances[selected]
+                idx[position] = candidates[selected]
+            # Nearby points at a large common offset can also have a tiny
+            # represented separation. Recheck that complete neighbourhood
+            # rather than treating a tree-rounded zero as an exact tie.
+            tiny = np.flatnonzero(distances < 1e-150)
+            if len(tiny):
+                distances[tiny], idx[tiny] = Antibody._bounded_nearest_neighbor_query(
+                    query_coords[tiny], reference_coords
+                )
+            return distances, idx
 
+        return Antibody._bounded_nearest_neighbor_query(query_coords, reference_coords)
+
+    @staticmethod
+    def _bounded_nearest_neighbor_query(query_coords, reference_coords):
         # Keep the NumPy fallback bounded so large regions do not allocate an
         # all-pairs distance matrix in one shot.
         max_pairs = 2_000_000
@@ -330,11 +463,14 @@ class Antibody(Attribute):
         idx = np.empty(query_coords.shape[0], dtype=int)
         for start in range(0, query_coords.shape[0], chunk_size):
             stop = min(start + chunk_size, query_coords.shape[0])
-            delta = query_coords[start:stop, np.newaxis, :] - reference_coords[np.newaxis, :, :]
-            dist_chunk = np.linalg.norm(delta, axis=2)
+            with np.errstate(over='ignore'):
+                delta = query_coords[start:stop, np.newaxis, :] - reference_coords[np.newaxis, :, :]
+            dist_chunk = np.hypot.reduce(delta, axis=2)
             idx_chunk = np.argmin(dist_chunk, axis=1)
             distances[start:stop] = dist_chunk[np.arange(stop - start), idx_chunk]
             idx[start:stop] = idx_chunk
+        if not np.isfinite(distances).all():
+            raise ValueError('Nearest-marker distances exceed the finite coordinate range.')
         return distances, idx
 
     def addColocData(self, threshold):
@@ -356,15 +492,22 @@ class Antibody(Attribute):
         return self.df
 
     def analyse_roi(self, roi, points, visualise=False):
-        x = roi['x'].squeeze()
-        y = roi['y'].squeeze()
+        from PyFLASH.utils import _real_coordinate_array
+        x = _real_coordinate_array(roi['x'].squeeze() if hasattr(roi['x'], 'squeeze') else roi['x'], label='ROI', allow_zero_imaginary=True)
+        y = _real_coordinate_array(roi['y'].squeeze() if hasattr(roi['y'], 'squeeze') else roi['y'], label='ROI', allow_zero_imaginary=True)
+        if x.ndim != 1 or y.ndim != 1 or len(x) != len(y) or len(x) < 2:
+            raise ValueError('ROI x/y coordinates must be paired one-dimensional arrays with at least two points.')
         name = roi['name']
 
         x_path, y_path, idx = trace_downward_nearest(x, y)
         x_s = moving_average(x_path, w=9)
         y_s = moving_average(y_path, w=9)
 
-        points = np.array(points)
+        points = _real_coordinate_array(points, label='Points', allow_zero_imaginary=True)
+        if points.ndim == 1 and points.size == 0:
+            points = points.reshape((0, 2))
+        if points.ndim != 2 or points.shape[1] != 2:
+            raise ValueError('Points must be a two-dimensional array with exactly two coordinates per point.')
         dists, closest_points = points_to_polyline_distance(
             points[:, 0], points[:, 1], x_s, y_s
         )
@@ -383,41 +526,71 @@ class Antibody(Attribute):
             ax.plot([points[:, 0], closest_points[:, 0]],
                     [points[:, 1], closest_points[:, 1]], c='r', lw=4, linestyle='--')
             ax.set_aspect('equal', adjustable='box')
+            from matplotlib.ticker import MaxNLocator
+            ax.xaxis.set_major_locator(MaxNLocator(nbins='auto', min_n_ticks=1))
             sns.despine(trim=False)
             save_fig(fig, self.experiment.fig_path,
                      f'Ventricle Analysis {name} {self.name}',
                      subfolder='Ventricle Analysis')
 
-        ventricle_line = np.array(list(zip(x_s, y_s)))
+        ventricle_line = np.column_stack((x_s, y_s)).astype(float)
         return dists, closest_points, ventricle_line
 
     def find_distance_to_ventricle(self, rois):
-        rois = self.experiment.data['ROIs'].df
-        all_distances = []
-        for s in self.df['Region'].unique():
-            SCN_df = self.df[self.df['Region'] == s]
-            roi_df = rois[rois['Region'] == s]
-            if SCN_df.empty or SCN_df[f'{self.name}_ZM'].iloc[0] == 0 or roi_df.empty:
-                dists = np.full(SCN_df.shape[0], np.inf)
-            elif roi_df.isna()['x'].any():
-                dists = np.full(
-                    SCN_df.shape[0],
-                    convert_microns_to_pixels(1024, pixel_size=Config.PIXEL_SIZE)
-                    - SCN_df[f'{self.name}_RawXM']
-                )
+        """Attach per-row ventricle distances in micrometres.
+
+        ROI coordinates are pixels; marker RawXM/RawYM are micrometres.
+        Missing/nonfinite marker coordinates or zero depth remain undefined.
+        """
+        from PyFLASH.utils import convert_pixels_to_microns
+        if rois is None:
+            rois = self.experiment.data['ROIs'].df
+        rois = self._spatial_frame(rois)
+        frame = self._spatial_frame(self.df)
+        group_cols = ['Region'] + [column for column in self._shared_spatial_columns(frame, rois) if column != 'Region']
+        groups = self._group_row_positions(frame, group_cols)
+        roi_groups = self._group_row_positions(rois, group_cols)
+        distance_out = np.full(len(self.df), np.inf, dtype=float)
+        source_scales = self._source_coordinate_scales(frame)
+        for key, positions in groups.items():
+            roi_positions = roi_groups.get(key)
+            if roi_positions is None or roi_positions.size == 0:
+                continue
+            coordinates, valid = self._spatial_coordinate_data(frame.iloc[positions])
+            if not valid.any():
+                continue
+            roi_df = rois.iloc[roi_positions]
+            if source_scales is not None:
+                scales = source_scales[positions][valid]
+                points = coordinates[valid, :2]
+                if roi_df['x'].isna().any():
+                    distances = 1024 * scales[:, 0] - points[:, 0]
+                else:
+                    # Preserve the declared pixel-space tracing/smoothing path,
+                    # then measure each row against its physically scaled line.
+                    _, _, line = self.analyse_roi(roi_df, np.empty((0, 2)), visualise=False)
+                    distances = np.asarray([
+                        points_to_polyline_distance([point[0]], [point[1]],
+                            line[:, 0] * scale[0], line[:, 1] * scale[1])[0][0]
+                        for point, scale in zip(points, scales, strict=True)
+                    ])
+                distance_out[positions[valid]] = distances
+                continue
+            points = np.column_stack((
+                convert_microns_to_pixels(coordinates[valid, 0]),
+                convert_microns_to_pixels(coordinates[valid, 1]),
+            ))
+            if roi_df['x'].isna().any():
+                # Historical fallback: horizontal distance to the 1024-pixel
+                # right image edge. Keep the subtraction in pixel units.
+                distances = 1024 - points[:, 0]
             else:
-                points = np.array(list(zip(
-                    convert_microns_to_pixels(SCN_df[f'{self.name}_RawXM']),
-                    convert_microns_to_pixels(SCN_df[f'{self.name}_RawYM']),
-                )))
-                dists, _, _ = self.analyse_roi(roi_df, points, visualise=False)
-            all_distances.extend(dists)
-        self.df[f'{self.name}_DistToVentricle'] = convert_microns_to_pixels(
-            np.array(all_distances), pixel_size=Config.PIXEL_SIZE
-        )
+                distances, _, _ = self.analyse_roi(roi_df, points, visualise=False)
+            distance_out[positions[valid]] = convert_pixels_to_microns(distances)
+        self.df[f'{self.name}_DistToVentricle'] = distance_out
 
     def find_closest_distances_between_markers(self, other_marker):
-        threshold = Config.THRESHOLD
+        threshold = getattr(self, 'threshold', Config.THRESHOLD)
         other_df = other_marker.df
         self_frame = self._spatial_frame(self.df)
         other_frame = self._spatial_frame(other_df)
@@ -430,13 +603,6 @@ class Antibody(Attribute):
         closest_flag_out = np.zeros(other_df.shape[0], dtype=float)
         coloc_count_out = np.zeros(other_df.shape[0], dtype=float)
         closest_count_out = np.zeros(other_df.shape[0], dtype=float)
-
-        self_coord_cols = [f'{self.name}_RawXM', f'{self.name}_RawYM', f'{self.name}_ZM']
-        other_coord_cols = [
-            f'{other_marker.name}_RawXM',
-            f'{other_marker.name}_RawYM',
-            f'{other_marker.name}_ZM',
-        ]
 
         for key in all_keys:
             self_pos = self_groups.get(key, np.empty(0, dtype=int))
@@ -452,14 +618,8 @@ class Antibody(Attribute):
             coloc_count_arr = np.zeros(other_pos.shape[0], dtype=float)
             closest_count_arr = np.zeros(other_pos.shape[0], dtype=float)
 
-            self_coords = self_group[self_coord_cols].to_numpy(dtype=float, copy=False)
-            other_coords = other_group[other_coord_cols].to_numpy(dtype=float, copy=False)
-            self_valid = np.isfinite(self_coords).all(axis=1) & (
-                self_group[f'{self.name}_ZM'].to_numpy(dtype=float, copy=False) != 0
-            )
-            other_valid = np.isfinite(other_coords).all(axis=1) & (
-                other_group[f'{other_marker.name}_ZM'].to_numpy(dtype=float, copy=False) != 0
-            )
+            self_coords, self_valid = self._spatial_coordinate_data(self_group)
+            other_coords, other_valid = other_marker._spatial_coordinate_data(other_group)
 
             if self_valid.any() and other_valid.any():
                 valid_self_coords = self_coords[self_valid]

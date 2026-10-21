@@ -1,0 +1,4 @@
+[runner]
+# Python's automatic garbage collector remains enabled. Avoid a forced full
+# collection after each script and linked-view fragment.
+postScriptGC = false

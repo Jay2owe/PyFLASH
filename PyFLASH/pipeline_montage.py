@@ -407,7 +407,10 @@ def montage_pipeline(*, title=None, filename=None,
                 pass
 
             if not (save_on and montage_on):
-                return func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                from PyFLASH.pipeline_io import finalize_run_record
+                finalize_run_record(result)
+                return result
 
             # Resolve once per run so build + reuse-lookup agree on the name and a
             # user's Config.MONTAGE_FILENAME override is picked up at call time.
@@ -427,6 +430,7 @@ def montage_pipeline(*, title=None, filename=None,
                         if path:
                             result["montage"] = path
                     except Exception as exc:  # never break a successful run
+                        result['montage_error'] = str(exc)
                         _log.warn(f"[montage] {base_title}: montage build failed: {exc}")
                 else:
                     # A reused run (if_exists='skip') doesn't rebuild — point it at
@@ -434,6 +438,11 @@ def montage_pipeline(*, title=None, filename=None,
                     existing = _existing_montage(result, resolved_filename)
                     if existing:
                         result["montage"] = existing
+            # A montage updates the shared figure-provenance file as well as
+            # writing its own image. Authenticate the final files, not the
+            # intermediate state recorded before that outer save completed.
+            from PyFLASH.pipeline_io import finalize_run_record
+            finalize_run_record(result)
             return result
 
         wrapper.__montage_pipeline__ = True

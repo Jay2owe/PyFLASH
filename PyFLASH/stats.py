@@ -3,30 +3,49 @@ Statistical testing and plot annotation utilities.
 """
 
 from __future__ import annotations
+import re
 
 import csv
 import math
 import os
 import unicodedata
 import warnings
+from copy import deepcopy
+from collections.abc import Mapping
 from typing import Iterable
 
 from PyFLASH._logging import logger as _log
 
+# Numeric helpers do not need to import every plotting and model engine.
+# Cache actual objects so external access and monkeypatches retain ownership.
+_DEFERRED_IMPORTS = {'sp': ('scikit_posthocs', None), 'sns': ('seaborn', None), 'sm': ('statsmodels.api', None), 'ols': ('statsmodels.formula.api', 'ols'), 'plt': ('matplotlib.pyplot', None), 'Rectangle': ('matplotlib.patches', 'Rectangle')}
+
+def _dependency(name):
+    if name in {'plt', 'Rectangle', 'sns'}:
+        apply_matplotlib_fast_path()
+    if name in globals():
+        return globals()[name]
+    from importlib import import_module
+    module_name, attribute = _DEFERRED_IMPORTS[name]
+    value = import_module(module_name)
+    if attribute is not None:
+        value = getattr(value, attribute)
+    globals()[name] = value
+    return value
+
+def __getattr__(name):
+    if name in _DEFERRED_IMPORTS:
+        return _dependency(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 import numpy as np
 import pandas as pd
-import scikit_posthocs as sp
-import seaborn as sns
-import statsmodels.api as sm
-from matplotlib import pyplot as plt
-from matplotlib.patches import Rectangle
 from scipy import stats
 from scipy.stats import anderson, f_oneway, kstest, normaltest, ttest_ind_from_stats
-from statsmodels.formula.api import ols
 import itertools
 
 from PyFLASH.config import apply_matplotlib_fast_path
-apply_matplotlib_fast_path()
 from PyFLASH.aesthetics import (
     apply_pyflash_figure_geometry,
     get_pyflash_style,
@@ -43,10 +62,38 @@ except ImportError:  # pragma: no cover
 from PyFLASH.utils import save_fig, strip_name
 
 # ── Stats result cache ──────────────────────────────────────────────
-# Keyed on (column_name, frozenset(condition_names), specificity_tuple).
+# Keyed on caller identity, with measured inputs and settings verified on reuse.
 # Populated by multipleComparisons when Config.STATS_CACHE is True.
 # Call clear_stats_cache() between independent analysis runs.
-_stats_cache: dict = {}
+from PyFLASH._cache import BoundedCache
+_stats_cache = BoundedCache()
+
+
+def _cache_key_value(value):
+    """Detach nested settings into immutable, type-aware cache identities."""
+    if isinstance(value, np.random.Generator):
+        engine = value.bit_generator
+        return ('numpy.random.Generator', type(engine).__module__,
+                type(engine).__qualname__, _cache_key_value(engine.state))
+    if isinstance(value, np.random.RandomState):
+        return ('numpy.random.RandomState', _cache_key_value(value.get_state()))
+    if isinstance(value, dict):
+        return ('mapping', tuple(sorted(
+            ((_cache_key_value(key), _cache_key_value(item)) for key, item in value.items()),
+            key=repr)))
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_cache_key_value(item) for item in value))
+    if isinstance(value, (set, frozenset)):
+        return (type(value).__name__, frozenset(_cache_key_value(item) for item in value))
+    if isinstance(value, np.ndarray):
+        return ('array', value.dtype.str, value.shape,
+                tuple(_cache_key_value(item) for item in value.flat))
+    if isinstance(value, np.generic):
+        return _cache_key_value(value.item())
+    if isinstance(value, float):
+        return ('float', value.hex())
+    hash(value)
+    return (type(value).__module__, type(value).__qualname__, value)
 
 
 def stats_cache_key(column_name, condition_names, specificity, stats_options=None):
@@ -61,12 +108,18 @@ def stats_cache_key(column_name, condition_names, specificity, stats_options=Non
     """
     from PyFLASH.config import Config
 
-    conds = frozenset(condition_names) if condition_names else frozenset()
-    spec = tuple(specificity) if specificity else ()
-    opts = tuple(sorted((stats_options or {}).items()))
+    conds = tuple(condition_names) if condition_names is not None else ()
+    if specificity is None or (isinstance(specificity, (list, tuple, Mapping)) and not specificity):
+        specificity = ()
+    spec = _cache_key_value(specificity)
+    opts = _cache_key_value(stats_options if stats_options is not None else {})
     session = (str(getattr(Config, "POSTHOC_CORRECTION", "auto")),
-               str(getattr(Config, "CORRECTION_AUDIT", "cheap")))
-    return (str(column_name), conds, spec, opts, session)
+               str(getattr(Config, "CORRECTION_AUDIT", "cheap")),
+               bool(Config.EFFECT_SIZES), bool(Config.EFFECT_CI),
+               int(Config.EFFECT_CI_RESAMPLES), _cache_key_value(Config.EFFECT_CI_RANDOM_STATE))
+    annotation_style = _cache_key_value({key: get_pyflash_style(key) for key in
+                                        ('significance_thresholds', 'significance_ns')})
+    return (str(column_name), conds, spec, opts, session, annotation_style)
 
 
 def clear_stats_cache():
@@ -80,62 +133,100 @@ def get_annotation(p, ns="ns"):
 
 
 def _is_nonsignificant_annotation(annot):
-    try:
-        ns = get_pyflash_style("significance_ns")
-    except Exception:
-        ns = "ns"
-    return annot == ns or annot == "ns" or isinstance(annot, (float, int))
+    from numbers import Real
+    try:ns=get_pyflash_style('significance_ns')
+    except Exception:ns='ns'
+    return annot==ns or annot=='ns' or isinstance(annot,Real)
 
 
 def extract_p_and_stats_from_results(result_object, comparisons):
+    """Extract ordered pair cells from matching square result matrices.
+
+    Comparison tokens use one-based group numbers such as ``'1-2'``. Zero,
+    negative or out-of-range numbers are errors, never NumPy wraparound.
+    """
+    probability = np.asarray(result_object.pvalue)
+    statistic = np.asarray(result_object.statistic)
+    if (probability.ndim != 2 or probability.shape[0] != probability.shape[1]
+            or statistic.shape != probability.shape):
+        raise ValueError('Pair results must be matching square statistic and p-value matrices.')
     pvalues = []
     statistics = []
-    for comp in comparisons:
-        first, second = [int(part) - 1 for part in comp.split("-")]
-        pvalues.append(float(result_object.pvalue[first, second]))
-        statistics.append(float(result_object.statistic[first, second]))
+    from PyFLASH._comparison_tokens import parse_pairs
+    for _,first,second in parse_pairs(comparisons,probability.shape[0]):
+        pvalues.append(float(probability[first,second]))
+        statistics.append(float(statistic[first,second]))
     return statistics, pvalues
 
 
-def results_to_excel(results_dict, other, experiment_save_path, save_name,
-                     verbose=True, output_dir=None):
-    """Write the stats results dict and the summary strings to one CSV.
+def _report_cells(label, value, *, statistic=False):
+    from collections.abc import Sequence
+    if statistic:
+        if not isinstance(value, (list, tuple, np.ndarray)) or (isinstance(value, np.ndarray) and value.ndim != 1) or len(value) != 2:
+            raise ValueError('Each exported statistic needs its statistic and probability fields')
+        first, second = value
+        prefix = [label, first]
+    else:
+        prefix = [label]
+        second = value
+    if isinstance(second, (list, tuple, np.ndarray)):
+        if np.ndim(second) != 1:
+            raise ValueError('Exported probabilities and summary lists must have one dimension')
+        return prefix + list(second)
+    return prefix + [second]
 
-    ``results_dict`` is an open namespace, so keys beginning with an underscore
-    are reserved for plumbing passed between stages of the analysis (raw group
-    sizes, rank vectors, the correction audit object) and are never written as
-    result rows.
-    """
-    out_dir = output_dir or experiment_save_path
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{save_name}.csv")
-    with open(out_path, "w", newline="", encoding="utf-8") as file:
-        writer = csv.writer(file)
-        writer.writerow(["Statistics Results"])
-        writer.writerow(["Test", "Statistic", "P-Values"])
-        for test_name, values in results_dict.items():
-            if str(test_name).startswith("_"):
-                continue        # internal plumbing, not a result row
-            if len(values) > 1 and isinstance(values[1], list):
-                row = [test_name, values[0], *values[1]]
-            else:
-                row = [test_name, values[0], values[1]]
-            writer.writerow(row)
-        writer.writerow([""])
-        writer.writerow(["Analysis Summary"])
-        for key, value in other.items():
-            row = [key, *value] if isinstance(value, list) else [key, value]
-            writer.writerow(row)
+def results_to_excel(results_dict, other, experiment_save_path, save_name, verbose=True, output_dir=None):
+    """Write complete ordered statistics and summary cells atomically to CSV. Private result keys are omitted; each public statistic has two fields."""
+    from pathlib import Path
+    from PyFLASH._persistence import atomic_text
+    rows = [['Statistics Results'], ['Test', 'Statistic', 'P-Values']]
+    for label, value in results_dict.items():
+        if not str(label).startswith('_'):
+            rows.append(_report_cells(label, value, statistic=True))
+    rows += [[''], ['Analysis Summary']]
+    for label, value in other.items():
+        rows.append(_report_cells(label, value))
+    target = Path(output_dir or experiment_save_path) / (str(save_name) + '.csv')
+    with atomic_text(target, newline='') as stream:
+        csv.writer(stream).writerows(rows)
     if verbose:
-        _log.confirm(f"Stats results saved to {out_path}")
+        _log.confirm(f'Stats results saved to {target}')
 
 
-def bonferroni_correction(p_value, n_tests):
-    return min(float(p_value) * int(n_tests), 1.0)
+def _scalar_probability_count(p_value,n_tests):
+    """A finite scalar probability and a nonnegative whole comparison count."""
+    try:
+        probability=np.asarray(p_value,dtype=object)
+        count=np.asarray(n_tests,dtype=object)
+        if probability.ndim or count.ndim:raise ValueError('Probability and comparison count must be scalars.')
+        probability=probability.item();raw_count=count.item()
+        if isinstance(probability,(bool,np.bool_)) or isinstance(raw_count,(bool,np.bool_)):
+            raise ValueError('Probability and comparison count cannot be booleans.')
+        probability=float(probability);count=int(raw_count)
+        if not math.isfinite(probability) or not 0<=probability<=1:
+            raise ValueError('Probability must be finite and between zero and one.')
+        if count<0 or (not isinstance(raw_count,str) and raw_count!=count):
+            raise ValueError('Comparison count must be a nonnegative whole number.')
+        return probability,count
+    except (ValueError,TypeError,OverflowError) as error:
+        raise ValueError('Provide a finite scalar probability and a nonnegative whole comparison count.') from error
+
+def bonferroni_correction(p_value,n_tests):
+    from fractions import Fraction
+
+    probability,count=_scalar_probability_count(p_value,n_tests)
+    return float(min(Fraction(probability)*count,Fraction(1)))
 
 
-def sidak_correction(p_value, n_tests):
-    return 1 - (1 - float(p_value)) ** int(n_tests)
+def sidak_correction(p_value,n_tests):
+    from fractions import Fraction
+    from PyFLASH._numeric_scaling import _rational_float
+
+    probability,count=_scalar_probability_count(p_value,n_tests)
+    if not count or not probability:return 0.
+    if probability==1:return 1.
+    exponent=_rational_float(Fraction(count)*Fraction(math.log1p(-probability)))
+    return -math.expm1(exponent)
 
 
 # ── Correlation-difference inference (independent groups) ────────────────
@@ -253,16 +344,50 @@ def zou_correlation_difference_ci(r1, n1, r2, n2, method="pearson", alpha=0.05):
 def cauchy_combination_test(pvalues):
     """Cauchy combination test (ACAT): combine p-values into one omnibus p-value.
 
-    Valid under arbitrary dependence among the individual tests, so it is the
-    right tool for combining several correlated measures. Returns NaN when no
-    finite p-value is supplied.
+    Uses the published Cauchy tail approximation for dependent individual
+    tests with equal weights. Returns NaN when no finite p-value is supplied.
+    Finite inputs retain the historical clipping at 1e-15 and 1-1e-15.
+    Computation respects their exact floating values, including near-cancelling
+    opposing tails; clipping endpoints are not exact binary complements.
     """
     ps = [float(p) for p in pvalues if p is not None and np.isfinite(p)]
     if not ps:
         return float("nan")
     ps = np.clip(np.asarray(ps, dtype=float), 1e-15, 1.0 - 1e-15)
-    t = float(np.mean(np.tan((0.5 - ps) * np.pi)))
-    return float(0.5 - math.atan(t) / math.pi)
+    # Cotangent avoids subtracting p from 0.5 near a singularity. fsum keeps
+    # ordinary cancellation stable; an exceptional opposing-tail case needs
+    # additional digits before summing, rather than a looser answer tolerance.
+    terms = [(-1.0 if p > .5 else 1.0) /
+             math.tan(math.pi * (1.0-p if p > .5 else p)) for p in ps]
+    total = math.fsum(terms)
+    scale = math.fsum(abs(value) for value in terms)
+    if scale > 1e6 and abs(total) < scale*1e-5:
+        from decimal import Decimal, localcontext
+        with localcontext() as context:
+            context.prec = 70
+            pi = Decimal('3.141592653589793238462643383279502884197169399375105820974944592307816')
+            precise = []
+            for p, ordinary in zip(ps, terms):
+                exact = Decimal.from_float(float(p))
+                negative = exact > Decimal('.5')
+                distance = 1-exact if negative else exact
+                if distance < Decimal('0.0001'):
+                    x = pi*distance
+                    # Cotangent series at the pole, retaining terms through
+                    # x**9; the omitted term is below 1e-39 in this branch.
+                    cot = 1/x-x/3-x**3/45-2*x**5/945-x**7/4725-2*x**9/93555
+                    precise.append(-cot if negative else cot)
+                else:
+                    precise.append(Decimal.from_float(ordinary))
+            t = float(sum(precise)/len(ps))
+    else:
+        t = total/len(ps)
+    # A survival probability formed as 0.5-atan(t)/pi loses small tails.
+    if t > 0:
+        return math.atan(1.0/t)/math.pi
+    if t < 0:
+        return 1.0-math.atan(-1.0/t)/math.pi
+    return 0.5
 
 
 def _design_from_covariates(cov_df, n_rows):
@@ -287,138 +412,173 @@ def _design_from_covariates(cov_df, n_rows):
 
 def interaction_slope_difference(x, y, group, *, reference=None, covariates=None,
                                  tail="two", standardize=False, rank=False):
-    """P-value that the ``y ~ x`` slope differs between two independent groups.
+    """Compare two group slopes with pooled least-squares residual variance.
 
-    Fits ``y ~ x + g + x:g`` (plus any covariates as additive terms) by least
-    squares over the two groups combined, where ``g`` is an indicator for the
-    non-reference group, and tests the ``x:g`` interaction coefficient with a
-    t-test. This is the regression counterpart to
-    :func:`fisher_z_correlation_difference`: that one compares *correlations*
-    (scale-free, estimated within each group), this one compares *slopes* (in
-    y-per-x units, pooling the residual variance across both groups). The two
-    can disagree when the groups differ in spread.
-
-    Parameters
-    ----------
-    x, y : array-like
-        Predictor and outcome, same length.
-    group : array-like
-        Group labels, same length as ``x``. Exactly two distinct non-missing
-        levels must remain after dropping incomplete rows.
-    reference : hashable | None
-        Level treated as the baseline. Defaults to the first level encountered.
-        The reported estimate is ``slope(other) - slope(reference)``.
-    covariates : pandas.DataFrame | None
-        Optional additive adjustment columns. Numeric columns are used as-is,
-        categorical ones are one-hot encoded. Unlike the partial-correlation
-        path, these enter the model rather than residualising the inputs.
-    tail : {'two', 'less', 'greater', 'one'}
-        Alternative hypothesis about the slope difference. See
-        :func:`fisher_z_correlation_difference`.
-    standardize : bool
-        Z-score ``x`` and ``y`` over the combined sample first, so the estimate
-        is a standardized slope difference.
-    rank : bool
-        Rank-transform ``x`` and ``y`` over the combined sample first, giving a
-        Spearman-flavoured (monotonic) version of the test.
-
-    Returns
-    -------
-    dict
-        ``{'p', 'estimate', 'se', 't', 'df', 'n', 'reference', 'other',
-        'slope_reference', 'slope_other'}``. Numeric entries are NaN when the
-        model cannot be fitted (too few rows, singular design, no variance).
+    Return p, estimate, se, t, df, n, reference, other and both fitted slopes.
+    Numeric and categorical additive covariates are supported. Rows with missing
+    group labels or nonfinite numeric observations/covariates are omitted together.
+    rank and standardize transform the retained paired sample. Singular/saturated
+    designs have undefined fitted fields. Identified exact fits retain coefficients
+    and zero uncertainty, with signed-infinite/undefined Student-test limits.
+    Column normalization keeps finite measurement-unit changes numerically stable.
     """
-    nan = float("nan")
-    empty = {"p": nan, "estimate": nan, "se": nan, "t": nan, "df": 0, "n": 0,
-             "reference": None, "other": None,
-             "slope_reference": nan, "slope_other": nan}
-
-    frame = pd.DataFrame({"x": pd.to_numeric(pd.Series(x).reset_index(drop=True), errors="coerce"),
-                          "y": pd.to_numeric(pd.Series(y).reset_index(drop=True), errors="coerce"),
-                          "g": pd.Series(group).reset_index(drop=True)})
-    cov = None
-    if covariates is not None:
-        cov = pd.DataFrame(covariates).reset_index(drop=True)
-        if len(cov) != len(frame):
-            raise ValueError("interaction_slope_difference: covariates length must match x/y.")
-        frame = pd.concat([frame, cov.add_prefix("cov_")], axis=1)
-    frame = frame.dropna()
-    if frame.empty:
-        return empty
-
-    levels = list(dict.fromkeys(frame["g"].astype(object)))
-    if len(levels) != 2:
-        raise ValueError(
-            "interaction_slope_difference: need exactly two groups after dropping "
-            f"missing rows; got {len(levels)}."
-        )
-    ref = levels[0] if reference is None else reference
-    if ref not in levels:
-        raise ValueError(f"interaction_slope_difference: reference {reference!r} not among {levels}.")
-    other = [lv for lv in levels if lv != ref][0]
-
-    xv = frame["x"].to_numpy(dtype=float)
-    yv = frame["y"].to_numpy(dtype=float)
-    if rank:
-        xv = stats.rankdata(xv)
-        yv = stats.rankdata(yv)
-    if standardize:
-        xs, ys = np.std(xv), np.std(yv)
-        if xs > 0:
-            xv = (xv - np.mean(xv)) / xs
-        if ys > 0:
-            yv = (yv - np.mean(yv)) / ys
-    gv = (frame["g"].astype(object) != ref).to_numpy(dtype=float)
-
-    cov_cols = [c for c in frame.columns if str(c).startswith("cov_")]
-    cov_design = _design_from_covariates(frame[cov_cols] if cov_cols else None, len(frame))
-    design = np.column_stack([np.ones(len(frame)), xv, gv, xv * gv, cov_design])
-
-    n, k = design.shape
-    df_resid = n - k
-    if df_resid <= 0 or np.std(xv) == 0 or np.std(yv) == 0:
-        return {**empty, "n": int(n), "reference": ref, "other": other}
+    from fractions import Fraction
+    alternative = _resolve_tail(tail)
+    if any(not isinstance(value, (bool,np.bool_)) for value in (standardize,rank)):
+        raise ValueError("rank and standardize must be Boolean.")
+    for values in (x,y):
+        array=np.asarray(values,dtype=object)
+        if array.ndim!=1 or any(isinstance(v,(list,tuple,dict,np.ndarray)) for v in array):
+            raise ValueError("x and y must be one-dimensional ordered samples.")
     try:
-        xtx_inv = np.linalg.pinv(design.T @ design)
-        beta = xtx_inv @ design.T @ yv
-        resid = yv - design @ beta
-        sigma2 = float(resid @ resid) / df_resid
-        se = math.sqrt(max(sigma2 * float(xtx_inv[3, 3]), 0.0))
-    except (np.linalg.LinAlgError, ValueError):
-        return {**empty, "n": int(n), "reference": ref, "other": other}
-    if not np.isfinite(se) or se == 0:
-        return {**empty, "n": int(n), "reference": ref, "other": other}
-
-    t_stat = float(beta[3]) / se
-    t = _resolve_tail(tail)
-    if t == "two":
-        p = float(2.0 * stats.t.sf(abs(t_stat), df_resid))
-    elif t == "one":
-        p = float(stats.t.sf(abs(t_stat), df_resid))
-    elif t == "greater":
-        p = float(stats.t.sf(t_stat, df_resid))
+        xs=pd.Series(x).reset_index(drop=True)
+        ys=pd.Series(y).reset_index(drop=True)
+        labels=pd.Series(group).reset_index(drop=True)
+    except (ValueError,TypeError) as error:
+        raise ValueError("x, y and group must be ordered one-dimensional samples.") from error
+    if len({len(xs),len(ys),len(labels)})!=1:
+        raise ValueError("x, y and group must have the same length.")
+    xv=pd.to_numeric(xs,errors="coerce").to_numpy(dtype=float)
+    yv=pd.to_numeric(ys,errors="coerce").to_numpy(dtype=float)
+    retained=np.isfinite(xv)&np.isfinite(yv)&labels.notna().to_numpy()
+    cov=pd.DataFrame(covariates).reset_index(drop=True) if covariates is not None else pd.DataFrame(index=range(len(xs)))
+    if len(cov)!=len(xs):
+        raise ValueError("Covariates length must match x/y/group.")
+    if not cov.columns.is_unique:
+        raise ValueError("Covariate column identities must be unique.")
+    numeric={}
+    for column in cov:
+        values=cov[column];converted=pd.to_numeric(values,errors="coerce")
+        is_numeric=int(converted.notna().sum())==int(values.notna().sum())
+        numeric[column]=is_numeric
+        retained &= np.isfinite(converted.to_numpy(dtype=float)) if is_numeric else values.notna().to_numpy()
+        if is_numeric:cov[column]=converted
+    empty={"p":float("nan"),"estimate":float("nan"),"se":float("nan"),"t":float("nan"),
+           "df":0,"n":0,"reference":None,"other":None,
+           "slope_reference":float("nan"),"slope_other":float("nan")}
+    if not retained.any():return empty
+    xv,yv=xv[retained],yv[retained]
+    labels=labels[retained].reset_index(drop=True)
+    cov=cov.loc[retained].reset_index(drop=True)
+    try:levels=list(dict.fromkeys(labels.astype(object)))
+    except TypeError as error:raise ValueError("Group identities must be hashable.") from error
+    if len(levels)!=2:raise ValueError("Exactly two groups must remain after paired finite omission.")
+    ref=levels[0] if reference is None else reference
+    if ref not in levels:raise ValueError("Reference is absent from retained groups.")
+    other=next(level for level in levels if level!=ref)
+    n=len(xv);incomplete={**empty,"n":n,"reference":ref,"other":other}
+    if rank:xv,yv=stats.rankdata(xv),stats.rankdata(yv)
+    raw_x,raw_y=xv.copy(),yv.copy()
+    def center_scale(values):
+        largest=float(np.max(np.abs(values)))
+        exponent=int(np.frexp(largest)[1]) if largest else 0
+        normalized=np.ldexp(values,-exponent)
+        normalized=normalized-normalized[0]
+        return normalized-normalized.mean(),exponent
+    xv,xe=center_scale(xv);yv,ye=center_scale(yv)
+    xsd,ysd=np.std(xv),np.std(yv)
+    if xsd==0 or ysd==0:return incomplete
+    # Always solve with balanced column units; the public option controls
+    # returned units rather than whether the solver is well conditioned.
+    xv/=xsd;yv/=ysd
+    indicator=np.asarray([label!=ref for label in labels],dtype=float)
+    normalized_parts=[];raw_parts=[]
+    for column in cov:
+        if numeric[column]:
+            values=cov[column].to_numpy(dtype=float)
+            raw_parts.append(values)
+            normalized=center_scale(values)[0]
+            spread=np.std(normalized)
+            normalized_parts.append(normalized/spread if spread else normalized)
+        else:
+            dummies=pd.get_dummies(cov[column].astype(object),drop_first=True,dtype=float)
+            for name in dummies:
+                values=dummies[name].to_numpy(dtype=float)
+                raw_parts.append(values);normalized_parts.append(values)
+    design=np.column_stack([np.ones(n),xv,indicator,xv*indicator,*normalized_parts])
+    k=design.shape[1]
+    if n<=k:return incomplete
+    beta,_,identified,_=np.linalg.lstsq(design,yv,rcond=None)
+    if identified<k:return incomplete
+    residual=yv-design@beta
+    exact_difference=None;exact_fit=False
+    error_bound=16*np.finfo(float).eps*(np.linalg.norm(design)*np.linalg.norm(beta)+np.linalg.norm(yv))
+    if np.linalg.norm(residual)<=error_bound:
+        # Check exact representable input equations; the error bound selects
+        # this check and never itself declares a fit exact.
+        rational=[[Fraction(1),Fraction(float(raw_x[i])),Fraction(int(indicator[i])),
+                   Fraction(float(raw_x[i]))*int(indicator[i]),
+                   *[Fraction(float(part[i])) for part in raw_parts],Fraction(float(raw_y[i]))]
+                  for i in range(n)]
+        pivot_row=0
+        for column in range(k):
+            pivot=next((i for i in range(pivot_row,n) if rational[i][column]),None)
+            if pivot is None:break
+            rational[pivot_row],rational[pivot]=rational[pivot],rational[pivot_row]
+            factor=rational[pivot_row][column]
+            rational[pivot_row]=[value/factor for value in rational[pivot_row]]
+            for i in range(n):
+                if i==pivot_row:continue
+                factor=rational[i][column]
+                if factor:rational[i]=[v-factor*u for v,u in zip(rational[i],rational[pivot_row])]
+            pivot_row+=1
+        exact_fit=pivot_row==k and all(not row[-1] for row in rational[k:])
+        if exact_fit:exact_difference=rational[3][-1]
+    if exact_fit:
+        se=0.;statistic=math.copysign(math.inf,float(exact_difference)) if exact_difference else float("nan")
+        estimate=float(beta[3]) if exact_difference else 0.
     else:
-        p = float(stats.t.cdf(t_stat, df_resid))
+        _,upper=np.linalg.qr(design,mode="reduced")
+        inverse=np.linalg.solve(upper,np.eye(k))
+        variance=float(residual@residual)/(n-k)
+        se=math.sqrt(variance*float(inverse[3]@inverse[3]))
+        estimate=float(beta[3]);statistic=estimate/se if se>0 else math.copysign(math.inf,estimate) if estimate else float("nan")
+    if alternative=="two":p=float(2*stats.t.sf(abs(statistic),n-k))
+    elif alternative=="one":p=float(stats.t.sf(abs(statistic),n-k))
+    elif alternative=="greater":p=float(stats.t.sf(statistic,n-k))
+    else:p=float(stats.t.cdf(statistic,n-k))
+    def original_units(value):
+        if standardize:return float(value)
+        try:return math.ldexp(float(value)*(ysd/xsd),ye-xe)
+        except OverflowError:return math.copysign(math.inf,value)
+    return {"p":p,"estimate":original_units(estimate),"se":original_units(se),"t":float(statistic),
+            "df":n-k,"n":n,"reference":ref,"other":other,
+            "slope_reference":original_units(beta[1]),"slope_other":original_units(beta[1]+beta[3])}
 
-    return {"p": p, "estimate": float(beta[3]), "se": float(se), "t": t_stat,
-            "df": int(df_resid), "n": int(n), "reference": ref, "other": other,
-            "slope_reference": float(beta[1]),
-            "slope_other": float(beta[1] + beta[3])}
 
 
 def modified_anderson(data):
-    ad_stat, _, _ = anderson(data)
-    ad_stat = ad_stat * (1 + (0.75 / 50) + 2.25 / (50**2))
-    if ad_stat >= 0.6:
-        p = math.exp(1.2937 - 5.709 * ad_stat - 0.0186 * (ad_stat**2))
+    """Adjusted Anderson-Darling statistic and calibrated normality probability.
+
+    The normal distribution's mean/SD are fitted. Nonfinite/non-numeric
+    observations are omitted. The finite-sample adjustment uses the retained
+    sample size. Fewer than three varying observations are undefined; below
+    eight the statistic is retained but the published probability is undefined.
+    Adjusted statistics at least ten use nortest's published 3.7e-24 reporting
+    limit, rather than extrapolating its calibrated approximation.
+    """
+    if np.asarray(data, dtype=object).ndim != 1:
+        raise ValueError("Normality data must be one-dimensional.")
+    arr = pd.to_numeric(pd.Series(data), errors="coerce").to_numpy(dtype=float)
+    arr = arr[np.isfinite(arr)]
+    n = len(arr)
+    if n < 3 or np.ptp(arr) == 0:
+        return float("nan"), float("nan")
+    ad_stat = float(anderson(_normality_balance(arr)).statistic) * (1 + 0.75/n + 2.25/n**2)
+    if n < 8:
+        return ad_stat, float("nan")
+    if ad_stat >= 10:
+        p = 3.7e-24
+    elif ad_stat >= 0.6:
+        p = math.exp(1.2937 - 5.709*ad_stat + 0.0186*ad_stat**2)
     elif ad_stat >= 0.34:
-        p = math.exp(0.9177 - 4.279 * ad_stat - 1.38 * (ad_stat**2))
-    elif ad_stat > 0.2:
-        p = 1 - math.exp(-8.318 + 42.796 * ad_stat - 59.938 * (ad_stat**2))
+        p = math.exp(0.9177 - 4.279*ad_stat - 1.38*ad_stat**2)
+    elif ad_stat >= 0.2:
+        p = -math.expm1(-8.318 + 42.796*ad_stat - 59.938*ad_stat**2)
     else:
-        p = 1 - math.exp(-13.436 + 101.14 * ad_stat - 223.73 * (ad_stat**2))
+        p = -math.expm1(-13.436 + 101.14*ad_stat - 223.73*ad_stat**2)
     return ad_stat, p
+
 
 
 def _coerce_groups(df_list: Iterable) -> list[pd.Series]:
@@ -509,144 +669,145 @@ def _normalize_variance_test(value):
     raise ValueError(f"variance_test must be one of: {valid}")
 
 
-def test_equal_variance(df_list, results_dict=None, *, method="brown-forsythe", alpha=0.05):
-    """Run a k-group equal-variance screen used by the auto stats selector.
+def _finite_real_samples(samples):
+    """Keep every requested group in place while omitting nonfinite entries."""
+    groups=[]
+    for sample in samples:
+        try:values=np.asarray(sample)
+        except (TypeError,ValueError) as error:raise ValueError('Each sample must have one real dimension') from error
+        if values.ndim!=1 or values.dtype.kind=='c':
+            raise ValueError('Each sample must have one real dimension')
+        retained=[]
+        for value in values:
+            if isinstance(value,(list,tuple,dict,complex)):
+                raise ValueError('Each sample must have one real dimension')
+            try:number=float(value)
+            except (TypeError,ValueError,OverflowError):continue
+            if math.isfinite(number):retained.append(number)
+        groups.append(np.asarray(retained,dtype=float))
+    return groups
 
-    Brown-Forsythe (Levene with median centre) is the default because it is more
-    robust than Bartlett when the normality screen is imperfect.
-    """
-    groups = _coerce_groups(df_list)
-    results_dict = results_dict if results_dict is not None else {}
-    method_key, label = _normalize_variance_test(method)
-    out = {
-        "method": label,
-        "statistic": float("nan"),
-        "pvalue": float("nan"),
-        "equal_var": None,
-        "alpha": float(alpha),
-    }
-    if method_key == "none":
-        out["equal_var"] = True
-        results_dict["Variance check"] = [label, np.nan]
-        return out
-    if len(groups) < 2 or any(len(g) < 2 for g in groups):
-        results_dict[f"Variance {label}"] = [float("nan"), float("nan")]
-        results_dict["Equal variance"] = ["insufficient data", np.nan]
-        return out
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            if method_key == "brown_forsythe":
-                statistic, pvalue = stats.levene(*groups, center="median")
-            elif method_key == "levene":
-                statistic, pvalue = stats.levene(*groups, center="mean")
-            elif method_key == "levene_trimmed":
-                statistic, pvalue = stats.levene(*groups, center="trimmed")
-            elif method_key == "bartlett":
-                statistic, pvalue = stats.bartlett(*groups)
-            elif method_key == "fligner":
-                statistic, pvalue = stats.fligner(*groups)
-            else:  # pragma: no cover - guarded by normalizer
-                statistic, pvalue = float("nan"), float("nan")
-        out["statistic"] = float(statistic)
-        out["pvalue"] = float(pvalue)
-        out["equal_var"] = bool(np.isfinite(pvalue) and float(pvalue) >= float(alpha))
-    except Exception as exc:
-        results_dict["Variance_error"] = [str(exc), np.nan]
-    results_dict[f"Variance {label}"] = [out["statistic"], out["pvalue"]]
-    results_dict["Equal variance"] = [out["equal_var"], out["pvalue"]]
-    return out
+def _variance_request(method,alpha):
+    from numbers import Real
+    if isinstance(alpha,(bool,np.bool_)) or not isinstance(alpha,Real) or not math.isfinite(alpha) or not 0<=alpha<=1:
+        raise ValueError('Variance alpha must be a finite real probability in [0, 1]')
+    kind,label=_normalize_variance_test(method)
+    return kind,label,float(alpha)
+
+def _rational_sample_geometry(groups):
+    from fractions import Fraction
+    rational=[[Fraction(float(v)) for v in group] for group in groups]
+    def average(group):return sum(group)/len(group)
+    def median(group):
+        ordered=sorted(group);size=len(group)
+        return ordered[size//2] if size%2 else (ordered[size//2-1]+ordered[size//2])/2
+    return rational,average,median
+
+def _variance_inference(groups,kind):
+    from PyFLASH._numeric_scaling import _power_of_two_scale
+    rational,average,median=_rational_sample_geometry(groups)
+    scaled=_power_of_two_scale(*groups)
+    if kind=='fligner':
+        residuals=[[v-median(group) for v in group] for group in rational]
+        unique=sorted({abs(v) for group in residuals for v in group})
+        if len(unique)==1:return math.nan,math.nan
+        ordinal={v:i+1 for i,v in enumerate(unique) if v!=0}
+        signed=[[0 if v==0 else ordinal[abs(v)]*(1 if v>0 else -1) for v in group] for group in residuals]
+        return stats.fligner(*signed)
+    if kind=='bartlett':
+        variances=[sum((v-average(group))**2 for v in group)/(len(group)-1) for group in rational]
+        if all(v==0 for v in variances):return math.nan,math.nan
+        if any(v==0 for v in variances):return math.inf,0.
+        if len(set(variances))==1:return 0.,1.
+        return stats.bartlett(*scaled)
+    if kind=='levene_trimmed':
+        rational=[sorted(g)[len(g)//20:len(g)-len(g)//20] for g in rational]
+    centers=[median(g) if kind=='brown_forsythe' else average(g) for g in rational]
+    deviations=[[abs(v-center) for v in group] for group,center in zip(rational,centers)]
+    means=list(map(average,deviations));grand=average([v for g in deviations for v in g])
+    within=sum(sum((v-center)**2 for v in group) for group,center in zip(deviations,means))
+    between=sum(len(group)*(center-grand)**2 for group,center in zip(deviations,means))
+    if within==0:return (math.inf,0.) if between else (math.nan,math.nan)
+    if between==0:return 0.,1.
+    return stats.levene(*scaled,center={'brown_forsythe':'median','levene':'mean','levene_trimmed':'trimmed'}[kind])
+
+def test_equal_variance(df_list,results_dict=None,*,method='brown-forsythe',alpha=.05):
+    """Screen preserved finite groups; indeterminate inference stays undefined."""
+    kind,label,level=_variance_request(method,alpha)
+    groups=_finite_real_samples(df_list)
+    raw=results_dict if results_dict is not None else {}
+    output={'method':label,'statistic':math.nan,'pvalue':math.nan,'equal_var':None,'alpha':level}
+    if kind=='none':
+        output['equal_var']=True;raw['Variance check']=[label,math.nan];return output
+    if len(groups)<2 or any(len(g)<2 for g in groups):
+        raw['Variance '+label]=[math.nan,math.nan];raw['Equal variance']=['insufficient data',math.nan];return output
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        statistic,probability=_variance_inference(groups,kind)
+    output['statistic']=float(statistic);output['pvalue']=float(probability)
+    output['equal_var']=None if math.isnan(probability) else bool(probability>=level)
+    raw['Variance '+label]=[output['statistic'],output['pvalue']]
+    raw['Equal variance']=[output['equal_var'],output['pvalue']]
+    return output
 
 
 def _run_tukey(*groups):
-    if tukey_hsd is not None:
-        return tukey_hsd(*groups)
-
-    values = np.concatenate([np.asarray(g, dtype=float) for g in groups])
-    labels = np.concatenate([[i] * len(g) for i, g in enumerate(groups)])
-    result = pairwise_tukeyhsd(values, labels)
-    n = len(groups)
-    stat = np.zeros((n, n), dtype=float)
-    pval = np.ones((n, n), dtype=float)
-    idx = 0
-    for i in range(n):
-        for j in range(i + 1, n):
-            stat[i, j] = stat[j, i] = float(result.meandiffs[idx])
-            pval[i, j] = pval[j, i] = float(result.pvalues[idx])
-            idx += 1
-
-    class TukeyResult:
-        statistic = stat
-        pvalue = pval
-
-    return TukeyResult()
+    groups=_finite_real_samples(groups)
+    if len(groups)<2 or any(len(g)<2 for g in groups):raise ValueError('Tukey inference needs at least two observations in every requested group')
+    k=len(groups);tokens=[f'{a+1}-{b+1}' for a in range(k) for b in range(a+1,k)]
+    values,probabilities=_one_way_posthoc(groups,tokens,'tukey')
+    statistics=np.zeros((k,k));pvalues=np.ones((k,k))
+    if _one_way_geometry(groups)[1]==0:np.fill_diagonal(pvalues,math.nan)
+    index=0
+    for a in range(k):
+        for b in range(a+1,k):
+            statistics[a,b]=values[index];statistics[b,a]=-values[index]
+            pvalues[a,b]=pvalues[b,a]=probabilities[index];index+=1
+    return _two_way_namespace(statistic=statistics,pvalue=pvalues)
 
 
-def runITTest(
-    group1,
-    group2,
-    results_dict,
-    ns="ns",
-    *,
-    equal_var=None,
-    variance_test="brown-forsythe",
-    variance_alpha=0.05,
-):
-    g1 = pd.to_numeric(pd.Series(group1), errors="coerce").dropna()
-    g2 = pd.to_numeric(pd.Series(group2), errors="coerce").dropna()
-    n1, n2 = len(g1), len(g2)
-    if n1 < 2 or n2 < 2:
-        return [1.0], [ns], (float("nan"), 1.0), results_dict, "Independent T Test"
 
-    mean1, mean2 = g1.mean(), g2.mean()
-    var1, var2 = np.var(g1, ddof=1), np.var(g2, ddof=1)
-    std1, std2 = np.sqrt(var1), np.sqrt(var2)
+
+def runITTest(group1,group2,results_dict,ns='ns',*,equal_var=None,variance_test='brown-forsythe',variance_alpha=.05):
+    """Return complete Student/Welch reports, including undefined small samples."""
+    from PyFLASH._numeric_scaling import _power_of_two_scale
+    if equal_var is not None and not isinstance(equal_var,(bool,np.bool_)):
+        raise ValueError('equal_var must be Boolean or None for automatic selection')
+    _variance_request(variance_test,variance_alpha)
+    groups=_finite_real_samples([group1,group2]);first,second=groups;n1,n2=map(len,groups)
     if equal_var is None:
-        variance = test_equal_variance(
-            [g1, g2],
-            results_dict,
-            method=variance_test,
-            alpha=variance_alpha,
-        )
-        equal_var = variance.get("equal_var")
-    if equal_var is None:
-        # If the variance screen is indeterminate, Welch is the safer default.
-        equal_var = False
-    equal_var = bool(equal_var)
-    statistic, pvalue = ttest_ind_from_stats(
-        mean1=mean1,
-        std1=std1,
-        nobs1=n1,
-        mean2=mean2,
-        std2=std2,
-        nobs2=n2,
-        equal_var=equal_var,
-    )
-    method_label = "Student's t-test" if equal_var else "Welch's t-test"
-    method_key = "Student's T Test" if equal_var else "Welch's T Test"
-    results_dict[method_key] = [float(statistic), float(pvalue)]
-    # Legacy key kept for old report/pipeline parsers.
-    results_dict["Independent T Test"] = [float(statistic), float(pvalue)]
-    _publish_uncorrected(results_dict, [float(pvalue)], basis="raw")
-    annotation = [get_annotation(pvalue, ns)]
-    return [float(pvalue)], annotation, (float(statistic), float(pvalue)), results_dict, method_label
+        selected=test_equal_variance(groups,results_dict,method=variance_test,alpha=variance_alpha)['equal_var']
+        equal_var=bool(selected) if selected is not None else False
+    pooled=bool(equal_var)
+    statistic=probability=degrees=math.nan
+    if min(n1,n2)>=2:
+        if pooled:
+            means,mse,degrees,_,_=_one_way_geometry(groups)
+            statistic,probability=_pooled_pair_geometry(means,mse,degrees,groups,0,1)
+            degrees=float(degrees)
+        else:statistic,probability,degrees=_unequal_pair_geometry(first,second)
+    label="Student's t-test" if pooled else "Welch's t-test"
+    key="Student's T Test" if pooled else "Welch's T Test"
+    results_dict[key]=[statistic,probability]
+    results_dict['_group_test']={'symbol':'t','df':[degrees]}
+    results_dict['Independent T Test']=[statistic,probability]
+    _publish_uncorrected(results_dict,[probability],basis='raw')
+    return [probability],[get_annotation(probability,ns)],(statistic,probability),results_dict,label
 
 
-def mwu_multiple_comparisons(df_list, comparisons, results_dict, ns="ns"):
-    groups = _coerce_groups(df_list)
-    if len(groups) < 2:
-        return [], [], ([], []), results_dict, "Mann-Whitney U"
-    statistics = []
-    pvalues = []
-    for comparison in comparisons:
-        first, second = [int(part) - 1 for part in comparison.split("-")]
-        statistic, pvalue = stats.mannwhitneyu(groups[first], groups[second])
-        statistics.append(float(statistic))
-        pvalues.append(float(pvalue))
-    results_dict["Mann-Whitney U"] = [statistics, pvalues]
-    _publish_uncorrected(results_dict, pvalues, basis="raw")
-    annotations = [get_annotation(pvalue, ns) for pvalue in pvalues]
-    return pvalues, annotations, (statistics, pvalues), results_dict, "Mann-Whitney U"
+def mwu_multiple_comparisons(df_list,comparisons,results_dict,ns='ns'):
+    from PyFLASH._comparison_tokens import parse_pairs
+    groups=_finite_real_samples(df_list)
+    requested=parse_pairs(comparisons,len(groups),allow_self=False)
+    statistics=[];probabilities=[]
+    for _,first,second in requested:
+        if not len(groups[first]) or not len(groups[second]):statistic=probability=float('nan')
+        else:statistic,probability=stats.mannwhitneyu(groups[first],groups[second])
+        statistics.append(float(statistic));probabilities.append(float(probability))
+    results_dict['Mann-Whitney U']=[statistics,probabilities]
+    results_dict['_group_test']={'symbol':'U'}
+    _publish_uncorrected(results_dict,probabilities,basis='raw')
+    return probabilities,[get_annotation(p,ns) for p in probabilities],(statistics,probabilities),results_dict,'Mann-Whitney U'
 
 
 def _extract_posthoc_matrix_pvalues(matrix, comparisons):
@@ -657,37 +818,12 @@ def _extract_posthoc_matrix_pvalues(matrix, comparisons):
     return pvalues
 
 
-def _run_fisher_lsd(groups, comparisons):
-    n_groups = len(groups)
-    n_total = sum(len(g) for g in groups)
-    df_error = n_total - n_groups
-    if df_error <= 0:
-        return [float("nan")] * len(comparisons), [float("nan")] * len(comparisons)
-
-    ss_error = 0.0
-    means = []
-    ns = []
-    for group in groups:
-        arr = np.asarray(group, dtype=float)
-        means.append(float(np.mean(arr)))
-        ns.append(int(len(arr)))
-        ss_error += float(np.sum((arr - np.mean(arr)) ** 2))
-    mse = ss_error / df_error if df_error > 0 else float("nan")
-
-    statistics = []
-    pvalues = []
-    for comp in comparisons:
-        first, second = [int(part) - 1 for part in comp.split("-")]
-        se = math.sqrt(mse * ((1.0 / ns[first]) + (1.0 / ns[second]))) if mse >= 0 else float("nan")
-        if not np.isfinite(se) or se == 0:
-            statistic = float("nan")
-            pvalue = float("nan")
-        else:
-            statistic = (means[first] - means[second]) / se
-            pvalue = 2.0 * stats.t.sf(abs(statistic), df_error)
-        statistics.append(float(statistic))
-        pvalues.append(float(pvalue))
-    return statistics, pvalues
+def _run_fisher_lsd(groups,comparisons):
+    from PyFLASH._comparison_tokens import parse_pairs
+    requested=parse_pairs(comparisons,len(groups),allow_self=False)
+    means,mse,degrees,_,_=_one_way_geometry(groups)
+    pairs=[_pooled_pair_geometry(means,mse,degrees,groups,a,b) for _,a,b in requested]
+    return [row[0] for row in pairs],[row[1] for row in pairs]
 
 
 def _infer_dunnett_control(comparisons, n_groups):
@@ -710,33 +846,21 @@ def _infer_dunnett_control(comparisons, n_groups):
 
 
 def _run_dunnett(groups, comparisons):
+    """Use the complete deterministic control report with legacy pair ordering."""
+    from PyFLASH.stats_extra import dunnett_vs_control
     control_idx = _infer_dunnett_control(comparisons, len(groups))
-    sample_indices = [idx for idx in range(len(groups)) if idx != control_idx]
-    if not sample_indices:
-        return [float("nan")] * len(comparisons), [float("nan")] * len(comparisons)
-
-    result = stats.dunnett(
-        *[groups[idx] for idx in sample_indices],
-        control=groups[control_idx],
-        random_state=0,
-    )
-    stat_by_group = {
-        idx: float(result.statistic[pos])
-        for pos, idx in enumerate(sample_indices)
-    }
-    p_by_group = {
-        idx: float(result.pvalue[pos])
-        for pos, idx in enumerate(sample_indices)
-    }
-
-    statistics = []
-    pvalues = []
-    for comp in comparisons:
-        first, second = [int(part) - 1 for part in comp.split("-")]
-        other = second if first == control_idx else first if second == control_idx else None
-        statistics.append(stat_by_group.get(other, float("nan")))
-        pvalues.append(p_by_group.get(other, float("nan")))
+    result = dunnett_vs_control(groups, control=control_idx)
+    indices = [i for i in range(len(groups)) if i != control_idx]
+    stats_by_group = dict(zip(indices, result.statistic))
+    p_by_group = dict(zip(indices, result.p_value))
+    statistics, pvalues = [], []
+    from PyFLASH._comparison_tokens import parse_pairs
+    for _, first, second in parse_pairs(comparisons, len(groups)):
+        other = second if first == control_idx else first
+        statistics.append(float(stats_by_group[other]))
+        pvalues.append(float(p_by_group[other]))
     return statistics, pvalues
+
 
 
 def _normalize_owa_posthoc(posthoc):
@@ -785,28 +909,28 @@ def _normalize_lsd_correction(posthoc_correction, n_tests):
 def runOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tukey", posthoc_correction="auto"):
     from PyFLASH.config import Config
 
-    groups = _coerce_groups(df_list)
+    from PyFLASH._comparison_tokens import parse_pairs
+    groups = _finite_real_samples(df_list)
+    requested = parse_pairs(comparisons,len(groups),allow_self=False)
+    _normalize_lsd_correction(posthoc_correction,len(comparisons))
     posthoc_method, posthoc_label, embedded_correction = _normalize_owa_posthoc(posthoc)
+    if posthoc_method == 'dunnett':_infer_dunnett_control(comparisons,len(groups))
     if len(groups) < 2 or any(len(g) <= 1 for g in groups):
         return [], [], (float("nan"), float("nan")), results_dict, posthoc_label
-    f_stat, pvalue = f_oneway(*groups)
+    _, _, _, f_stat, pvalue = _one_way_geometry(groups)
     results_dict["OWA"] = [float(f_stat), float(pvalue)]
+    results_dict["_group_test"] = {
+        "symbol": "F", "df": [len(groups) - 1, sum(len(g) for g in groups) - len(groups)],
+    }
     # Tukey, Dunnett, Scheffe and Tamhane all carry their own multiplicity
     # handling inside the statistic, so what they return is already adjusted;
     # only Fisher LSD hands back raw p-values.
     raw_pvalues = None
     try:
-        if posthoc_method == "tukey":
-            tukey_result = _run_tukey(*groups)
-            statistics, pvalues = extract_p_and_stats_from_results(tukey_result, comparisons)
-        elif posthoc_method == "dunnett":
-            statistics, pvalues = _run_dunnett(groups, comparisons)
-        elif posthoc_method == "scheffe":
-            pvalues = _extract_posthoc_matrix_pvalues(sp.posthoc_scheffe(groups), comparisons)
-            statistics = [1] * len(pvalues)
-        elif posthoc_method == "tamhane":
-            pvalues = _extract_posthoc_matrix_pvalues(sp.posthoc_tamhane(groups), comparisons)
-            statistics = [1] * len(pvalues)
+        if posthoc_method in {'tukey','scheffe','tamhane'}:
+            statistics,pvalues = _one_way_posthoc(groups,comparisons,posthoc_method)
+        elif posthoc_method == 'dunnett':
+            statistics,pvalues = _run_dunnett(groups,comparisons)
         else:
             statistics, pvalues = _run_fisher_lsd(groups, comparisons)
             raw_pvalues = [float(p) for p in pvalues]
@@ -824,10 +948,14 @@ def runOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tukey", posthoc
             if embedded_correction is None:
                 method, correction = _normalize_lsd_correction(posthoc_correction, len(comparisons))
             else:
-                method, correction = embedded_correction, None
+                method = embedded_correction
+                correction = posthoc_label
             wy = None
             if method == "westfall_young":
                 try:
+                    identities = [tuple(sorted((first,second))) for _,first,second in requested]
+                    if Config.CORRECTION_AUDIT is not False and len(set(identities)) != len(identities):
+                        raise CorrectionUnavailable('reported comparisons do not match the null design')
                     wy = _westfall_young_from_inputs(
                         results_dict, raw_pvalues, "lsd", Config)
                 except CorrectionUnavailable as exc:
@@ -838,8 +966,10 @@ def runOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tukey", posthoc
             if correction is not None:
                 correction = applied
                 _record_applied_correction(results_dict, correction)
-                if correction != "Uncorrected":
-                    posthoc_label = f"Fisher LSD {correction}"
+                if embedded_correction is not None and method == embedded_correction:
+                    posthoc_label = correction
+                else:
+                    posthoc_label = 'Fisher LSD' + (f' {correction}' if correction != 'Uncorrected' else '')
     except ValueError:
         if posthoc_method == "tukey":
             return [], [], (float(f_stat), float(pvalue)), results_dict, posthoc_label
@@ -851,12 +981,8 @@ def runOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tukey", posthoc
             results_dict, pvalues, basis="self_adjusted",
             family="value_unsupported",
             reason=(
-                f"{posthoc_label} p-values cannot be reproduced cheaply under "
-                "permutation - the studentised range and the multivariate t "
-                "each need a numerical integral per draw - so no permutation "
-                "null is available. Both already account for comparisons that "
-                "share a group; Fisher LSD is the ANOVA post-hoc that supports "
-                "Westfall-Young."
+                f"{posthoc_label} already accounts for multiplicity; no permutation "
+                "null is implemented for this method."
             ),
         )
     annotations = [get_annotation(p, ns) for p in pvalues]
@@ -874,81 +1000,44 @@ def _normalize_welch_owa_posthoc(posthoc):
     raise ValueError(f"posthoc for Welch ANOVA must be one of: {valid}")
 
 
-def _run_games_howell(groups, comparisons):
-    statistics = []
-    pvalues = []
-    k = len(groups)
-    for comp in comparisons:
-        first, second = [int(part) - 1 for part in comp.split("-")]
-        a = pd.to_numeric(pd.Series(groups[first]), errors="coerce").dropna().astype(float)
-        b = pd.to_numeric(pd.Series(groups[second]), errors="coerce").dropna().astype(float)
-        if len(a) < 2 or len(b) < 2:
-            statistics.append(float("nan"))
-            pvalues.append(float("nan"))
-            continue
-        mean_diff = float(a.mean() - b.mean())
-        va = float(a.var(ddof=1))
-        vb = float(b.var(ddof=1))
-        na = float(len(a))
-        nb = float(len(b))
-        se2 = va / na + vb / nb
-        if not np.isfinite(se2) or se2 <= 0:
-            statistics.append(float("nan"))
-            pvalues.append(float("nan"))
-            continue
-        denom = ((va / na) ** 2 / (na - 1.0)) + ((vb / nb) ** 2 / (nb - 1.0))
-        df = (se2 ** 2 / denom) if denom > 0 else np.inf
-        q_stat = abs(mean_diff) / math.sqrt(0.5 * se2)
-        try:
-            pvalue = float(stats.studentized_range.sf(q_stat, k, df))
-        except Exception:
-            pvalue = float("nan")
-        statistics.append(float(q_stat))
-        pvalues.append(pvalue)
-    return statistics, pvalues
-
-
-def runWelchOWA(df_list, comparisons, results_dict, ns="ns", posthoc="Tamhane T2"):
-    groups = _coerce_groups(df_list)
-    posthoc_method, posthoc_label = _normalize_welch_owa_posthoc(posthoc)
-    if len(groups) < 2 or any(len(g) <= 1 for g in groups):
-        return [], [], (float("nan"), float("nan")), results_dict, posthoc_label
-    try:
-        from statsmodels.stats.oneway import anova_oneway
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            result = anova_oneway(groups, use_var="unequal", welch_correction=True)
-        f_stat = float(result.statistic)
-        pvalue = float(result.pvalue)
-    except Exception as exc:
-        results_dict["Welch_ANOVA_error"] = [str(exc), np.nan]
-        return [], [], (float("nan"), float("nan")), results_dict, posthoc_label
-    results_dict["Welch ANOVA"] = [f_stat, pvalue]
-    try:
-        if posthoc_method == "games_howell":
-            statistics, pvalues = _run_games_howell(groups, comparisons)
+def _run_games_howell(groups,comparisons):
+    from PyFLASH._numeric_scaling import _rational_float,_rational_sqrt,_f_tail_ratio,_t_tail_squared
+    from PyFLASH._comparison_tokens import parse_pairs
+    from PyFLASH._studentized_range import range_tail,range_tail_squared
+    groups=_finite_real_samples(groups);requested=parse_pairs(comparisons,len(groups),allow_self=False)
+    statistics=[];probabilities=[]
+    for _,first,second in requested:
+        if len(groups[first])<2 or len(groups[second])<2:q=probability=math.nan
         else:
-            pvalues = _extract_posthoc_matrix_pvalues(sp.posthoc_tamhane(groups), comparisons)
-            statistics = [1] * len(pvalues)
-    except Exception as exc:
-        results_dict["Welch_posthoc_error"] = [str(exc), np.nan]
-        return [], [], (f_stat, pvalue), results_dict, f"{posthoc_label} (error: {exc})"
-    results_dict[posthoc_label.replace(" ", "-")] = [statistics, pvalues]
-    # Games-Howell and Tamhane T2 both carry their own correction.
-    _publish_uncorrected(
-        results_dict, pvalues, basis="self_adjusted",
-        family="unequal_variance",
-        reason=(
-            "Permuting values across groups imposes equal variance, which is "
-            "the assumption Welch ANOVA is chosen to avoid, so a permutation "
-            "null here would be wrong rather than approximate. Games-Howell "
-            "and Tamhane T2 carry their own correction; a studentised "
-            "bootstrap would be needed for a calibrated alternative."
-        ),
-    )
-    annotations = [get_annotation(p, ns) for p in pvalues]
-    return pvalues, annotations, (f_stat, pvalue), results_dict, posthoc_label
+            statistic,_,degrees=_unequal_pair_geometry(groups[first],groups[second]);q=abs(statistic)*math.sqrt(2)
+            rational,average,_=_rational_sample_geometry([groups[first],groups[second]])
+            a,b=rational;ma,mb=average(a),average(b)
+            va=sum((v-ma)**2 for v in a)/(len(a)-1);vb=sum((v-mb)**2 for v in b)/(len(b)-1)
+            uncertainty=va/len(a)+vb/len(b)
+            probability=range_tail_squared(2*(ma-mb)**2/uncertainty,len(groups),degrees) if uncertainty else range_tail(q,len(groups),degrees)
+        statistics.append(q);probabilities.append(probability)
+    return statistics,probabilities
+
+
+def runWelchOWA(df_list,comparisons,results_dict,ns='ns',posthoc='Tamhane T2'):
+    from PyFLASH._comparison_tokens import parse_pairs
+    groups=_finite_real_samples(df_list);kind,label=_normalize_welch_owa_posthoc(posthoc)
+    parse_pairs(comparisons,len(groups),allow_self=False)
+    if len(groups)<2 or any(len(group)<2 for group in groups):
+        return [],[],(math.nan,math.nan),results_dict,label
+    statistic,probability,first_df,second_df=_welch_one_way_geometry(groups)
+    results_dict['Welch ANOVA']=[statistic,probability]
+    results_dict['_group_test']={'symbol':'F','df':[first_df,second_df]}
+    if kind=='games_howell':statistics,probabilities=_run_games_howell(groups,comparisons)
+    else:statistics,probabilities=_one_way_posthoc(groups,comparisons,'tamhane')
+    results_dict[label.replace(' ','-')]=[statistics,probabilities]
+    _publish_uncorrected(results_dict,probabilities,basis='self_adjusted',family='unequal_variance',
+        reason=('Permuting values across groups imposes equal variance, which is '
+            'the assumption Welch ANOVA is chosen to avoid, so a permutation '
+            'null here would be wrong rather than approximate. Games-Howell '
+            'and Tamhane T2 carry their own correction; a studentised '
+            'bootstrap would be needed for a calibrated alternative.'))
+    return probabilities,[get_annotation(p,ns) for p in probabilities],(statistic,probability),results_dict,label
 
 
 def _normalize_kw_posthoc(posthoc):
@@ -1091,142 +1180,169 @@ def _apply_kw_correction(pvalues, method, wy=None):
             raise CorrectionUnavailable(_NO_NULL_MESSAGE)
         return [float(p) for p in wy]
     if method == "bonferroni":
-        return [bonferroni_correction(p, len(values)) for p in values]
+        return [math.nan if math.isnan(p) else bonferroni_correction(p, len(values)) for p in values]
     if method == "sidak":
-        return [sidak_correction(p, len(values)) for p in values]
+        return [math.nan if math.isnan(p) else sidak_correction(p, len(values)) for p in values]
 
     from PyFLASH.stats_extra import adjust_pvalues
     _, adjusted = adjust_pvalues(values, method=method)
     return [float(p) for p in adjusted]
 
 
-def runKW(df_list, comparisons, results_dict, posthoc="Conover", ns="ns", posthoc_correction="auto"):
-    from PyFLASH.config import Config
+from PyFLASH._cache import bounded_lru_cache as _rank_lru_cache
 
-    groups = _coerce_groups(df_list)
-    posthoc = _normalize_kw_posthoc(posthoc)
-    if len(groups) < 2:
-        return [], [], (float("nan"), float("nan")), results_dict, posthoc
-    try:
-        kw_statistic, kw_pvalue = stats.kruskal(*groups)
-    except ValueError as e:
-        msg = str(e)
-        results_dict["KW_error"] = [msg, np.nan]
-        return [], [], (float("nan"), float("nan")), results_dict, f"{posthoc} (error: {msg})"
-    results_dict["KW"] = [float(kw_statistic), float(kw_pvalue)]
-    n_tests = len(comparisons)
+def _rank_strength(means,sizes,variance,total_ss,kind):
+    from fractions import Fraction
+    n=sum(sizes);k=len(sizes)
+    residual=total_ss-sum(size*(mean-Fraction(n+1,2))**2 for size,mean in zip(sizes,means))
+    scale=variance if kind=='dunn' else residual/(n-k)
+    values=[]
+    for i in range(k):
+        for j in range(i+1,k):
+            delta=means[i]-means[j];denominator=scale*(Fraction(1,sizes[i])+Fraction(1,sizes[j]))
+            values.append(delta**2/denominator if denominator else (math.inf if delta else Fraction()))
+    return values
 
-    if posthoc in {"Nemenyi", "DSCF"}:
-        try:
-            matrix = sp.posthoc_nemenyi(groups) if posthoc == "Nemenyi" else sp.posthoc_dscf(groups)
-            pvalues = _extract_posthoc_matrix_pvalues(matrix, comparisons)
-        except Exception as e:
-            msg = str(e)
-            results_dict["Posthoc_error"] = [msg, np.nan]
-            return [], [], (float(kw_statistic), float(kw_pvalue)), results_dict, f"{posthoc} (error: {msg})"
-        results_dict[posthoc] = [1, pvalues]
-        # The studentised range already accounts for the family, so these are
-        # self-adjusted rather than raw.
-        _publish_uncorrected(
-            results_dict, pvalues, basis="self_adjusted",
-            family="rank_unsupported",
-            reason=(
-                f"{posthoc} p-values cannot be reproduced from the pooled mean "
-                "ranks - Nemenyi comes from a clipped studentised-range "
-                "approximation and DSCF re-ranks within each pair - so no "
-                "permutation null is available. Dunn and Conover support it."
-            ),
-        )
-        annotations = [get_annotation(result, ns) for result in pvalues]
-        return pvalues, annotations, (float(kw_statistic), float(kw_pvalue)), results_dict, posthoc
 
-    correction_method, correction = _normalize_kw_correction(posthoc_correction, n_tests)
+@_rank_lru_cache(maxsize=4)
+def _exact_rank_null_strengths(sizes,ranked,count,exact,kind):
+    from fractions import Fraction
+    from PyFLASH import stats_extra
+    means,mode,_=stats_extra._mean_rank_null_cached(sizes,tuple(sorted(ranked)),count,exact,0)
+    n=sum(sizes);total_ss=sum((Fraction(value)-Fraction(n+1,2))**2 for value in ranked)
+    variance=total_ss/(n-1)
+    rows=[]
+    for row in means:
+        # Midrank sums are half integers. With the parent's n<=200 guard,
+        # addition is exact; reconstruct sums before divided means are rounded.
+        rational=[Fraction(int(round(2*mean*size)),2*size) for mean,size in zip(row,sizes)]
+        rows.append(_rank_strength(rational,sizes,variance,total_ss,kind))
+    return rows,mode
 
-    try:
-        dunn_df = sp.posthoc_dunn(groups)
-        conover_df = sp.posthoc_conover(groups)
-    except Exception as e:
-        msg = str(e)
-        results_dict["Posthoc_error"] = [msg, np.nan]
-        return [], [], (float(kw_statistic), float(kw_pvalue)), results_dict, f"{posthoc} (error: {msg})"
-    dunn_uncorrected = []
-    conover_uncorrected = []
 
-    for comp in comparisons:
-        first, second = [int(part) - 1 for part in comp.split("-")]
-        dunn_p = float(dunn_df.iloc[first, second])
-        conover_p = float(conover_df.iloc[first, second])
-        dunn_uncorrected.append(dunn_p)
-        conover_uncorrected.append(conover_p)
+def _rank_westfall_young(results_dict,pvalues,kind,Config,design,requested):
+    from fractions import Fraction
+    inputs=dict(results_dict['_audit_inputs']);plan,reason=_permutation_plan(inputs,len(pvalues),Config,explicit_wy=True)
+    if plan is None:
+        if Config.CORRECTION_AUDIT is False:reason='Config.CORRECTION_AUDIT is off, so no permutation null was computed'
+        elif not pvalues:reason='no comparisons were requested, so there is nothing to correct'
+        elif reason is None:reason='a single comparison is not a family, so there is nothing to correct'
+        raise CorrectionUnavailable(reason or _NO_NULL_MESSAGE)
+    selected=[tuple(sorted((first,second))) for _,first,second in requested]
+    if len(set(selected))!=len(selected):raise CorrectionUnavailable('reported comparisons do not match the null design')
+    plan['statistic']=kind
+    _build_null(plan)  # Shared validated enumeration and configuration.
+    sizes=tuple(inputs['group_sizes']);ranked=tuple(inputs['ranks']);n=sum(sizes)
+    total_ss=sum((Fraction(value)-Fraction(n+1,2))**2 for value in ranked)
+    allpairs=[(a,b) for a in range(len(sizes)) for b in range(a+1,len(sizes))]
+    observed=_rank_strength(design[2],sizes,total_ss/(n-1),total_ss,kind)
+    indices=[allpairs.index(pair) for pair in selected]
+    strengths=[observed[index] for index in indices]
+    retained=sorted((i for i,p in enumerate(pvalues) if math.isfinite(p)),key=lambda i:strengths[i],reverse=True)
+    output=[math.nan]*len(pvalues)
+    if not retained:return output
+    rows,mode=_exact_rank_null_strengths(sizes,ranked,plan['n_resamples'],plan['exact_max'],kind)
+    previous=Fraction()
+    for step,index in enumerate(retained):
+        columns=[indices[i] for i in retained[step:]];threshold=strengths[index]
+        events=sum(any(row[column]>=threshold for column in columns) for row in rows)
+        adjusted=Fraction(events+(mode=='sampled'),len(rows)+(mode=='sampled'))
+        previous=max(previous,adjusted);output[index]=float(previous)
+    return output
 
-    # Everything the correction audit needs. Published rather than consumed
-    # here so the audit stays in one place for every test path. rankdata gives
-    # mid-ranks, which is exactly the cache key: untied data always ranks 1..N
-    # and the entry is shared across the whole batch, while a tied column gets
-    # its own entry. Pooling order and group_sizes order must agree, or the
-    # tied case is silently wrong.
-    pooled = np.concatenate([np.asarray(g, float) for g in groups])
-    _publish_uncorrected(
-        results_dict,
-        conover_uncorrected if posthoc == "Conover" else dunn_uncorrected,
-        basis="raw",
-        family="rank",
-        statistic="conover" if posthoc == "Conover" else "dunn",
-        group_sizes=tuple(len(g) for g in groups),
-        ranks=tuple(float(r) for r in stats.rankdata(pooled)),
-        pairs=tuple(
-            tuple(int(part) - 1 for part in comp.split("-"))
-            for comp in comparisons
-        ),
-    )
 
-    dunn_bonferroni = _apply_kw_correction(dunn_uncorrected, "bonferroni")
-    conover_bonferroni = _apply_kw_correction(conover_uncorrected, "bonferroni")
+def _rank_design(groups):
+    """Exact midrank geometry retains tie limits and one-observation groups."""
+    from fractions import Fraction
+    pooled=np.concatenate(groups);ranked=stats.rankdata(pooled)
+    sizes=tuple(map(len,groups));n=len(pooled);k=len(groups)
+    sums=[];start=0
+    for size in sizes:
+        sums.append(Fraction(float(np.sum(ranked[start:start+size]))));start+=size
+    means=[total/size for total,size in zip(sums,sizes)]
+    counts=np.unique(pooled,return_counts=True)[1]
+    ties=sum(int(count)**3-int(count) for count in counts)
+    tie=1-Fraction(ties,n**3-n)
+    variance=Fraction(n*(n+1),12)-Fraction(ties,12*(n-1))
+    h=(Fraction(12,n*(n+1))*sum(total**2/size for total,size in zip(sums,sizes))-3*(n+1))/tie if tie else None
+    statistic=float(h) if h is not None else math.nan
+    probability=float(stats.chi2.sf(statistic,k-1))
+    return statistic,probability,means,variance,h,tuple(float(v) for v in ranked)
 
-    results_dict["Conover-Bonferroni"] = [1, conover_bonferroni]
-    results_dict["Conover-Uncorrected"] = [1, conover_uncorrected]
-    results_dict["Dunn-Bonferroni"] = [1, dunn_bonferroni]
-    results_dict["Dunn-Uncorrected"] = [1, dunn_uncorrected]
 
-    conover_by_correction = {
-        "Bonferroni": conover_bonferroni,
-        "Uncorrected": conover_uncorrected,
-    }
-    dunn_by_correction = {
-        "Bonferroni": dunn_bonferroni,
-        "Uncorrected": dunn_uncorrected,
-    }
-    if correction not in conover_by_correction:
-        if correction_method == "westfall_young":
-            # Each statistic needs its own null - Conover and Dunn do not share
-            # a denominator - but both derive from the one cached mean-rank
-            # matrix, so this is a closed-form transform, not a second
-            # enumeration.
-            try:
-                conover_wy = _westfall_young_from_inputs(
-                    results_dict, conover_uncorrected, "conover", Config)
-                dunn_wy = _westfall_young_from_inputs(
-                    results_dict, dunn_uncorrected, "dunn", Config)
-            except CorrectionUnavailable as exc:
-                results_dict["Correction-Unavailable"] = [str(exc), np.nan]
-                correction_method, correction = _normalize_kw_correction(
-                    "auto", n_tests)
+def _rank_pair_arrays(groups,requested,kind,design):
+    from fractions import Fraction
+    from PyFLASH._numeric_scaling import _rational_sqrt,_t_tail_squared
+    from PyFLASH._studentized_range import range_tail_squared
+    _,_,means,variance,h,_=design;k=len(groups);n=sum(map(len,groups))
+    statistics=[];probabilities=[]
+    for _,first,second in requested:
+        delta=means[first]-means[second]
+        denominator=variance*(Fraction(1,len(groups[first]))+Fraction(1,len(groups[second])))
+        if kind=='DSCF':
+            a,b=groups[first],groups[second];ni,nj=len(a),len(b);size=ni+nj
+            pair=np.concatenate((a,b));ranked=stats.rankdata(pair)
+            u=Fraction(float(np.sum(ranked[:ni])))-Fraction(ni*(ni+1),2)
+            counts=np.unique(pair,return_counts=True)[1];ties=sum(int(c)**3-int(c) for c in counts)
+            denominator=Fraction(ni*nj,size*(size-1))*Fraction(size**3-size-ties,12)
+            if denominator:
+                squared=2*(u-Fraction(ni*nj,2))**2/denominator
+                statistic=_rational_sqrt(squared);probability=range_tail_squared(squared,k,math.inf)
+            else:statistic=probability=math.nan
+        else:
+            if kind=='Conover':
+                denominator=denominator*(n-1-h)/(n-k) if h is not None and n>k else None
+            if denominator is None or not denominator:
+                if denominator==0 and delta and kind=='Conover':statistic=math.copysign(math.inf,float(delta));probability=0.
+                else:statistic=probability=math.nan
             else:
-                conover_by_correction[correction] = conover_wy
-                dunn_by_correction[correction] = dunn_wy
-        if correction not in conover_by_correction:
-            conover_by_correction[correction] = _apply_kw_correction(conover_uncorrected, correction_method)
-            dunn_by_correction[correction] = _apply_kw_correction(dunn_uncorrected, correction_method)
-        results_dict[f"Conover-{correction}"] = [1, conover_by_correction[correction]]
-        results_dict[f"Dunn-{correction}"] = [1, dunn_by_correction[correction]]
+                squared=delta**2/denominator
+                if kind=='Nemenyi':statistic=float(squared);probability=float(stats.chi2.sf(statistic,k-1))
+                elif kind=='Dunn':statistic=_rational_sqrt(squared);probability=math.erfc(statistic/math.sqrt(2))
+                else:statistic=math.copysign(_rational_sqrt(squared),float(delta));probability=_t_tail_squared(squared,n-k)
+        statistics.append(statistic);probabilities.append(probability)
+    return statistics,probabilities
 
-    conover = conover_by_correction[correction]
-    dunn = dunn_by_correction[correction]
-    _record_applied_correction(results_dict, correction)
-    posthoc_result = conover if posthoc == "Conover" else dunn
-    posthoc_string = f"{posthoc} {correction}"
-    annotations = [get_annotation(result, ns) for result in posthoc_result]
-    return posthoc_result, annotations, (float(kw_statistic), float(kw_pvalue)), results_dict, posthoc_string
+
+def runKW(df_list,comparisons,results_dict,posthoc='Conover',ns='ns',posthoc_correction='auto'):
+    from PyFLASH.config import Config
+    from PyFLASH._comparison_tokens import parse_pairs
+    groups=_finite_real_samples(df_list)
+    if posthoc is not None and not isinstance(posthoc,str):raise ValueError('A named rank method is required')
+    posthoc=_normalize_kw_posthoc(posthoc)
+    requested=parse_pairs(comparisons,len(groups),allow_self=False)
+    correction_method,correction=_normalize_kw_correction(posthoc_correction,len(requested))
+    if len(groups)<2 or any(not len(group) for group in groups):
+        return [],[],(math.nan,math.nan),results_dict,posthoc
+    design=_rank_design(groups);statistic,probability=design[:2]
+    results_dict['KW']=[statistic,probability];results_dict['_group_test']={'symbol':'H','df':[len(groups)-1]}
+    if posthoc in {'Nemenyi','DSCF'}:
+        statistics,pvalues=_rank_pair_arrays(groups,requested,posthoc,design)
+        results_dict[posthoc]=[statistics,pvalues]
+        _publish_uncorrected(results_dict,pvalues,basis='self_adjusted',family='rank_unsupported',
+            reason=('Nemenyi uses a tie-corrected chi-square approximation; no permutation null is implemented for this method.' if posthoc=='Nemenyi' else 'DSCF re-ranks each pair and uses the Gaussian studentised-range distribution; no permutation null is implemented for this method.'))
+        return pvalues,[get_annotation(p,ns) for p in pvalues],(statistic,probability),results_dict,posthoc
+    arrays={name:_rank_pair_arrays(groups,requested,name,design) for name in ('Dunn','Conover')}
+    _publish_uncorrected(results_dict,arrays[posthoc][1],basis='raw',family='rank',statistic=posthoc.lower(),
+        group_sizes=tuple(map(len,groups)),ranks=design[-1],pairs=tuple((first,second) for _,first,second in requested))
+    corrected={}
+    if correction_method=='westfall_young':
+        try:
+            for name in ('Conover','Dunn'):
+                corrected[name]=_rank_westfall_young(results_dict,arrays[name][1],name.lower(),Config,design,requested)
+        except CorrectionUnavailable as error:
+            results_dict['Correction-Unavailable']=[str(error),math.nan]
+            correction_method,correction=_normalize_kw_correction('auto',len(requested));corrected={}
+    for name in ('Conover','Dunn'):
+        statistics,pvalues=arrays[name]
+        results_dict[name+'-Bonferroni']=[statistics,_apply_kw_correction(pvalues,'bonferroni')]
+        results_dict[name+'-Uncorrected']=[statistics,pvalues]
+        if name not in corrected:corrected[name]=_apply_kw_correction(pvalues,correction_method)
+        if correction not in ('Bonferroni','Uncorrected'):results_dict[name+'-'+correction]=[statistics,corrected[name]]
+    _record_applied_correction(results_dict,correction)
+    pvalues=corrected[posthoc]
+    return pvalues,[get_annotation(p,ns) for p in pvalues],(statistic,probability),results_dict,posthoc+' '+correction
+
 
 
 def _as_list(value):
@@ -1266,6 +1382,96 @@ def _linear_model_covariate_frame(df, covariates, categorical_covariates):
     return out, terms, reference_values, raw_to_internal
 
 
+def _linear_model_prepare(model_df,outcome_col,group_col,comparisons,results_dict,
+                          covariates,categorical_covariates,posthoc_correction,
+                          cov_type,cov_kwds,group_order):
+    from collections.abc import MutableMapping
+    from PyFLASH._comparison_tokens import parse_pairs
+
+    if model_df is None:raise ValueError('Linear-model stats need model_df from the plotting wrapper.')
+    if not isinstance(results_dict,MutableMapping):raise ValueError('results_dict must be a mutable mapping.')
+    original_index=pd.DataFrame(model_df).index.copy()
+    df=pd.DataFrame(model_df).copy().reset_index(drop=True)
+    for name in (outcome_col,group_col):
+        if name not in df.columns:raise ValueError(f'Linear-model column {name!r} was not found.')
+    covariates=_as_list(covariates);categorical=_as_list(categorical_covariates)
+    if len(set(covariates))!=len(covariates) or not set(categorical)<=set(covariates):
+        raise ValueError('Covariates must be unique; categorical covariates must be declared covariates.')
+    for name in covariates:
+        if name not in df.columns:raise ValueError(f'Linear-model covariate {name!r} was not found.')
+    order=(df[group_col].dropna().astype(str).unique().tolist() if group_order is None else [str(g) for g in group_order])
+    if len(set(order))!=len(order):raise ValueError('Group order must contain distinct labels.')
+    requested=parse_pairs(comparisons,len(order),allow_self=False)
+    _normalize_kw_correction(posthoc_correction,len(requested))
+    if cov_type is not None and not isinstance(cov_type,str):raise ValueError('A named covariance type is required.')
+    kind=(cov_type or 'nonrobust').lower()
+    if kind not in ('nonrobust','hc0','hc1','hc2','hc3','fixed scale','fixed_scale','hac','cluster','hac-panel','hac-groupsum'):
+        raise ValueError('Unknown covariance type.')
+    if cov_kwds is not None and not isinstance(cov_kwds,Mapping):raise ValueError('Covariance options must be a mapping.')
+    kw=deepcopy(dict(cov_kwds or {}))
+    if kind in ('hc0','hc1','hc2','hc3') and set(kw)-{'use_t'}:
+        raise ValueError('Heteroscedasticity robust covariance does not use additional keywords.')
+    if kw.get('use_t') is not None and not isinstance(kw['use_t'],(bool,np.bool_)):
+        raise ValueError('use_t must be a boolean or None.')
+    keep=df[group_col].notna() & df[group_col].astype(str).isin(order)
+    for name in (outcome_col,*[c for c in covariates if c not in categorical]):
+        values=pd.to_numeric(df[name],errors='coerce');df[name]=values
+        keep &= values.notna() & np.isfinite(values)
+    for name in categorical:keep &= df[name].notna()
+    indices=np.flatnonzero(keep.to_numpy(dtype=bool,na_value=False))
+    for key in ('groups','time'):
+        if key in kw:
+            values=np.asarray(kw[key])
+            if values.ndim not in ((1,2) if key=='groups' and kind=='cluster' else (1,)):
+                raise ValueError(f'{key} has an invalid shape.')
+            if values.ndim==2 and values.shape[1]!=2:raise ValueError('Cluster covariance accepts at most two grouping columns.')
+            if len(values)==len(df):kw[key]=values[indices]
+            elif len(values)==len(indices):kw[key]=values.copy()
+            else:raise ValueError(f'{key} must match original or retained rows.')
+    df=df.loc[keep].reset_index(drop=True)
+    df.attrs['_pyflash_observation_ids']=list(original_index[indices])
+    return df,order,covariates,categorical,kw,requested
+
+def _linear_model_refine_small_error(fitted,cov_type,cov_kwds):
+    """Retain real small or zero residuals before constructing model covariance."""
+    from fractions import Fraction
+    actual=fitted._results
+    outcome=np.asarray(actual.model.endog,float);residual=np.asarray(actual.resid,float)
+    scale=max(float(np.max(np.abs(outcome))),np.finfo(float).tiny)
+    if float(np.max(np.abs(residual))) > 32*np.sqrt(np.finfo(float).eps)*scale:
+        return fitted
+    design=np.asarray(actual.model.exog,float);n,p=design.shape
+    normal=[[Fraction() for _ in range(p)] for _ in range(p)];rhs=[Fraction() for _ in range(p)]
+    for row,value in zip(design,outcome):
+        q=[Fraction(float(x)) for x in row];y=Fraction(float(value))
+        for i in range(p):
+            rhs[i]+=q[i]*y
+            for j in range(p):normal[i][j]+=q[i]*q[j]
+    augmented=[normal[i]+[rhs[i]]+[Fraction(i==j) for j in range(p)] for i in range(p)]
+    for column in range(p):
+        pivot=max(range(column,p),key=lambda i:abs(augmented[i][column]))
+        augmented[column],augmented[pivot]=augmented[pivot],augmented[column]
+        divisor=augmented[column][column]
+        if not divisor:raise ValueError('The declared model design is not identifiable.')
+        augmented[column]=[v/divisor for v in augmented[column]]
+        for i in range(p):
+            if i!=column:
+                factor=augmented[i][column]
+                augmented[i]=[a-factor*b for a,b in zip(augmented[i],augmented[column])]
+    beta=[row[p] for row in augmented]
+    exact_residual=[Fraction(float(y))-sum((Fraction(float(x))*b for x,b in zip(row,beta)),Fraction()) for row,y in zip(design,outcome)]
+    actual.params=np.asarray([float(b) for b in beta])
+    actual.normalized_cov_params=np.asarray([[float(v) for v in row[p+1:]] for row in augmented])
+    actual._cache.clear()
+    actual._cache['resid']=np.asarray([float(e) for e in exact_residual])
+    actual._cache['wresid']=actual._cache['resid']
+    actual.scale=float(sum((e*e for e in exact_residual),Fraction())/(n-p))
+    kind=(cov_type or 'nonrobust').lower()
+    if kind!='nonrobust':
+        kwargs=deepcopy(cov_kwds or {});kwargs.pop('use_t',None)
+        actual.get_robustcov_results(cov_type=cov_type,use_t=actual.use_t,use_self=True,**kwargs)
+    return fitted
+
 def runLinearModel(
     model_df,
     outcome_col,
@@ -1282,16 +1488,10 @@ def runLinearModel(
     group_order=None,
 ):
     """Group effect from an OLS model, with pairwise adjusted group contrasts."""
-    if model_df is None:
-        raise ValueError("Linear-model stats need model_df from the plotting wrapper.")
-    if outcome_col not in model_df.columns:
-        raise ValueError(f"Linear-model outcome column {outcome_col!r} was not found.")
-    if group_col not in model_df.columns:
-        raise ValueError(f"Linear-model group column {group_col!r} was not found.")
-
-    df = pd.DataFrame(model_df).copy()
-    order = [str(g) for g in (group_order or df[group_col].dropna().astype(str).unique().tolist())]
-    if len(order) < 2:
+    df, order, covariates, categorical_covariates, cov_kwds, requested = _linear_model_prepare(
+        model_df, outcome_col, group_col, comparisons, results_dict, covariates,
+        categorical_covariates, posthoc_correction, cov_type, cov_kwds, group_order)
+    if len(order) < 2 or any(sum(df[group_col].astype(str) == group) < 2 for group in order):
         return [], [], (float("nan"), float("nan")), results_dict, "model contrasts"
 
     model_data = pd.DataFrame({
@@ -1319,7 +1519,12 @@ def runLinearModel(
             fit_kwargs["cov_kwds"] = dict(cov_kwds)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        fitted = ols(formula, data=model_data).fit(**fit_kwargs)
+        model = _dependency('ols')(formula, data=model_data)
+        design = np.asarray(model.exog, dtype=float)
+        if np.linalg.matrix_rank(design) < design.shape[1] or len(design) <= design.shape[1]:
+            raise ValueError("The declared model needs an identifiable design and residual degrees of freedom.")
+        fitted = model.fit(**fit_kwargs)
+        fitted = _linear_model_refine_small_error(fitted, cov_type, cov_kwds)
 
     params = list(fitted.params.index)
     group_terms = [name for name in params if name.startswith("C(__group__)")]
@@ -1333,6 +1538,12 @@ def runLinearModel(
             wald = fitted.wald_test(contrast, scalar=True)
             overall_stat = float(np.asarray(wald.statistic).squeeze())
             overall_p = float(np.asarray(wald.pvalue).squeeze())
+            is_f = str(getattr(wald, "distribution", "")).lower() == "f"
+            results_dict["_group_test"] = {
+                "symbol": "F" if is_f else "chi2",
+                "df": ([float(wald.df_num), float(wald.df_denom)] if is_f
+                       else [float(wald.df_denom)]),
+            }
         except Exception as exc:
             results_dict["Linear_Model_overall_error"] = [str(exc), np.nan]
     results_dict["Linear Model"] = [overall_stat, overall_p]
@@ -1379,8 +1590,9 @@ def runLinearModel(
             continue
         se = math.sqrt(variance)
         t_stat = estimate / se
-        df_resid = float(getattr(fitted, "df_resid", np.nan))
-        pvalue = 2.0 * stats.t.sf(abs(t_stat), df_resid) if np.isfinite(df_resid) else 2.0 * stats.norm.sf(abs(t_stat))
+        df_resid = float(getattr(fitted, "df_resid_inference", fitted.df_resid))
+        pvalue = (2.0 * stats.t.sf(abs(t_stat), df_resid) if fitted.use_t
+                  else 2.0 * stats.norm.sf(abs(t_stat)))
         statistics.append(float(t_stat))
         raw_pvalues.append(float(pvalue))
 
@@ -1398,96 +1610,234 @@ def runLinearModel(
     return pvalues, annotations, (overall_stat, overall_p), results_dict, posthoc_string
 
 
-def runTWA(experiment, column, factors=None, comparisons=None, results_dict=None, ns="ns"):
-    exp_df = experiment.summary
-    factors = factors or experiment.condition_list.factor
-    comparisons = comparisons or ["1-2", "2-3", "1-3"]
-    results_dict = results_dict or {}
-    if len(factors) < 2:
-        raise ValueError("Two-way ANOVA requires at least two factors.")
+from fractions import Fraction as _two_way_fraction
+from collections.abc import MutableMapping as _two_way_mutable_mapping
+from types import SimpleNamespace as _two_way_namespace
 
-    model = ols(
-        f"{column} ~ C({factors[0]}) + C({factors[1]}) + C({factors[0]}):C({factors[1]})",
-        data=exp_df,
-    ).fit()
-    anova_results = sm.stats.anova_lm(model, typ=2)
-    for index, row in anova_results.iterrows():
-        key = f"2WA {index.strip('C()')}"
-        results_dict[key] = [float(row["sum_sq"]), float(row["PR(>F)"])]
+def _two_way_prepare(experiment,column,factors,comparisons):
+    from PyFLASH._comparison_tokens import parse_pairs
+    try:frame=pd.DataFrame(experiment.summary).copy();conditions=experiment.condition_list
+    except (AttributeError,ValueError,TypeError) as error:raise ValueError('Two-way analysis needs a summary and ordered conditions') from error
+    names=[getattr(condition,'name',None) for condition in conditions]
+    if any(not isinstance(name,str) or not name for name in names) or len(set(names))!=len(names):raise ValueError('Conditions must have unique nonempty names')
+    if factors is None:factors=getattr(conditions,'factor',None)
+    if not isinstance(factors,(list,tuple)) or len(factors)!=2 or any(not isinstance(name,str) or not name for name in factors) or len(set(factors))!=2:raise ValueError('Two-way analysis requires exactly two distinct named factors')
+    if not isinstance(column,str) or not column or any(name not in frame for name in ['Condition',column,*factors]):raise ValueError('The outcome, Condition and both factor columns must exist')
+    if comparisons is None:comparisons=_default_comparisons(len(names))
+    requested=parse_pairs(comparisons,len(names),allow_self=False)
+    retained=[];groups=[[] for _ in names];observation_ids=[[] for _ in names]
+    from pandas.api.types import is_scalar
+    for source_index,condition,value,a,b in frame[['Condition',column,*factors]].itertuples(index=True,name=None):
+        if condition not in names:continue
+        if not is_scalar(a) or not is_scalar(b) or not is_scalar(value) or isinstance(value,complex):raise ValueError('Measurements and categories must be scalar and the outcome real')
+        try:value=float(value)
+        except (ValueError,TypeError,OverflowError):continue
+        if not math.isfinite(value) or pd.isna(a) or pd.isna(b):continue
+        if any(isinstance(v,(float,np.floating)) and not math.isfinite(v) for v in (a,b)):continue
+        retained.append((condition,value,a,b));groups[names.index(condition)].append(value);observation_ids[names.index(condition)].append(source_index)
+    return list(factors),requested,retained,[pd.Series(values,index=ids,dtype=float) for values,ids in zip(groups,observation_ids)]
 
-    sum_sqs = [float(row["sum_sq"]) for _, row in anova_results.iterrows()]
-    pvals = [float(row["PR(>F)"]) for _, row in anova_results.iterrows()]
 
-    cond_list = experiment.condition_list
-    groups = [exp_df[exp_df["Condition"] == cond.name][column].dropna() for cond in cond_list]
-    tukey_results = _run_tukey(*groups)
-    statistics, pairwise_pvalues = extract_p_and_stats_from_results(tukey_results, comparisons)
-    results_dict["Tukey"] = [statistics, pairwise_pvalues]
-    _publish_uncorrected(results_dict, pairwise_pvalues, basis="self_adjusted")
-    annotations = [get_annotation(result, ns) for result in pairwise_pvalues]
-    return pairwise_pvalues, annotations, (sum_sqs, pvals), results_dict, "Tukey"
 
-def test_normality(df_list, make_plot=True):
-    groups = _coerce_groups(df_list)
-    if len(groups) == 0:
-        fig = None
-        if make_plot:
-            fig, _ = plt.subplots(1, 2, layout="constrained", figsize=(10, 5))
-        return False, {}, fig
-    all_data = pd.concat(groups).dropna()
-    if len(all_data) < 3:
-        fig = None
-        if make_plot:
-            fig, _ = plt.subplots(1, 2, layout="constrained", figsize=(10, 5))
-        return False, {}, fig
-    results_dict = {}
+def _categorical_additive_residual(cells,levels_a,levels_b):
+    """Solve integer category counts against exact measurement sums."""
+    width=len(levels_a)+len(levels_b)-1
+    gram=[[_two_way_fraction() for _ in range(width)] for _ in range(width)];rhs=[_two_way_fraction() for _ in range(width)];total=_two_way_fraction()
+    for (a,b),values in cells.items():
+        indices=[0]+([levels_a.index(a)] if a!=levels_a[0] else [])+([len(levels_a)-1+levels_b.index(b)] if b!=levels_b[0] else [])
+        count=len(values);amount=sum(values);total+=sum(v*v for v in values)
+        for i in indices:
+            rhs[i]+=amount
+            for j in indices:gram[i][j]+=count
+    augmented=[row+[value] for row,value in zip(gram,rhs)];pivots=[];rank=0
+    for column in range(width):
+        pivot=next((i for i in range(rank,width) if augmented[i][column]),None)
+        if pivot is None:continue
+        augmented[rank],augmented[pivot]=augmented[pivot],augmented[rank];scale=augmented[rank][column]
+        augmented[rank]=[v/scale for v in augmented[rank]]
+        for i in range(width):
+            if i==rank:continue
+            scale=augmented[i][column]
+            if scale:augmented[i]=[v-scale*u for v,u in zip(augmented[i],augmented[rank])]
+        pivots.append(column);rank+=1
+    beta=[_two_way_fraction() for _ in range(width)]
+    for row,column in enumerate(pivots):beta[column]=augmented[row][-1]
+    return total-sum(v*b for v,b in zip(rhs,beta)),rank
 
-    norm_fig = None
-    norm_ax = None
+
+
+def _two_way_inference(retained):
+    from PyFLASH._numeric_scaling import _rational_float,_f_tail_ratio
+    cells={};by_a={};by_b={}
+    for _,value,a,b in retained:
+        number=_two_way_fraction(value);cells.setdefault((a,b),[]).append(number);by_a.setdefault(a,[]).append(number);by_b.setdefault(b,[]).append(number)
+    def residual(collection):return sum((sum(v*v for v in values)-sum(values)**2/len(values) for values in collection.values()),_two_way_fraction())
+    full=residual(cells);add,rank=_categorical_additive_residual(cells,list(by_a),list(by_b));degrees=len(retained)-len(cells)
+    sums=[residual(by_b)-add,residual(by_a)-add,add-full,full]
+    numerator_df=[rank-len(by_b),rank-len(by_a),len(cells)-rank]
+    statistics=[];probabilities=[]
+    for ss,first in zip(sums[:3],numerator_df):
+        if first<=0 or degrees<=0:statistic=probability=math.nan
+        elif not full:statistic=math.inf if ss else math.nan;probability=0. if ss else math.nan
+        else:
+            ratio=ss*degrees/(full*first);statistic=_rational_float(ratio);probability=_f_tail_ratio(ratio,first,degrees)
+        statistics.append(statistic);probabilities.append(probability)
+    return [_rational_float(v) for v in sums],statistics,probabilities+[math.nan],[*numerator_df,degrees]
+
+
+
+def runTWA(experiment,column,factors=None,comparisons=None,results_dict=None,ns='ns'):
+    if results_dict is None:results_dict={}
+    if not isinstance(results_dict,_two_way_mutable_mapping):raise ValueError('The report must be a mutable mapping')
+    factors,requested,retained,groups=_two_way_prepare(experiment,column,factors,comparisons)
+    if len(groups)<2 or any(len(g)<2 for g in groups):return [],[],([],[]),results_dict,'Tukey'
+    sums,statistics,probabilities,degrees=_two_way_inference(retained)
+    results_dict['_group_test']={'symbol':'F','terms':[{'name':label,'statistic':statistic,'p':probability,'df':[float(first),float(degrees[-1])]} for label,statistic,probability,first in zip([*factors,'Interaction'],statistics,probabilities,degrees)]}
+    terms=[f'C({factors[0]})',f'C({factors[1]})',f'C({factors[0]}):C({factors[1]})','Residual']
+    for term,ss,probability in zip(terms,sums,probabilities):results_dict['2WA '+term.strip('C()')]=[ss,probability]
+    tukey=_run_tukey(*groups)
+    pair_statistics=[float(tukey.statistic[a,b]) for _,a,b in requested];pvalues=[float(tukey.pvalue[a,b]) for _,a,b in requested]
+    results_dict['Tukey']=[pair_statistics,pvalues];_publish_uncorrected(results_dict,pvalues,basis='self_adjusted')
+    return pvalues,[get_annotation(p,ns) for p in pvalues],(sums,probabilities),results_dict,'Tukey'
+
+
+
+from PyFLASH._cache import bounded_lru_cache
+
+def _normality_balance(values):
+    from PyFLASH._numeric_scaling import _power_of_two_scale
+    values=_power_of_two_scale(np.asarray(values,float))[0]
+    return _power_of_two_scale(values-values[0])[0]
+
+def _normality_dagostino(values):
+    n=len(values)
+    if n<8 or np.ptp(values)==0:return math.nan,math.nan
+    x=_normality_balance(values);x=x-np.mean(x)
+    variance=float(np.mean(x*x));skew=float(np.mean(x**3))/variance**1.5;kurt=float(np.mean(x**4))/variance**2
+    beta=3*(n*n+27*n-70)*(n+1)*(n+3)/((n-2)*(n+5)*(n+7)*(n+9))
+    w2=math.sqrt(2*(beta-1))-1;delta=math.sqrt(2/math.log(w2));a=math.sqrt(2/(w2-1))
+    z3=delta*math.asinh(skew*math.sqrt((n+1)*(n+3)/(6*(n-2)))/a)
+    sd4=math.sqrt(24*(n-2)*(n-3)*n/((n+1)**2*(n+3)*(n+5)));u4=(kurt-3+6/(n+1))/sd4
+    B=6*(n*n-5*n+2)/((n+7)*(n+9))*math.sqrt(6*(n+3)*(n+5)/(n*(n-2)*(n-3)))
+    A=6+8/B*(2/B+math.sqrt(1+4/B**2));ratio=(1-2/A)/(1+u4*math.sqrt(2/(A-4)))
+    z4=(1-2/(9*A)-math.copysign(abs(ratio)**(1/3),ratio))/math.sqrt(2/(9*A))
+    statistic=z3*z3+z4*z4
+    return statistic,math.exp(-statistic/2)
+
+@bounded_lru_cache(maxsize=32)
+def _normality_shapiro_weights(n):
+    quantiles=stats.norm.ppf((np.arange(1,n//2+1)-.375)/(n+.25))
+    total=2*math.fsum(float(v)*float(v) for v in quantiles);root=math.sqrt(total);r=1/math.sqrt(n)
+    def polynomial(coefficients):
+        result=0.
+        for coefficient in reversed(coefficients):result=result*r+coefficient
+        return result
+    first=polynomial([0,.221157,-.147981,-2.07119,4.434685,-2.706056])-quantiles[0]/root
+    if n>5:
+        second=polynomial([0,.042981,-.293762,-1.752461,5.682633,-3.582633])-quantiles[1]/root
+        factor=math.sqrt((total-2*quantiles[0]**2-2*quantiles[1]**2)/(1-2*first**2-2*second**2))
+        fixed=[first,second];offset=2
+    else:
+        factor=math.sqrt((total-2*quantiles[0]**2)/(1-2*first**2));fixed=[first];offset=1
+    positive=fixed+[-float(v)/factor for v in quantiles[offset:]]
+    return tuple([-v for v in positive]+([0.] if n%2 else [])+list(reversed(positive)))
+
+def _normality_shapiro(values):
+    from fractions import Fraction
+    from PyFLASH._numeric_scaling import _rational_float
+    n=len(values)
+    if n<3 or np.ptp(values)==0:return math.nan,math.nan
+    if n==3:
+        q=sorted(Fraction(float(v)) for v in values);center=sum(q)/3
+        W=(q[-1]-q[0])**2/(2*sum((v-center)**2 for v in q))
+        numerator=4*W-3;denominator=2*(math.sqrt(float(W))+math.sqrt(float(3*(1-W))))
+        ratio=_rational_float(numerator/Fraction(denominator))
+        if abs(ratio)<1e-8:
+            probability=_rational_float(numerator*Fraction(6/math.pi)/Fraction(denominator))
+        else:probability=6/math.pi*math.asin(ratio)
+        return float(W),max(0.,min(1.,probability))
+    # Published AS R94 weights, with accurately evaluated normal quantiles.
+    # Compute the correlation complement as a residual sum of squares so a
+    # positive tail does not depend on subtracting a rounded W from one.
+    coefficients=_normality_shapiro_weights(n)
+    x=np.sort(_normality_balance(values));center=math.fsum(x)/n
+    centered=[float(v)-center for v in x]
+    coefficient_norm=math.fsum(a*a for a in coefficients)
+    numerator=math.fsum(a*v for a,v in zip(coefficients,centered))
+    ss=math.fsum(v*v for v in centered)
+    projection=numerator/coefficient_norm
+    one_minus=math.fsum((v-projection*a)**2 for a,v in zip(coefficients,centered))/ss
+    W=1-one_minus
+    if n>5000:return W,math.nan
+    if one_minus<=0:return W,1.
+    y=math.log(one_minus)
+    if n<=11:
+        gamma=-2.273+.459*n
+        if y>=gamma:return W,1e-99
+        y=-math.log(gamma-y)
+        location=.544-.39978*n+.025054*n*n-.0006714*n**3
+        scale=math.exp(1.3822-.77857*n+.062767*n*n-.0020322*n**3)
+    else:
+        ln=math.log(n);location=-1.5861-.31082*ln-.083751*ln**2+.0038915*ln**3
+        scale=math.exp(-.4803-.082676*ln+.0030302*ln**2)
+    return W,float(stats.norm.sf((y-location)/scale))
+
+def test_normality(df_list,make_plot=True):
+    """Test pooled finite samples and return the verdict, four tests and plot.
+
+    DAgostino and fitted-normal Anderson use their published calibrations.
+    Kolmogorov-Smirnov compares raw observations with standard N(0,1).
+    Constant fitted samples and unsupported Shapiro probabilities are undefined;
+    at least half the defined tests must have p > .05 for the returned verdict.
+    """
+    try:samples=list(df_list)
+    except TypeError as error:raise ValueError('Normality data must be ordered one-dimensional samples.') from error
+    groups=_finite_real_samples(samples)
+    retained=[pd.Series(values,name=getattr(sample,'name',None)) for sample,values in zip(samples,groups) if len(values)]
+    all_data=pd.concat(retained) if retained else pd.Series(dtype=float)
+    results={};figure=None;axes=None;n=len(all_data)
+    if n>=3:
+        results['DA']=list(_normality_dagostino(all_data.to_numpy()))
+        results['A']=list(modified_anderson(all_data))
+        ks=kstest(all_data,'norm');ks_probability=float(ks.pvalue)
+        ordered=np.sort(all_data.to_numpy(dtype=float));positions=np.arange(n,dtype=float)/n
+        complement=float(min(np.min(stats.norm.sf(ordered)+positions),
+                             np.min(stats.norm.cdf(ordered)+positions[::-1])))
+        if complement <= 1./n:
+            # Published Ruben-Gambino upper branch: 2*(1-D)**n. Evaluate
+            # the complement from Gaussian tails before D rounds to one.
+            ks_probability=math.exp(math.log(2.)+n*math.log(complement)) if complement>0 else 0.
+        results['KS']=[float(ks.statistic),ks_probability]
+        results['SW_all']=list(_normality_shapiro(all_data.to_numpy()))
     if make_plot:
-        norm_fig, norm_ax = plt.subplots(1, 2, layout="constrained", figsize=(10, 5))
-        n = max(1, int(len(all_data)))
-        n_bins = max(8, min(32, int(np.sqrt(n) * 2)))
-        lo = float(np.nanmin(all_data))
-        hi = float(np.nanmax(all_data))
-        if not np.isfinite(lo) or not np.isfinite(hi):
-            lo, hi = 0.0, 1.0
-        if hi <= lo:
-            hi = lo + 1.0
-        sns.histplot(all_data, bins=n_bins, binrange=(lo, hi), ax=norm_ax[0])
-        sm.qqplot(all_data, ax=norm_ax[1], fit=True, line="45")
-
-    # D'Agostino-Pearson requires at least 8 samples.
-    if len(all_data) >= 8:
-        stat_k2, p_k2 = normaltest(all_data)
-        results_dict["DA"] = [float(stat_k2), float(p_k2)]
-    else:
-        p_k2 = float("nan")
-        results_dict["DA"] = [float("nan"), float("nan")]
-
-    stat_a, p_a = modified_anderson(all_data)
-    stat_ks, p_ks = kstest(all_data, "norm")
-    stat_sw, p_sw = stats.shapiro(all_data)
-    results_dict["A"] = [float(stat_a), float(p_a)]
-    results_dict["KS"] = [float(stat_ks), float(p_ks)]
-    results_dict["SW_all"] = [float(stat_sw), float(p_sw)]
-
-    if make_plot and norm_ax is not None:
-        pval_string = (
-            f"K2: {round(p_k2, 2) if not np.isnan(p_k2) else 'n<8'}\n"
-            f"A: {round(p_a, 2)}\n"
-            f"KS: {round(p_ks, 2)}\n"
-            f"W: {round(p_sw, 2)}"
-        )
-        norm_ax[0].annotate(pval_string, xy=(0.8, 0.8), size=10, xycoords="axes fraction")
-
-    valid_pvals = [value[1] for value in results_dict.values() if not np.isnan(value[1])]
-    normality_count = sum(1 for p in valid_pvals if p > 0.05)
-    if len(valid_pvals) == 0:
-        normality = False
-    else:
-        normality = normality_count >= max(1, (len(valid_pvals) // 2) + (len(valid_pvals) % 2))
-    return normality, results_dict, norm_fig
+        figure,axes=_dependency('plt').subplots(1,2,layout='constrained',figsize=(10,5))
+        if n>=3:
+            from fractions import Fraction
+            bins=max(8,min(32,int(np.sqrt(n)*2)));lo=Fraction(float(all_data.min()));hi=Fraction(float(all_data.max()))
+            if hi<=lo:hi=lo+1
+            edges=[lo+(hi-lo)*Fraction(i,bins) for i in range(bins+1)]
+            counts=[0]*bins
+            for value in all_data:
+                position=int((Fraction(float(value))-lo)*bins/(hi-lo))
+                counts[min(position,bins-1)]+=1
+            axes[0].bar([float(edge) for edge in edges[:-1]],counts,
+                        width=[float(right-left) for left,right in zip(edges,edges[1:])],align='edge')
+            # Matplotlib's unit conversion obtains widths by subtracting two
+            # shifted coordinates. Restore the width before that cancellation.
+            for patch,left,right in zip(axes[0].patches,edges,edges[1:]):
+                patch.set_x(float(left));patch.set_width(float(right-left))
+            axes[0].set_xlabel('' if all_data.name is None else str(all_data.name));axes[0].set_ylabel('Count')
+            if np.ptp(all_data.to_numpy())>0:
+                _dependency('sm').qqplot(_normality_balance(all_data.to_numpy()),ax=axes[1],fit=True,line='45')
+            else:
+                axes[1].set_xlabel('Theoretical Quantiles');axes[1].set_ylabel('Sample Quantiles')
+            p_k2,p_a,p_ks,p_sw=[results[name][1] for name in ('DA','A','KS','SW_all')]
+            k2=round(p_k2,2) if math.isfinite(p_k2) else 'n<8' if n<8 else 'n/a'
+            text=f'K2: {k2}\nA: {round(p_a,2)}\nKS: {round(p_ks,2)}\nW: {round(p_sw,2)}'
+            axes[0].annotate(text,xy=(.8,.8),size=10,xycoords='axes fraction')
+    valid=[row[1] for row in results.values() if math.isfinite(row[1])]
+    normal=bool(valid) and sum(p>.05 for p in valid)>=max(1,(len(valid)+1)//2)
+    return normal,results,figure
 
 
 def _default_comparisons(num_groups):
@@ -1553,18 +1903,71 @@ STATS_ANNOTATION_X = 1.08
 STATS_ANNOTATION_Y = 1.0
 
 
-def _annotate_stats_summary(ax, test, post_hoc, overall, comparisons, pairwise_pvalues, condition_list, factor_list=None, effect_strings=None):
+def _fmt_test_number(value):
+    """Keep small P values and fractional degrees of freedom readable."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    return "n/a" if np.isnan(number) else f"{number:.6g}"
+
+
+def _group_test_details(test, group_values=None, raw_stats=None):
+    """Recover test metadata without fitting a model or changing its results."""
+    details = (raw_stats or {}).get("_group_test")
+    if isinstance(details, dict):
+        return details
+    # Old caches and direct helper calls may predate test metadata. Infer only
+    # degrees of freedom fully identified by the tested groups.
+    key = str(test).lower()
+    if "anova" in key:
+        details = {"symbol": "F"}
+        if group_values is not None and "welch" not in key and "two-way" not in key:
+            sizes = [len(pd.to_numeric(pd.Series(g), errors="coerce").dropna()) for g in group_values]
+            sizes = [n for n in sizes if n]
+            details["df"] = [len(sizes) - 1, sum(sizes) - len(sizes)]
+        return details
+    if "kruskal" in key:
+        return {"symbol": "H", **({"df": [len(group_values) - 1]} if group_values is not None else {})}
+    if "mann-whitney" in key:
+        return {"symbol": "U"}
+    if "t-test" in key or "t test" in key:
+        return {"symbol": "t"}
+    return {"symbol": "statistic"}
+
+
+def _group_test_line(label, statistic, pvalue, details):
+    symbol = details.get("symbol", "statistic")
+    degrees = details.get("df") or []
+    if degrees:
+        symbol += "(" + ", ".join(_fmt_test_number(v) for v in degrees) + ")"
+    if statistic is None:
+        return f"{label} p={_fmt_test_number(pvalue)}"
+    return f"{label}: {symbol}={_fmt_test_number(statistic)}, p={_fmt_test_number(pvalue)}"
+
+
+def _annotate_stats_summary(ax, test, post_hoc, overall, comparisons, pairwise_pvalues, condition_list, factor_list=None, effect_strings=None, group_values=None, raw_stats=None):
     """Draw a compact statistics summary to the right of the plot."""
     lines = [f"Test: {test}", f"Post-hoc: {post_hoc}"]
 
-    overall_p = overall[1] if isinstance(overall, tuple) and len(overall) > 1 else None
-    if isinstance(overall_p, list):
+    overall_stat, overall_p = overall if isinstance(overall, tuple) and len(overall) == 2 else (None, None)
+    details = _group_test_details(test, group_values, raw_stats)
+    if details.get("terms"):
+        for term in details["terms"]:
+            lines.append(_group_test_line(term["name"], term["statistic"], term["p"], {**term, "symbol": details["symbol"]}))
+    elif isinstance(overall_p, (list, tuple)) and details["symbol"] == "U":
+        for i, p in enumerate(overall_p):
+            comp = comparisons[i] if i < len(comparisons) else f"Comparison {i+1}"
+            stat = overall_stat[i] if isinstance(overall_stat, (list, tuple)) and i < len(overall_stat) else None
+            lines.append(_group_test_line(comp, stat, p, details))
+    elif isinstance(overall_p, (list, tuple)):
         labels = factor_list or ["Factor 1", "Factor 2", "Interaction", "Residual"]
         for i, p in enumerate(overall_p):
             name = labels[i] if i < len(labels) else f"Term {i+1}"
-            lines.append(f"{name} p={_fmt_p(p)}")
+            # Legacy two-way `overall` contains sums of squares, not F values.
+            lines.append(f"{name} p={_fmt_test_number(p)}")
     elif overall_p is not None:
-        lines.append(f"Group p={_fmt_p(overall_p)}")
+        lines.append(_group_test_line("Group", overall_stat, overall_p, details))
 
     for i, p in enumerate(pairwise_pvalues):
         if i >= len(comparisons):
@@ -1611,276 +2014,123 @@ def _annotate_stats_error(ax, error_message):
 
 
 def print_comparison_results(comparisons, condition_list, individual_results, overall_f, overall_p, normality, test, post_hoc, experiment_name, factor_list=None):
-    """Build readable summary strings for group and pairwise results."""
-    _ = experiment_name, factor_list  # retained for notebook compatibility
+    """Build ordered significance captions for validated one-based comparison pairs. Every pair must have one corresponding probability. Legacy metadata parameters remain accepted."""
+    from PyFLASH._comparison_tokens import parse_pairs
+    pairs = parse_pairs(comparisons, len(condition_list), allow_self=False)
+    if len(pairs) != len(individual_results):
+        raise ValueError('Every comparison needs exactly one result')
     if not isinstance(overall_p, list):
-        group_comparison_string = {"Group difference": get_annotation(overall_p, "ns")}
+        group = {'Group difference': get_annotation(overall_p, 'ns')}
     else:
-        labels = factor_list or ["Factor 1", "Factor 2", "Interaction", "Residual"]
-        group_comparison_string = {
-            labels[i] if i < len(labels) else f"Term {i+1}": get_annotation(p, "ns")
-            for i, p in enumerate(overall_p)
-        }
-
-    comparison_strings = []
-    for i, comparison in enumerate(comparisons):
-        if i >= len(individual_results):
-            break
-        first, second = [int(part) - 1 for part in comparison.split("-")]
-        comparison_strings.append(
-            f"{_name_of(condition_list[first])} vs {_name_of(condition_list[second])} {get_annotation(individual_results[i], 'ns')}"
-        )
-    return group_comparison_string, comparison_strings
+        labels = factor_list or ['Factor 1', 'Factor 2', 'Interaction', 'Residual']
+        group = {labels[i] if i < len(labels) else f'Term {i + 1}': get_annotation(p, 'ns') for i, p in enumerate(overall_p)}
+    summaries = [f"{_name_of(condition_list[a])} vs {_name_of(condition_list[b])} {get_annotation(p, 'ns')}" for (_, a, b), p in zip(pairs, individual_results)]
+    return (group, summaries)
 
 
 def draw_comparison_brackets(ax, centers, comparisons, annotations, *,
                              base_height, pad_height, handles, visible_y_span,
-                             lw=2, offset=0.1, floor=None, color="black",
+                             lw=2, offset=.1, floor=None, color='black',
                              star_y_offset_frac=None):
-    """Draw PyFLASH's house comparison brackets on ``ax``.
-
-    This is the single bracket renderer shared by every plot that marks
-    between-group comparisons (``plot_mean_bars`` via
-    :func:`plot_comparison_lines_from_figdata`, and the ``*_contrast``
-    slopegraphs), so the geometry cannot drift between them.
-
-    ``centers`` are the x positions of the groups; ``comparisons`` are
-    ``"<start>-<end>"`` strings using **1-based** group indices; ``annotations``
-    are the matching labels (stars, ``ns``, or numeric p-values).
-
-    Brackets are tiered: one is lifted above an earlier bracket only when their
-    horizontal spans genuinely overlap, so adjacent comparisons that merely
-    share an endpoint stay on the same tier. Non-significant / numeric labels sit
-    **above** the line while stars sit tight against it, which is what keeps an
-    ``ns`` from colliding with its own bracket.
-
-    Returns ``(top_drawn, top_line_height)``; ``top_line_height`` is ``None``
-    when nothing was drawn.
-    """
-    n = len(centers)
-    annotations = list(annotations or [])
-    comparisons = list(comparisons or [])
-    line_kws = {"lw": lw, "color": color, "zorder": 1, "clip_on": False}
-    updated_x_heights = {}
-    top_drawn = float(floor) if floor is not None else float(base_height)
-    top_line_height = None
-
-    for i, comparison in enumerate(comparisons):
-        if i >= len(annotations):
-            break
-        try:
-            start_index, end_index = [int(v) - 1 for v in str(comparison).split("-")]
-        except (TypeError, ValueError):
-            continue
-        if start_index < 0 or end_index < 0 or start_index >= n or end_index >= n:
-            continue
-        lo, hi = min(start_index, end_index), max(start_index, end_index)
-        xs_cov = centers[lo:hi + 1]
-        present = [x for x in xs_cov if x in updated_x_heights]
-        height = (
-            max(updated_x_heights[x] for x in present)
-            if len(present) >= 2
-            else base_height
-        )
-
-        x_left = centers[lo] + offset
-        x_right = centers[hi] - offset
-        ax.plot([x_left, x_left], [height, height + handles], **line_kws)
-        ax.plot([x_right, x_right], [height, height + handles], **line_kws)
-        line_height = height + handles
-        ax.plot([x_left, x_right], [line_height, line_height], **line_kws)
-        top_line_height = (
-            line_height if top_line_height is None
-            else max(top_line_height, line_height)
-        )
-        x_mid = (x_left + x_right) / 2
-        annot = annotations[i]
-        # Keep text-to-line spacing fixed in axes-relative visual units.  These
-        # fractions reproduce the original 0..20 Acrophase placement exactly.
-        text_lift = visible_y_span * 0.022
-        is_nonsig = _is_nonsignificant_annotation(annot)
-        if is_nonsig:
-            annot_y = line_height + visible_y_span * 0.0165 + text_lift
-        else:
-            if star_y_offset_frac is None:
-                star_offset = 0.0022
-            else:
-                try:
-                    star_offset = float(star_y_offset_frac)
-                except (TypeError, ValueError):
-                    star_offset = 0.0022
-            annot_y = line_height + visible_y_span * star_offset
-        ax.text(
-            x_mid, annot_y, annot,
-            ha="center",
-            va="center",
-            size=18 if is_nonsig else 35,
-            clip_on=False,
-            weight="normal" if is_nonsig else "bold",
-            color=color,
-        )
-
-        new_height = height + pad_height + handles
-        updated_x_heights.update({x: new_height for x in xs_cov})
-        top_drawn = max(top_drawn, new_height + handles)
-
-    return top_drawn, top_line_height
+    """Draw validated house brackets at declared centers without changing group order."""
+    from matplotlib.axes import Axes
+    if not isinstance(ax,Axes):raise ValueError('Comparison drawing requires Matplotlib axes.')
+    plan=_comparison_bracket_plan(centers,comparisons,annotations,base_height=base_height,
+        pad_height=pad_height,handles=handles,visible_y_span=visible_y_span,lw=lw,
+        offset=offset,floor=floor,color=color,star_y_offset_frac=star_y_offset_frac)
+    ax.set_ylim(*ax.get_ylim())
+    return _comparison_draw_plan(ax,plan)
 
 
-def plot_comparison_lines_from_figdata(
-    scatter, bar, ax,
-    annotations=None, comparisons=None,
-    errobar_width=0.12, lw=2, pad=10, handles_fraction=0.3,
-    max_override=None,
-    group_values=None, group_positions=None, group_colors=None,
-    draw_error_bars=True,
-):
-    if scatter is None:
-        return None
-    annotations = annotations or []
-    comparisons = comparisons or []
-    if not hasattr(scatter, "collections") or not scatter.collections:
-        return None
-    if group_positions is not None and len(group_positions) > 0:
-        bar_xs = [float(x) for x in group_positions]
+def plot_comparison_lines_from_figdata(scatter,bar,ax,annotations=None,comparisons=None,
+    errobar_width=.12,lw=2,pad=10,handles_fraction=.3,max_override=None,
+    group_values=None,group_positions=None,group_colors=None,draw_error_bars=True):
+    """Draw finite group SEM and selected brackets, preserving original group positions."""
+    from matplotlib.axes import Axes
+    from matplotlib.colors import to_rgba
+    from PyFLASH._comparison_tokens import parse_pairs
+    if not isinstance(ax,Axes):raise ValueError('Comparison drawing requires Matplotlib axes.')
+    cap=_comparison_number(errobar_width,0.);width=_comparison_number(lw,0.,True)
+    padding=_comparison_number(pad,0.,True);handle_fraction=_comparison_number(handles_fraction,0.)
+    override=None if max_override is None else _comparison_number(max_override)
+    if not isinstance(draw_error_bars,(bool,np.bool_)):raise ValueError('draw_error_bars must be Boolean.')
+    if group_positions is not None:centers=_comparison_centers(group_positions)
     elif bar is not None:
-        bar_xs = sorted({patch.get_x() + patch.get_width() / 2 for patch in bar.patches})
+        try:centers=list(dict.fromkeys(patch.get_x()+patch.get_width()/2 for patch in bar.patches
+                                     if patch.get_gid()!='pyflash-comparison-height-anchor'))
+        except (AttributeError,TypeError) as error:raise ValueError('Bars must expose their group centers.') from error
+        centers=_comparison_centers(centers)
+    else:return None
+    count=len(centers);colors=['black']*count
+    if group_values is not None:
+        groups=_finite_real_samples(group_values)
+        if len(groups)!=count:raise ValueError('Every declared group needs one bar center.')
     else:
-        return None
-    if len(bar_xs) == 0:
-        return None
-
-    # Use provided numeric groups when available (most reliable for SEM/error bar placement).
-    if group_values is not None and len(group_values) > 0:
-        y_by_center = {}
-        centers_with_data = []
-        for i, vals in enumerate(group_values):
-            if i >= len(bar_xs):
-                break
-            y = pd.to_numeric(pd.Series(vals), errors="coerce").dropna().to_numpy(dtype=float)
-            if len(y) == 0:
-                continue
-            c = bar_xs[i]
-            y_by_center[c] = y.tolist()
-            centers_with_data.append(c)
-        if group_colors is not None and len(group_colors) > 0:
-            color_by_center = {}
-            for i, cx in enumerate(centers_with_data):
-                color_by_center[cx] = group_colors[i] if i < len(group_colors) else "black"
-        else:
-            color_by_center = {x: "black" for x in centers_with_data}
-    else:
-        # Fallback: infer groups from plotted swarm points.
-        y_by_center = {x: [] for x in bar_xs}
-        color_by_center = {x: "black" for x in bar_xs}
-        for coll in scatter.collections:
-            offsets = coll.get_offsets()
-            if offsets is None or len(offsets) == 0:
-                continue
-            edge = coll.get_edgecolor()
-            edge_color = edge[0] if edge is not None and len(edge) > 0 else "black"
-            for x, y in np.asarray(offsets, dtype=float):
-                if not np.isfinite(y):
-                    continue
-                nearest = min(bar_xs, key=lambda c: abs(c - x))
-                y_by_center[nearest].append(float(y))
-                color_by_center[nearest] = edge_color
-        centers_with_data = [x for x in bar_xs if len(y_by_center[x]) > 0]
-    n = len(centers_with_data)
-    if n == 0:
-        return None
-
-    means = [float(np.mean(y_by_center[x])) for x in centers_with_data]
-    sems = [
-        float(np.std(y_by_center[x], ddof=1) / np.sqrt(len(y_by_center[x])))
-        if len(y_by_center[x]) > 1 else 0.0
-        for x in centers_with_data
-    ]
-    max_height = max(float(np.max(y_by_center[x])) for x in centers_with_data)
-    upper_error_heights = np.add(means, sems)
-    # Preserve the original one-sided SEM glyph for positive bars. For negative
-    # bars only, point the same glyph downward so it remains outside the bar.
-    error_heights = np.asarray([
-        mean + sem if mean >= 0 else mean - sem
-        for mean, sem in zip(means, sems)
-    ], dtype=float)
-    max_all = max(max_height, float(np.max(upper_error_heights)))
-    if max_override is not None:
-        max_all = max(max_all, float(max_override))
-
-    # Preserve the original upper-limit behavior and extend the lower limit only
-    # when a signed bar's outward SEM would otherwise be clipped.
-    cur_ymin, cur_ymax = ax.get_ylim()
-    min_required_top = float(np.max(upper_error_heights)) * 1.03 if len(upper_error_heights) > 0 else cur_ymax
-    if cur_ymax < min_required_top:
-        ax.set_ylim(cur_ymin, min_required_top)
-        cur_ymin, cur_ymax = ax.get_ylim()
-    if len(error_heights) > 0 and float(np.min(error_heights)) < cur_ymin:
-        ax.set_ylim(float(np.min(error_heights)) * 1.03, cur_ymax)
-
-    # Comparison geometry must be independent of the metric's numeric scale.
-    # The axes have a fixed visual height, so express the first-tier gap and
-    # handle height as fractions of the visible y span.  With the historical
-    # 0..20 Acrophase axis this is numerically identical to the original code
-    # (pad_height=2, handles=0.6), while signed axes now render at the same
-    # physical size instead of shrinking their brackets.
-    cur_ymin, cur_ymax = ax.get_ylim()
-    visible_y_span = float(cur_ymax - cur_ymin)
-    if not np.isfinite(visible_y_span) or visible_y_span <= 0:
-        visible_y_span = max(abs(float(cur_ymax)), abs(float(cur_ymin)), 1.0)
-    pad_height = visible_y_span / pad
-    handles = pad_height * handles_fraction
-    base_height = float(cur_ymax) + pad_height
-    line_kws = {"lw": lw, "color": "black", "zorder": 1, "clip_on": False}
-
-    # Plot SEM lines at each bar center. Callers that already draw their own
-    # interval glyphs can suppress these while still using the bracket logic.
+        groups=[[] for _ in centers]
+        if scatter is None or not hasattr(scatter,'collections'):return None
+        for collection in scatter.collections:
+            offsets=collection.get_offsets()
+            if offsets is None or not len(offsets):continue
+            edge=collection.get_edgecolor();edge_color=edge[0] if edge is not None and len(edge) else 'black'
+            points=np.ma.asarray(offsets,dtype=float)
+            if points.ndim!=2 or points.shape[1]!=2:raise ValueError('Scatter observations need x/y coordinates.')
+            for x,y in points.filled(np.nan):
+                if not math.isfinite(x) or not math.isfinite(y) or not count:continue
+                index=min(range(count),key=lambda i:abs(centers[i]-x));groups[index].append(float(y));colors[index]=edge_color
+    if group_colors is not None:
+        if isinstance(group_colors,(str,bytes,Mapping)):raise ValueError('Group colors must be an ordered color sequence.')
+        try:provided=list(group_colors)
+        except TypeError as error:raise ValueError('Group colors must be an ordered color sequence.') from error
+        for i,color in enumerate(provided):
+            try:to_rgba(color)
+            except (ValueError,TypeError) as error:raise ValueError('Invalid group color.') from error
+            if i<count:colors[i]=color
+    try:colors=[to_rgba(color) for color in colors]
+    except (ValueError,TypeError) as error:raise ValueError('Invalid scatter color.') from error
+    if isinstance(annotations,(str,bytes,Mapping)):raise ValueError('Annotations must be an ordered label sequence.')
+    try:labels=[] if annotations is None else list(annotations)
+    except TypeError as error:raise ValueError('Annotations must be an ordered label sequence.') from error
+    if comparisons is None:comparisons=_default_comparisons(count) if labels else []
+    parse_pairs(comparisons,count,allow_self=False)
+    if labels and len(labels)!=len(comparisons):raise ValueError('Every requested bracket needs one annotation.')
+    active={i:values for i,values in enumerate(groups) if len(values)}
+    if not active:return None
+    means={};sems={}
+    for index,values in active.items():means[index],sems[index]=_comparison_sample_moments(values)
+    upper={i:means[i]+sems[i] for i in active}
+    outward={i:means[i]+sems[i] if means[i]>=0 else means[i]-sems[i] for i in active}
+    maximum=max(max(float(v) for group in active.values() for v in group),max(upper.values()))
+    if override is not None:maximum=max(maximum,override)
+    bottom,top=map(float,ax.get_ylim());required=max(upper.values())*1.03
+    if top<required:top=required
+    if min(outward.values())<bottom:bottom=min(outward.values())*1.03
+    if not all(math.isfinite(v) for v in [*means.values(),*sems.values(),*upper.values(),*outward.values(),maximum,bottom,top]):
+        raise ValueError('Measurement uncertainty exceeds finite drawing coordinates.')
+    span=top-bottom
+    if not math.isfinite(span) or span<=0:span=max(abs(top),abs(bottom),1.)
+    plan=_comparison_bracket_plan(centers,comparisons,labels,base_height=top+span/padding,
+        pad_height=span/padding,handles=span/padding*handle_fraction,visible_y_span=span,
+        lw=width,floor=maximum,available=set(active))
+    result=plan[0];anchor=None
+    if result[1] is not None:
+        xmin,xmax=ax.get_xlim();xepsilon=max(abs(float(xmax-xmin)),1.)*1e-9
+        anchor=(centers[0],result[1]+span*.07,xepsilon,span*1e-9)
+        if not all(math.isfinite(v) for v in anchor):raise ValueError('Comparison envelope exceeds finite coordinates.')
+    ax.set_ylim(bottom,top)
     if draw_error_bars:
-        for i in range(n):
-            cx = centers_with_data[i]
-            c = color_by_center[cx]
-            ax.plot([cx, cx], [means[i], error_heights[i]], color=c, zorder=2.5, lw=2.5)
-            ax.plot([cx - errobar_width, cx + errobar_width], [error_heights[i], error_heights[i]], color=c, zorder=2.6, lw=2.5)
+        for i in active:
+            x=centers[i];ax.plot([x,x],[means[i],outward[i]],color=colors[i],zorder=2.5,lw=2.5)
+            ax.plot([x-cap,x+cap],[outward[i],outward[i]],color=colors[i],zorder=2.6,lw=2.5)
+    _comparison_draw_plan(ax,plan)
+    if anchor is not None:
+        patch=_dependency('Rectangle')((anchor[0],anchor[1]),anchor[2],anchor[3],
+            facecolor='none',edgecolor='none',linewidth=0,clip_on=False)
+        patch.set_gid('pyflash-comparison-height-anchor');ax.add_patch(patch)
+    return maximum
 
-    # Default comparisons if none given.
-    if comparisons == []:
-        pair_iter = itertools.combinations(range(1, n + 1), 2)
-        sorted_pairs = sorted(pair_iter, key=lambda x: (x[1] - x[0], x[0]))
-        comparisons = [f"{a}-{b}" for a, b in sorted_pairs]
-
-    # Plot comparison brackets.
-    top_drawn, top_line_height = draw_comparison_brackets(
-        ax, centers_with_data, comparisons, annotations,
-        base_height=base_height, pad_height=pad_height, handles=handles,
-        visible_y_span=visible_y_span, lw=lw, floor=max_all,
-    )
-
-    if top_line_height is not None:
-        # Tight SVG export normally sizes itself to the exact glyph bounds, so
-        # an ``ns`` top label and a larger ``*`` top label produce slightly
-        # different outer canvas heights.  Reserve one fixed visual envelope
-        # above the highest tier.  The patch is fully transparent but remains
-        # part of Matplotlib's tight-bounding-box calculation.
-        x_min, x_max = ax.get_xlim()
-        x_epsilon = max(abs(float(x_max - x_min)), 1.0) * 1e-9
-        y_epsilon = visible_y_span * 1e-9
-        height_anchor = Rectangle(
-            (centers_with_data[0], top_line_height + visible_y_span * 0.07),
-            x_epsilon,
-            y_epsilon,
-            facecolor="none",
-            edgecolor="none",
-            linewidth=0,
-            clip_on=False,
-        )
-        height_anchor.set_gid("pyflash-comparison-height-anchor")
-        ax.add_patch(height_anchor)
-
-    return max_all
-
-def plot_comparison_lines_from_fig_data(*args, **kwargs):
+def plot_comparison_lines_from_fig_data(*args,**kwargs):
     """Backward-compatible alias for alternative function naming."""
-    return plot_comparison_lines_from_figdata(*args, **kwargs)
+    return plot_comparison_lines_from_figdata(*args,**kwargs)
 
 
 def _record_applied_correction(results_dict, label):
@@ -1994,7 +2244,7 @@ def _audit_to_results_dict(audit, comparisons, results_dict, results_strings,
             f"{perm.get('mode')} ({perm.get('n_perm')} perms)", np.nan
         ]
     elif audit.get("skipped"):
-        results_dict["Correction-Unavailable"] = [str(audit["skipped"]), np.nan]
+        results_dict.setdefault("Correction-Unavailable", [str(audit["skipped"]), np.nan])
 
     # Whether the p-values the ladder was applied to were raw or already
     # multiplicity-adjusted by the post-hoc itself (Tukey, Dunnett, Nemenyi and
@@ -2018,10 +2268,12 @@ def _audit_to_results_dict(audit, comparisons, results_dict, results_strings,
             for comp, names in changes.items()
         ]
     if perm:
+        calibrated = (f"{perm['alpha_star']:.4f}" if perm['alpha_star'] is not None
+                      else 'unattainable')
         results_strings["Correction calibration"] = (
-            f"honest alpha*={perm['alpha_star']:.4f} vs Bonferroni "
+            f"calibrated alpha*={calibrated} vs Bonferroni "
             f"{perm['alpha_bonferroni']:.4f}; uncorrected FWER "
-            f"{perm['fwer_if_uncorrected']:.3f}; smallest attainable p "
+            f"{perm['fwer_if_uncorrected']:.3f}; smallest null raw p "
             f"{perm['p_floor']:.4g}"
         )
     return results_dict
@@ -2076,7 +2328,7 @@ def _correct_or_fall_back(pvalues, method, label, n_tests, results_dict,
     try:
         return _apply_kw_correction(pvalues, method, wy=wy), method, label
     except CorrectionUnavailable as exc:
-        results_dict["Correction-Unavailable"] = [str(exc), np.nan]
+        results_dict.setdefault("Correction-Unavailable", [str(exc), np.nan])
         method, label = _normalize_kw_correction("auto", n_tests)
         return _apply_kw_correction(pvalues, method), method, label
 
@@ -2172,13 +2424,6 @@ def _note_unhonoured_request(results_dict, requested, applied, n_tests, inputs):
 
 def _run_correction_audit(results_dict, results_strings, comparisons, Config,
                           requested=None, applied=None):
-    """Compute the correction audit for whatever the post-hoc published.
-
-    One place for every test path: the ``run*`` functions publish their own
-    p-values and whatever they can offer towards a null, and this decides what
-    is affordable and writes the result. Reads ``Posthoc-Uncorrected``; does
-    nothing if the path never published to it.
-    """
     from PyFLASH import stats_extra as _se
 
     raw = results_dict.get("Posthoc-Uncorrected")
@@ -2187,35 +2432,37 @@ def _run_correction_audit(results_dict, results_strings, comparisons, Config,
         return None
     inputs = results_dict.get("_audit_inputs") or {}
     _note_unhonoured_request(results_dict, requested, applied, len(raw_p), inputs)
-
-    # An explicit Westfall-Young request authorises the per-column cost here
-    # too, so the CSV carries the column the reported verdict came from.
     explicit_wy = False
     if requested is not None:
         try:
-            explicit_wy = _normalize_kw_correction(
-                requested, len(raw_p))[0] == "westfall_young"
+            explicit_wy = _normalize_kw_correction(requested, len(raw_p))[0] == "westfall_young"
         except ValueError:
-            explicit_wy = False
-    plan, reason = _permutation_plan(inputs, len(raw_p), Config,
-                                     explicit_wy=explicit_wy)
+            pass
+    plan, reason = _permutation_plan(inputs, len(raw_p), Config, explicit_wy=explicit_wy)
     null = None
     if plan is not None:
         try:
             null = _build_null(plan)
+            aligned = _se._align_null_columns(np.asarray(null["p"], float), null["pairs"], inputs.get("pairs"))
+            if aligned is None:
+                null = None
+                reason = "reported comparisons do not match the null design"
+            else:
+                null = {**null, "p": aligned, "pairs": inputs.get("pairs") or null["pairs"]}
         except Exception as exc:
+            null = None
             reason = f"the permutation null could not be built: {exc}"
-    audit = _se.correction_audit(
-        raw_p, null=null, want_permutation=False, pairs=inputs.get("pairs"),
-    )
+    audit = _se.correction_audit(raw_p, null=null, want_permutation=False, pairs=inputs.get("pairs"))
+    if null is not None and inputs.get("family") == "rank":
+        ranked = np.asarray(inputs["ranks"], float)
+        groups = np.split(ranked, np.cumsum(inputs["group_sizes"])[:-1])
+        requested_pairs = [(str(i), a, b) for i, (a, b) in enumerate(inputs["pairs"])]
+        audit["westfall_young"] = _rank_westfall_young(
+            results_dict, raw_p, inputs["statistic"], Config,
+            _rank_design(groups), requested_pairs)
     if reason and not audit.get("permutation"):
         audit.setdefault("skipped", reason)
-    _audit_to_results_dict(
-        audit, comparisons, results_dict, results_strings,
-        basis=inputs.get("basis", "raw"),
-    )
-    # Kept for the describe layer (report.build_comparison_record); the leading
-    # underscore keeps it out of the CSV.
+    _audit_to_results_dict(audit, comparisons, results_dict, results_strings, basis=inputs.get("basis", "raw"))
     results_dict["_correction_audit"] = audit
     return audit
 
@@ -2329,6 +2576,9 @@ def _emit_comparison_record(
             correction_reported=(
                 (results_dict.get("_audit_inputs") or {}).get("correction")),
         )
+        # Carry the same typed statistic/df as the figure, including the actual
+        # F tests rather than the legacy two-way return's sums of squares.
+        record["test"].update(_group_test_details(test, valid_groups, results_dict))
         plot_rows = []
         for group_index, group_values in enumerate(valid_groups):
             group_name = names[group_index] if group_index < len(names) else f"G{group_index + 1}"
@@ -2426,20 +2676,81 @@ def multipleComparisons(
         # readable and callable outside a configured session.
         posthoc_correction = getattr(Config, "POSTHOC_CORRECTION", "auto")
 
-    if not dfs:
+    scope_test = _normalize_group_stats_test(stats_test)
+    if not dfs and scope_test not in {"linear_model", "two_way"}:
         return "N/A", "N/A", None, {}
-    clean_dfs = [pd.to_numeric(pd.Series(g), errors="coerce").dropna() for g in dfs]
-    valid_groups = [g for g in clean_dfs if len(g) > 0]
-    # Original-order indices of the surviving groups, so the report layer can map
-    # full-length group labels back onto the (possibly shorter) valid_groups.
-    valid_indices = [i for i, g in enumerate(clean_dfs) if len(g) > 0]
-    if len(valid_groups) < 2:
+    # Validate dimensions before coercion; keep declared group positions.
+    _finite_real_samples(dfs)
+    clean_dfs = []
+    for group in dfs:
+        values = pd.to_numeric(pd.Series(group), errors="coerce")
+        clean_dfs.append(values[np.isfinite(values)].astype(float))
+    if scope_test == "linear_model" and model_df is not None:
+        group_column = model_group_col or "Condition"
+        value_column = model_value_col or (getattr(dfs[0], "name", None) if dfs else None)
+        declared_order = [_name_of(group) for group in (group_labels or [])] or None
+        prepared, order, _, _, _, _ = _linear_model_prepare(
+            model_df, value_column, group_column, [], {}, covariates,
+            categorical_covariates, posthoc_correction, cov_type, cov_kwds,
+            declared_order)
+        source_ids = pd.Index(prepared.attrs['_pyflash_observation_ids'])
+        clean_dfs = [pd.Series(
+            prepared.loc[prepared[group_column].astype(str) == name, value_column].to_numpy(),
+            index=source_ids[prepared[group_column].astype(str).to_numpy() == name],
+            name=value_column, dtype=float) for name in order]
+    elif scope_test == "two_way" or (
+        scope_test == "auto" and multiple_comparison == "Two-Way"
+        and getattr(experiment, "summary", None) is not None
+        and isinstance(getattr(getattr(experiment, "condition_list", None), "factor", None), (list, tuple))
+        and len(experiment.condition_list.factor) == 2
+    ):
+        value_column = getattr(dfs[0], "name", None) if dfs else model_value_col
+        _, _, _, scoped_groups = _two_way_prepare(experiment, value_column, None, [])
+        clean_dfs = [pd.Series(values, name=value_column, dtype=float)
+                     for values in scoped_groups]
+    valid_groups = clean_dfs
+    valid_indices = list(range(len(clean_dfs)))
+    if sum(bool(len(group)) for group in valid_groups) < 2:
         return "N/A", "N/A", None, {}
 
-    # ── Cache lookup ────────────────────────────────────────────────
+    # â”€â”€ Cache lookup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     cached = None
+    input_identity = None
     if cache_key is not None and Config.STATS_CACHE:
+        import hashlib
+        import pickle
+        # A caller's display key cannot establish measurement identity. Keep
+        # that key for compatibility, but independently verify the data and
+        # inference settings before reusing its stored answer.
+        inference = {
+            'groups': clean_dfs, 'model_df': model_df,
+            'two_way_summary': getattr(experiment, 'summary', None)
+                if scope_test == 'two_way' or (scope_test == 'auto' and multiple_comparison != 'One-Way') else None,
+            'multiple_comparison': multiple_comparison, 'comparisons': comparisons,
+            'force_nonparametric': force_nonparametric, 'posthoc': posthoc,
+            'posthoc_correction': posthoc_correction, 'stats_test': stats_test,
+            'variance_test': variance_test, 'variance_alpha': variance_alpha,
+            'auto_welch': auto_welch, 'model_group_col': model_group_col,
+            'model_value_col': model_value_col, 'covariates': covariates,
+            'categorical_covariates': categorical_covariates, 'cov_type': cov_type,
+            'cov_kwds': cov_kwds, 'ns': ns, 'group_labels': group_labels,
+            'conditions': [
+                {name: getattr(group, name, None) for name in
+                 ('name', 'label', 'factor', 'factor_explanation')}
+                if not isinstance(group, str) else group
+                for group in (getattr(experiment, 'condition_list', None) or [])
+            ],
+            'factor': getattr(experiment, 'factor', None),
+            'experiment_name': getattr(experiment, 'name', None),
+            'session': stats_cache_key('', (), ()),
+        }
+        input_identity = hashlib.sha256(pickle.dumps(inference, protocol=5)).hexdigest()
         cached = _stats_cache.get(cache_key)
+        if cached is not None and cached.get('input_identity') != input_identity:
+            cached = None
+        elif cached is not None:
+            # Drawing, reporting and caller edits must not alter the stored answer.
+            cached = deepcopy(cached)
     if cached is not None:
         test = cached['test']
         post_hoc = cached['post_hoc']
@@ -2474,6 +2785,7 @@ def multipleComparisons(
                     condition_list=cond_list,
                     factor_list=experiment.factor if hasattr(experiment, "factor") else None,
                     effect_strings=effect_strings,
+                    group_values=valid_groups, raw_stats=results_dict,
                 )
         _emit_comparison_record(
             valid_groups, group_labels, cond_list, test, post_hoc,
@@ -2487,9 +2799,9 @@ def multipleComparisons(
     if comparisons is None:
         default_from_conditions = getattr(experiment.condition_list, "comparisons", None)
         comparisons = default_from_conditions if default_from_conditions is not None else _default_comparisons(len(valid_groups))
-    comparisons = _sanitize_comparisons(comparisons, len(valid_groups))
-    if len(comparisons) == 0 and len(valid_groups) >= 2:
-        comparisons = _default_comparisons(len(valid_groups))
+    from PyFLASH._comparison_tokens import parse_pairs
+    comparisons = [token for token, _, _ in parse_pairs(
+        comparisons, len(valid_groups), allow_self=False)]
     cond_list = group_labels if group_labels is not None else experiment.condition_list
     normal, results_dict, norm_fig = test_normality(valid_groups, make_plot=save_normality)
     if save_name and save_normality and norm_fig is not None:
@@ -2510,7 +2822,7 @@ def multipleComparisons(
         if verbose:
             _log.confirm(f"Normality figure saved to {out_path}")
     if norm_fig is not None:
-        plt.close(norm_fig)
+        _dependency('plt').close(norm_fig)
     if force_nonparametric:
         normal = False
     variance_info = test_equal_variance(
@@ -2554,10 +2866,9 @@ def multipleComparisons(
                 selected_test in {"auto", "auto_t"} and ((not normal) or any(len(g) <= 1 for g in valid_groups))
             ):
                 results, annotations, overall, results_dict, post_hoc = mwu_multiple_comparisons(
-                    valid_groups, ["1-2"], results_dict, ns
+                    valid_groups, comparisons, results_dict, ns
                 )
                 test = "Mann-Whitney U"
-                comparisons = ["1-2"]
             else:
                 if selected_test == "student_t":
                     t_equal_var = True
@@ -2575,7 +2886,12 @@ def multipleComparisons(
                     variance_alpha=variance_alpha,
                 )
                 test = "Student's T-Test" if t_equal_var else "Welch's T-Test"
-                comparisons = ["1-2"]
+                # The overall t statistic describes the declared two groups;
+                # requested pairwise probabilities retain their exact selection.
+                probability = results[0]
+                results = [probability for _ in comparisons]
+                annotations = [get_annotation(probability, ns) for _ in comparisons]
+                results_dict["Posthoc-Uncorrected"] = [1, results]
         else:
             if selected_test in {"student_t", "welch_t", "mannwhitney", "auto_t"}:
                 raise ValueError(f"stats_test={stats_test!r} supports exactly two groups.")
@@ -2653,6 +2969,12 @@ def multipleComparisons(
             )
         return "Error", f"Error: {err}", None, results_dict
 
+    if comparisons and not results and not results_dict.get("_group_test"):
+        # A declared empty/singleton group can make the whole test undefined.
+        # Keep undefined answers aligned with the requested captions/records.
+        results = [math.nan for _ in comparisons]
+        annotations = [get_annotation(math.nan, ns) for _ in comparisons]
+
     group_strings, comp_strings = print_comparison_results(
         comparisons,
         cond_list,
@@ -2678,7 +3000,7 @@ def multipleComparisons(
             f"equal_var={variance_info.get('equal_var')}"
         )
 
-    # ── Effect sizes ────────────────────────────────────────────────
+    # â”€â”€ Effect sizes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     effects = {}
     effect_strings = []
     if getattr(Config, "EFFECT_SIZES", True):
@@ -2696,7 +3018,7 @@ def multipleComparisons(
         except Exception as e:
             results_dict["Effect_error"] = [str(e), np.nan]
 
-    # ── Correction audit ────────────────────────────────────────────
+    # â”€â”€ Correction audit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Always computed, never plotted. The closed-form ladder costs nothing and
     # answers "would a different correction convention have changed this?"
     # without touching the reported verdict.
@@ -2738,11 +3060,13 @@ def multipleComparisons(
                 condition_list=cond_list,
                 factor_list=experiment.factor if hasattr(experiment, "factor") else None,
                 effect_strings=effect_strings,
+                group_values=valid_groups, raw_stats=results_dict,
             )
 
-    # ── Cache store ──────────────────────────────────────────────────
+    # â”€â”€ Cache store â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if cache_key is not None and Config.STATS_CACHE:
-        _stats_cache[cache_key] = {
+        _stats_cache[cache_key] = deepcopy({
+            'input_identity': input_identity,
             'test': test,
             'post_hoc': post_hoc,
             'annotations': annotations,
@@ -2753,7 +3077,7 @@ def multipleComparisons(
             'results_strings': results_strings,
             'effect_strings': effect_strings,
             'normal': normal,
-        }
+        })
 
     _emit_comparison_record(
         valid_groups, group_labels, cond_list, test, post_hoc,
@@ -2762,3 +3086,170 @@ def multipleComparisons(
         factor_list=getattr(experiment, "factor", None), figure=fig,
     )
     return test, post_hoc, annotation_objects, results_dict
+
+
+
+
+def _one_way_geometry(groups):
+    from PyFLASH._numeric_scaling import _rational_float,_rational_sqrt,_f_tail_ratio,_t_tail_squared
+    from fractions import Fraction
+    rational,average,_=_rational_sample_geometry(groups)
+    means=list(map(average,rational));total=sum(map(len,rational));count=len(rational)
+    grand=average([v for group in rational for v in group])
+    within=sum(sum((v-center)**2 for v in group) for group,center in zip(rational,means))
+    between=sum(len(group)*(center-grand)**2 for group,center in zip(rational,means))
+    degrees=total-count;mse=within/degrees
+    if not within:statistic,probability=(math.inf,0.) if between else (math.nan,math.nan)
+    else:
+        ratio=between/within*Fraction(degrees,count-1)
+        statistic=_rational_float(ratio)
+        probability=_f_tail_ratio(ratio,count-1,degrees)
+    return means,mse,degrees,statistic,probability
+
+
+def _pooled_pair_geometry(means,mse,degrees,groups,first,second):
+    from PyFLASH._numeric_scaling import _rational_float,_rational_sqrt,_f_tail_ratio,_t_tail_squared
+    from fractions import Fraction
+    difference=means[first]-means[second]
+    uncertainty=mse*(Fraction(1,len(groups[first]))+Fraction(1,len(groups[second])))
+    if not uncertainty:
+        statistic=(math.inf if difference>0 else -math.inf) if difference else math.nan
+        probability=0. if difference else math.nan
+    else:
+        squared=difference**2/uncertainty
+        statistic=_rational_sqrt(squared)*(1 if difference>=0 else -1)
+        probability=_t_tail_squared(squared,degrees)
+    return statistic,probability
+
+
+def _one_way_posthoc(groups,comparisons,kind):
+    from PyFLASH._numeric_scaling import _rational_float,_rational_sqrt,_f_tail_ratio,_t_tail_squared
+    from fractions import Fraction
+    from PyFLASH._comparison_tokens import parse_pairs
+    from PyFLASH._studentized_range import range_tail,range_tail_squared
+    means,mse,degrees,_,_=_one_way_geometry(groups)
+    requested=parse_pairs(comparisons,len(groups),allow_self=False)
+    count=len(groups);statistics=[];probabilities=[]
+    for _,first,second in requested:
+        statistic,probability=_pooled_pair_geometry(means,mse,degrees,groups,first,second)
+        difference=means[first]-means[second]
+        uncertainty=mse*(Fraction(1,len(groups[first]))+Fraction(1,len(groups[second])))
+        if kind=='tukey':
+            probability=range_tail_squared(2*difference**2/uncertainty,count,degrees) if uncertainty else range_tail(abs(statistic)*math.sqrt(2),count,degrees)
+            statistic=_rational_float(difference)
+        elif kind=='scheffe':
+            ratio=difference**2/(uncertainty*(count-1)) if uncertainty else math.inf if difference else math.nan
+            statistic=_rational_float(ratio);probability=_f_tail_ratio(ratio,count-1,degrees)
+        elif kind=='tamhane':
+            statistic,probability,_=_unequal_pair_geometry(groups[first],groups[second])
+            if probability==1:probability=1.
+            elif math.isfinite(probability):probability=sidak_correction(probability,count*(count-1)//2)
+        statistics.append(statistic);probabilities.append(probability)
+    return statistics,probabilities
+
+
+
+def _unequal_pair_geometry(first,second):
+    from PyFLASH._numeric_scaling import _rational_float,_rational_sqrt,_f_tail_ratio,_t_tail_squared
+    rational,average,_=_rational_sample_geometry([first,second])
+    a,b=rational;na,nb=len(a),len(b)
+    ma,mb=average(a),average(b)
+    va=sum((v-ma)**2 for v in a)/(na-1);vb=sum((v-mb)**2 for v in b)/(nb-1)
+    uncertainty=va/na+vb/nb;difference=ma-mb
+    if not uncertainty:
+        statistic=(math.inf if difference>0 else -math.inf) if difference else math.nan
+        return statistic,0. if difference else math.nan,math.nan
+    degrees=float(uncertainty**2/((va/na)**2/(na-1)+(vb/nb)**2/(nb-1)))
+    squared=difference**2/uncertainty
+    statistic=_rational_sqrt(squared)*(1 if difference>=0 else -1)
+    return statistic,_t_tail_squared(squared,degrees),degrees
+
+
+def _welch_one_way_geometry(groups):
+    from fractions import Fraction
+    rational,average,_=_rational_sample_geometry(groups);count=len(groups)
+    means=list(map(average,rational))
+    variances=[sum((v-center)**2 for v in group)/(len(group)-1) for group,center in zip(rational,means)]
+    if any(not variance for variance in variances):return math.nan,math.nan,float(count-1),math.nan
+    weights=[len(group)/variance for group,variance in zip(groups,variances)];total=sum(weights)
+    center=sum(w*m for w,m in zip(weights,means))/total
+    contribution=sum((1-w/total)**2/(len(group)-1) for w,group in zip(weights,groups))
+    numerator=sum(w*(m-center)**2 for w,m in zip(weights,means))/(count-1)
+    statistic=float(numerator/(1+Fraction(2*(count-2),count**2-1)*contribution))
+    degrees=float(Fraction(count**2-1,3)/contribution)
+    return statistic,float(stats.f.sf(statistic,count-1,degrees)),float(count-1),degrees
+
+
+def _comparison_number(value, minimum=None, strict=False):
+    from numbers import Real
+    if isinstance(value,(bool,np.bool_)) or not isinstance(value,Real) or not math.isfinite(float(value)):
+        raise ValueError('Drawing parameters must be finite real numbers.')
+    result=float(value)
+    if minimum is not None and (result<=minimum if strict else result<minimum):
+        raise ValueError('Drawing parameter is outside its supported range.')
+    return result
+
+def _comparison_centers(values):
+    if isinstance(values,(str,bytes,Mapping)):
+        raise ValueError('Group centers must be an ordered real sequence.')
+    try:result=[_comparison_number(value) for value in values]
+    except TypeError as error:raise ValueError('Group centers must be an ordered real sequence.') from error
+    if len(set(result))!=len(result):raise ValueError('Every group needs a distinct center.')
+    return result
+
+def _comparison_sample_moments(values):
+    from fractions import Fraction
+    from PyFLASH._numeric_scaling import _rational_sqrt
+    measured=[Fraction(float(value)) for value in values];size=len(measured)
+    center=sum(measured)/size
+    uncertainty=sum((value-center)**2 for value in measured)/(size*(size-1)) if size>1 else Fraction(0)
+    return float(center),_rational_sqrt(uncertainty)
+
+def _comparison_bracket_plan(centers, comparisons, annotations, *, base_height,
+                             pad_height, handles, visible_y_span, lw=2,
+                             offset=.1, floor=None, color='black',
+                             star_y_offset_frac=None, available=None):
+    from PyFLASH._comparison_tokens import parse_pairs
+    from matplotlib.colors import to_rgba
+    from fractions import Fraction
+    centers=_comparison_centers(centers)
+    requested=parse_pairs([] if comparisons is None else comparisons,len(centers),allow_self=False)
+    if isinstance(annotations,(str,bytes,Mapping)):
+        raise ValueError('Annotations must be an ordered label sequence.')
+    try:labels=[] if annotations is None else list(annotations)
+    except TypeError as error:raise ValueError('Annotations must be an ordered label sequence.') from error
+    if labels and len(labels)!=len(requested):raise ValueError('Every requested bracket needs one annotation.')
+    if any(not isinstance(label,(str,int,float,np.number,type(None))) for label in labels):
+        raise ValueError('Each annotation must be one text or numeric label.')
+    base=_comparison_number(base_height);padding=_comparison_number(pad_height,0.)
+    handle=_comparison_number(handles,0.);span=_comparison_number(visible_y_span,0.,True)
+    width=_comparison_number(lw,0.,True);inset=_comparison_number(offset,0.)
+    top=base if floor is None else _comparison_number(floor)
+    star=_comparison_number(.0022 if star_y_offset_frac is None else star_y_offset_frac)
+    try:rgba=to_rgba(color)
+    except (ValueError,TypeError) as error:raise ValueError('Invalid bracket color.') from error
+    updated={};lines=[];texts=[];topline=None
+    for (_,first,second),annotation in zip(requested,labels):
+        if available is not None and (first not in available or second not in available):continue
+        left,right=sorted((centers[first],centers[second]))
+        covered=[x for x in centers if left<=x<=right];prior=[x for x in covered if x in updated]
+        height=max(updated[x] for x in prior) if len(prior)>=2 else base
+        xleft,xright=left+inset,right-inset;upper=height+handle
+        lines.extend([([xleft,xleft],[height,upper]),([xright,xright],[height,upper]),([xleft,xright],[upper,upper])])
+        nonsig=_is_nonsignificant_annotation(annotation)
+        y=upper+span*.0385 if nonsig else upper+span*star
+        mid=float((Fraction(left)+Fraction(right))/2)
+        texts.append((mid,y,annotation,nonsig))
+        nextheight=height+padding+handle;updated.update({x:nextheight for x in covered})
+        top=max(top,nextheight+handle);topline=upper if topline is None else max(topline,upper)
+    coordinates=[top]+([] if topline is None else [topline])+[v for xs,ys in lines for v in xs+ys]+[v for x,y,_,_ in texts for v in (x,y)]
+    if not all(math.isfinite(v) for v in coordinates):raise ValueError('Comparison geometry exceeds finite drawing coordinates.')
+    return (top,topline),lines,texts,width,rgba
+
+def _comparison_draw_plan(ax,plan):
+    result,lines,texts,width,color=plan
+    for xs,ys in lines:ax.plot(xs,ys,lw=width,color=color,zorder=1,clip_on=False)
+    for x,y,annotation,nonsig in texts:
+        ax.text(x,y,annotation,ha='center',va='center',size=18 if nonsig else 35,
+                clip_on=False,weight='normal' if nonsig else 'bold',color=color)
+    return result

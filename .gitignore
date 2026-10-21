@@ -46,6 +46,20 @@ docs/pyflash-ui/
 # docs/plotting_function_context.md stay tracked). Keeps the public branch clean.
 .runtime/
 scripts/
+!scripts/
+scripts/*
+!scripts/check_ui_workflow.py
+!scripts/benchmark_ui_preparation.py
+!scripts/check_ui_responsiveness.py
+!scripts/check_ui_catalogue.py
+!scripts/check_ui_function_workbench.py
+!scripts/verify.py
+!scripts/project_contract.py
+!scripts/contracts-requirements.txt
+!scripts/ui_readiness.py
+!scripts/check_ui_real_data.py
+!scripts/check_reproducibility_distribution.py
+!scripts/check_dependency_repair.py
 docs/
 !docs/
 docs/*
@@ -53,6 +67,20 @@ docs/*
 !docs/wiki/**
 # docs-site build inputs live directly under docs/ and must be tracked
 !docs/requirements.txt
+!docs/ui-workflow.md
+!docs/ui-performance.md
+!docs/ui-function-usability-plan.md
+!docs/software-development-alignment.md
+!docs/reproducibility-run.md
+!docs/project-contracts.md
+!docs/project-contracts-verification.json
+
+# Reproducibility receipts are generated; adapters and frozen fixtures are public.
+/reproducibility/results/
+/research/
+/demo/output*/
+# Browser review screenshots and measurements are local generated artifacts.
+/ui-review/
 # ...but never commit compiled Python cruft inside the wiki examples
 docs/wiki/**/__pycache__/
 docs/wiki/**/*.pyc
@@ -66,3 +94,7 @@ tmp_*.txt
 # Pytest scratch output roots (preview PNG/SVG/CSV written by test runs).
 # Regenerated on every run; never an input.
 .pytest-tmp*/
+
+# Local recovery identity follows project moves; never publish local settings.
+/.pyflash-workspace-id.json
+/.pyflash-workspace-id.backup.json

@@ -13,33 +13,6 @@ Usage:
 
 __version__ = "0.2.0"
 
-from PyFLASH.markers import (
-    Attribute, Antibody, cellMarker, objectMarker, stainColors,
-)
-from PyFLASH.experiment import Experiment, MiniExperiment
-from PyFLASH.batch import Batch
-from PyFLASH.conditions import (
-    condition, multiCondition, conditionList,
-    zipConditions, zipConditionLists,
-    ConditionBuilder,
-    group, multiGroup, groupList,
-    zipGroups, zipGroupLists,
-    GroupBuilder,
-)
-from PyFLASH.factory import create_batch
-from PyFLASH.dataframe import DataFrameExperiment, from_dataframe
-from PyFLASH.serialization import save_state, load_state, normalize_paths
-from PyFLASH.config import Config
-from PyFLASH.aesthetics import (
-    get_pyflash_style,
-    set_pyflash_style,
-    reset_pyflash_style,
-    pyflash_style_context,
-)
-from PyFLASH.spec import run_spec
-from PyFLASH.export import format_summary_for_display
-from PyFLASH._logging import set_verbosity, silent, verbose, Verbosity
-
 __all__ = [
     # Core classes
     "Attribute", "Antibody", "cellMarker", "objectMarker",
@@ -66,6 +39,7 @@ __all__ = [
     "set_verbosity", "silent", "verbose", "Verbosity",
     # Spec DSL
     "run_spec",
+    "run_spec_queue", "call_action",
     # Reference
     "cheat_sheet",
     "set_axis_limits", "clear_axis_limits", "lock_axis_limits",
@@ -93,6 +67,45 @@ __all__ = [
 # ``from PyFLASH import *`` still binds them (it triggers ``__getattr__`` for
 # each ``__all__`` entry).
 _LAZY_ATTRS = {
+    "Attribute": ("PyFLASH.markers", "Attribute"),
+    "Antibody": ("PyFLASH.markers", "Antibody"),
+    "cellMarker": ("PyFLASH.markers", "cellMarker"),
+    "objectMarker": ("PyFLASH.markers", "objectMarker"),
+    "stainColors": ("PyFLASH.markers", "stainColors"),
+    "Experiment": ("PyFLASH.experiment", "Experiment"),
+    "MiniExperiment": ("PyFLASH.experiment", "MiniExperiment"),
+    "Batch": ("PyFLASH.batch", "Batch"),
+    "condition": ("PyFLASH.conditions", "condition"),
+    "multiCondition": ("PyFLASH.conditions", "multiCondition"),
+    "conditionList": ("PyFLASH.conditions", "conditionList"),
+    "zipConditions": ("PyFLASH.conditions", "zipConditions"),
+    "zipConditionLists": ("PyFLASH.conditions", "zipConditionLists"),
+    "ConditionBuilder": ("PyFLASH.conditions", "ConditionBuilder"),
+    "group": ("PyFLASH.conditions", "group"),
+    "multiGroup": ("PyFLASH.conditions", "multiGroup"),
+    "groupList": ("PyFLASH.conditions", "groupList"),
+    "zipGroups": ("PyFLASH.conditions", "zipGroups"),
+    "zipGroupLists": ("PyFLASH.conditions", "zipGroupLists"),
+    "GroupBuilder": ("PyFLASH.conditions", "GroupBuilder"),
+    "create_batch": ("PyFLASH.factory", "create_batch"),
+    "DataFrameExperiment": ("PyFLASH.dataframe", "DataFrameExperiment"),
+    "from_dataframe": ("PyFLASH.dataframe", "from_dataframe"),
+    "save_state": ("PyFLASH.serialization", "save_state"),
+    "load_state": ("PyFLASH.serialization", "load_state"),
+    "normalize_paths": ("PyFLASH.serialization", "normalize_paths"),
+    "Config": ("PyFLASH.config", "Config"),
+    "get_pyflash_style": ("PyFLASH.aesthetics", "get_pyflash_style"),
+    "set_pyflash_style": ("PyFLASH.aesthetics", "set_pyflash_style"),
+    "reset_pyflash_style": ("PyFLASH.aesthetics", "reset_pyflash_style"),
+    "pyflash_style_context": ("PyFLASH.aesthetics", "pyflash_style_context"),
+    "run_spec": ("PyFLASH.spec", "run_spec"),
+    "format_summary_for_display": ("PyFLASH.export", "format_summary_for_display"),
+    "set_verbosity": ("PyFLASH._logging", "set_verbosity"),
+    "silent": ("PyFLASH._logging", "silent"),
+    "verbose": ("PyFLASH._logging", "verbose"),
+    "Verbosity": ("PyFLASH._logging", "Verbosity"),
+    "call_action": ("PyFLASH.actions", "call_action"),
+    "run_spec_queue": ("PyFLASH.queue", "run_spec_queue"),
     "iterative_best_fit": ("PyFLASH.modelling", "iterative_best_fit"),
     "iterative_model_sweep": ("PyFLASH.modelling", "iterative_model_sweep"),
     "run_linear_model_pipeline": ("PyFLASH.modelling", "run_linear_model_pipeline"),
@@ -170,3 +183,10 @@ def __getattr__(name):
 
 def __dir__():
     return sorted(set(globals()) | set(_LAZY_ATTRS) | set(_LAZY_SUBMODULES))
+
+
+# Resident callers must identify the sources present when this package loaded,
+# even if a later edit preserves file timestamps or changes a lazy submodule.
+from PyFLASH._persistence import code_identity as _source_identity
+_LOADED_SOURCE_IDENTITY = _source_identity()
+del _source_identity

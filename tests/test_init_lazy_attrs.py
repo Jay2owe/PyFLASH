@@ -53,6 +53,7 @@ def test_bare_import_stays_lightweight():
     """`import PyFLASH` must not drag in matplotlib (only touching plotting does)."""
     code = (
         "import sys, PyFLASH; "
+        "assert not {'numpy','pandas','scipy','streamlit'}.intersection(sys.modules), 'analysis dependencies imported eagerly'; "
         "assert 'matplotlib' not in sys.modules, 'matplotlib imported eagerly'; "
         "PyFLASH.plotting; "
         "assert 'matplotlib' in sys.modules, 'plotting did not load matplotlib'; "

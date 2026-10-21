@@ -3,6 +3,7 @@ Experiment class — imports CSVs, processes markers, builds summaries.
 """
 
 import os
+import copy
 import re
 import time
 import zipfile
@@ -30,9 +31,11 @@ from PyFLASH.utils import (
     replace_cropped, add_scn_num, replace_week_int,
     normalize_image_roi_name, normalize_animal_name,
     extract_region_base, normalize_hemisphere,
-    ProgressTracker, format_elapsed,
+    ProgressTracker, format_elapsed, convert_pixels_to_microns,
+    NOT_INCLUDED_SENTINEL,
 )
-from PyFLASH.export import format_summary_for_display
+from PyFLASH._summary_math import grouped_mean
+from PyFLASH.export import format_summary_for_display, _grouped_column_table
 
 # Maps subfolder names to marker class types
 ATTRIBUTE_DICT = {
@@ -43,7 +46,6 @@ ATTRIBUTE_DICT = {
     "Attributes": Attribute,
     "ROIs": Attribute,
 }
-NOT_INCLUDED_SENTINEL = "NOT_INCLUDED_IN_EXPERIMENT"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 BASE_IMAGE_COLUMNS = [
     "Experiment",
@@ -134,6 +136,10 @@ def _infer_experiment_root(data_path: str) -> str:
 
 
 def _infer_layout_name(data_path: str) -> str:
+    # Both exports can contain Objects, Intensity and ROIs. An explicit
+    # legacy Data Analysis directory owns its layout regardless of those names.
+    if os.path.basename(os.path.normpath(data_path)).casefold() == LEGACY_DATA_DIR.casefold():
+        return "legacy"
     try:
         contents = set(os.listdir(data_path))
     except OSError:
@@ -428,36 +434,51 @@ def _sort_image_table(image_df: pd.DataFrame, source=None, marker_names=None) ->
     )
 
 
-def _image_summary_meta(experiment):
-    summary = getattr(experiment, "summary", None)
-    if not isinstance(summary, pd.DataFrame) or summary.empty or "AnimalName" not in summary.columns:
-        return None
+def _extract_literal_factor(values, escaped_names):
+    """Keep nullable text and canonical object missing labels after extraction."""
+    if values.empty and not isinstance(values.dtype, pd.StringDtype):
+        values = values.astype(object)
+    labels = values.str.extract(f'({escaped_names})', expand=False)
+    return labels.where(labels.notna(), np.nan) if labels.dtype == object else labels
 
-    cols = ["AnimalName"]
-    for col in ["Condition"]:
+
+def _image_summary_meta(experiment, image_columns=()):
+    summary = getattr(experiment, "summary", None)
+    if not isinstance(summary, pd.DataFrame) or summary.empty:
+        return None
+    if "AnimalName" not in summary.columns:
+        if "AnimalName" not in summary.index.names:
+            return None
+        summary = summary.reset_index(level="AnimalName")
+    keys = ["AnimalName"]
+    if "Experiment" in summary.columns and "Experiment" in image_columns:
+        keys.insert(0, "Experiment")
+    cols = list(keys)
+    for col in ["Condition", *getattr(experiment, "factor", [])]:
         if col in summary.columns and col not in cols:
             cols.append(col)
-    for factor in getattr(experiment, "factor", []):
-        if factor in summary.columns and factor not in cols:
-            cols.append(factor)
-    return summary[cols].drop_duplicates(subset=["AnimalName"])
+    if len(cols) == len(keys):
+        return None
+    return summary[cols].drop_duplicates(subset=keys)
 
-
-def _attach_image_metadata(experiment, image_df: pd.DataFrame) -> pd.DataFrame:
+def _attach_image_metadata(experiment, image_df):
     if not isinstance(image_df, pd.DataFrame):
         return _empty_image_table()
     if image_df.empty:
         return image_df.copy()
-
-    meta = _image_summary_meta(experiment)
+    meta = _image_summary_meta(experiment, image_df.columns)
     if meta is None:
         return image_df.copy()
-
+    keys = ["AnimalName"]
+    if "Experiment" in meta.columns and "Experiment" in image_df.columns:
+        keys.insert(0, "Experiment")
     out = image_df.copy()
-    refresh_cols = [c for c in meta.columns if c != "AnimalName" and c in out.columns]
-    if len(refresh_cols) > 0:
-        out = out.drop(columns=refresh_cols, errors="ignore")
-    return out.merge(meta, on="AnimalName", how="left")
+    refresh_cols = [c for c in meta.columns if c not in keys and c in out.columns]
+    if refresh_cols:
+        out = out.drop(columns=refresh_cols)
+    out = out.merge(meta, on=keys, how="left")
+    out.attrs = copy.deepcopy(image_df.attrs)
+    return out
 
 
 def _get_image_table(experiment, include_summary=True):
@@ -1057,7 +1078,16 @@ def _zscore_series(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(series, errors='coerce')
     mu = s.mean(skipna=True)
     sigma = s.std(skipna=True, ddof=0)
-    if not np.isfinite(sigma) or sigma == 0:
+    if sigma == 0 and s.nunique(dropna=True) > 1:
+        # Rescale before squaring subnormal differences; original values stay intact.
+        scale = s.abs().max(skipna=True)
+        if np.isfinite(scale) and scale > 0:
+            s = s / scale
+            mu = s.mean(skipna=True)
+            sigma = s.std(skipna=True, ddof=0)
+    if not np.isfinite(sigma):
+        return pd.Series(np.nan, index=s.index, dtype=float)
+    if sigma == 0:
         out = pd.Series(np.nan, index=s.index, dtype=float)
         out.loc[s.notna()] = 0.0
         return out
@@ -1998,8 +2028,10 @@ def _add_marker_scores(summary: pd.DataFrame) -> pd.DataFrame:
             count_s = _to_numeric_series_excluding_sentinel(out[count_col])
             volume_s = _to_numeric_series_excluding_sentinel(out[volume_col])
             denom = volume_s.where(volume_s > 0, np.nan)
-            frag_ratio = count_s / denom
-            frag_score = _zscore_series(_log1p_nonnegative(frag_ratio))
+            # Compute log1p(count/volume) without overflowing the intermediate ratio.
+            with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
+                frag_log = np.logaddexp(0., np.log(count_s) - np.log(denom))
+            frag_score = _zscore_series(frag_log)
             sentinel_mask = _all_sources_are_sentinel(out, [count_col, volume_col])
             if sentinel_mask.any():
                 frag_score = frag_score.astype(object)
@@ -2322,7 +2354,7 @@ class Experiment:
             self.data_layout = resolved_paths["layout"]
         self.data = {}
         self.markers = set()
-        self.threshold = threshold or Config.THRESHOLD
+        self.threshold = Config.THRESHOLD if threshold is None else threshold
         self._provenance_sources = []
 
     def _declare_provenance_source(self, path, role):
@@ -2634,10 +2666,10 @@ class Experiment:
                 other_cols = [c for c in mean_candidate_cols if c not in mean_cols]
 
                 if len(mean_cols) > 0:
-                    grouped_numeric = pd.concat(
+                    grouped_numeric = grouped_mean(pd.concat(
                         [stain_df[['AnimalName']], mean_numeric[mean_cols]],
                         axis=1
-                    ).groupby('AnimalName')[mean_cols].mean()
+                    ), 'AnimalName', mean_cols)
                     mean_df = grouped_numeric.add_suffix('Mean')
                     mean_df = _rename_family_coloc_mean_summary_columns(mean_df, stain.name)
                 else:
@@ -2767,8 +2799,9 @@ class Experiment:
                 area_mean = pd.to_numeric(roi_summary['Area(um^2)Mean'], errors='coerce')
             elif 'Area(pixel)Mean' in roi_summary.columns:
                 area_mean = (
-                    pd.to_numeric(roi_summary['Area(pixel)Mean'], errors='coerce')
-                    * (Config.PIXEL_SIZE ** 2)
+                    convert_pixels_to_microns(convert_pixels_to_microns(
+                        pd.to_numeric(roi_summary['Area(pixel)Mean'], errors='coerce')
+                    ))
                 )
             if area_mean is not None:
                 roi_summary['ROI_Area'] = area_mean
@@ -2900,37 +2933,84 @@ class Experiment:
     # ── Condition assignment ───────────────────────────────────────────
 
     def set_condition_list(self, condition_list):
-        self.condition_list = condition_list
-        self.conditions = condition_list.conditions
-        self.factor = condition_list.factor
-        self.factorDict = condition_list.factorDict
-        for f in self.factor:
-            names = '|'.join([c.name for c in self.factorDict[f]])
-            for roi_base, summary_df in self.summaries.items():
-                animal_conditions = pd.Series([
-                    ''.join(filter(str.isalpha, n))
-                    for n in summary_df.reset_index()['AnimalName'].tolist()
-                ], index=summary_df.index)
-                if 'Condition' not in summary_df.columns:
-                    summary_df['Condition'] = animal_conditions
-                else:
-                    missing_condition = (
-                        summary_df['Condition'].isna()
-                        | summary_df['Condition'].astype(str).str.strip().eq("")
-                    )
-                    summary_df.loc[missing_condition, 'Condition'] = animal_conditions.loc[missing_condition]
-                summary_df[f] = summary_df['Condition'].str.extract(f'({names})', expand=False)
-            for key in self.data:
-                df = self.data[key].df
-                if 'Condition' in df.columns:
-                    df[f] = df['Condition'].str.extract(f'({names})', expand=False)
-        if isinstance(getattr(self, "images", None), pd.DataFrame) and not self.images.empty:
-            self.images = _attach_image_metadata(self, self.images)
-        return self.condition_list
+            self.condition_list = condition_list
+            self.conditions = condition_list.conditions
+            self.factor = condition_list.factor
+            self.factorDict = condition_list.factorDict
+            for f in self.factor:
+                names = '|'.join([re.escape(c.name) for c in self.factorDict[f]])
+                for roi_base, summary_df in self.summaries.items():
+                    animal_conditions = pd.Series([
+                        ''.join(filter(str.isalpha, n))
+                        for n in summary_df.reset_index()['AnimalName'].tolist()
+                    ], index=summary_df.index, dtype=object)
+                    if 'Condition' not in summary_df.columns:
+                        summary_df['Condition'] = animal_conditions
+                    else:
+                        missing_condition = (
+                            summary_df['Condition'].isna()
+                            | summary_df['Condition'].astype(str).str.strip().eq("")
+                        )
+                        summary_df.loc[missing_condition, 'Condition'] = animal_conditions.loc[missing_condition]
+                    summary_df[f] = _extract_literal_factor(summary_df['Condition'], names)
+                for key in self.data:
+                    df = self.data[key].df
+                    if 'Condition' in df.columns:
+                        df[f] = _extract_literal_factor(df['Condition'], names)
+            if isinstance(getattr(self, "images", None), pd.DataFrame) and not self.images.empty:
+                self.images = _attach_image_metadata(self, self.images)
+            return self.condition_list
 
     # ── Region assignment ────────────────────────────────────────────────
 
     def assign_region(self):
+        """Assign region labels atomically, preserving drawing order and table metadata.
+
+        Region may be a column or the named index, but not both. Tables without
+        a Region column are reported as skipped. Repeated calls keep the same
+        table shape; the legacy SCN aliases always refer to the current result.
+        """
+        if not any("ROI Properties" in key for key in self.data):
+            self.master_region = pd.DataFrame(columns=["AnimalName", "Region", "ImageROI"])
+            self._last_region_summary = "No ROI Properties tables found"
+            self.master_scn = self.master_region
+            self._last_scn_summary = self._last_region_summary
+            return self.master_region
+
+        working = copy.copy(self)
+        working.data = {}
+        attributes = {}
+        for key, data in self.data.items():
+            if not isinstance(getattr(data, "df", None), pd.DataFrame):
+                raise TypeError(f"Region assignment requires a pandas DataFrame for {key}.")
+            source = data.df
+            if source.index.name == "Region" and "Region" in source.columns:
+                raise ValueError(f"Region is present in both the index and columns for {key}.")
+            prepared = source.reset_index() if source.index.name == "Region" else source.reset_index(drop=True)
+            if "ROI Properties" in key and not {"AnimalName", "Region"}.issubset(prepared.columns):
+                raise ValueError("ROI Properties tables require AnimalName and Region columns.")
+            holder = copy.copy(data)
+            holder.df = prepared.copy(deep=True)
+            working.data[key] = holder
+            attributes[key] = copy.deepcopy(source.attrs)
+
+        result = working._assign_region_tables()
+        for key, holder in working.data.items():
+            # Skipped data stays exactly as supplied, including its index.
+            if "Region" not in holder.df.columns:
+                holder.df = self.data[key].df.copy(deep=True)
+            elif "AnimalName" in holder.df.columns and "ImageROI" not in holder.df.columns:
+                holder.df["ImageROI"] = pd.Series(dtype="object", index=holder.df.index)
+            holder.df.attrs = attributes[key]
+            holder.df.columns.name = self.data[key].df.columns.name
+        # Publish only after every table and the complete master map succeeded.
+        for key, holder in working.data.items():
+            self.data[key].df = holder.df
+        self.master_region = self.master_scn = result
+        self._last_region_summary = self._last_scn_summary = working._last_region_summary
+        return result
+
+    def _assign_region_tables(self):
         """Assign Region identifiers and ImageROI labels to all data tables."""
         roi_dfs = [self.data[k].df.copy() for k in self.data if 'ROI Properties' in k]
         if len(roi_dfs) == 0:
@@ -2938,12 +3018,7 @@ class Experiment:
             self._last_region_summary = "No ROI Properties tables found"
             return self.master_region
 
-        # Reset index (Region) back to column for all data tables
-        failures = []
-        for data in self.data.values():
-            data.df.reset_index(inplace=True)
-            if "Region" not in data.df.columns:
-                failures.append(data.name)
+        failures = [data.name for data in self.data.values() if "Region" not in data.df.columns]
 
         roi_name_map = pd.DataFrame()
         rois_obj = self.data.get("ROIs", None)
@@ -3007,6 +3082,12 @@ class Experiment:
                 self.master_region = self.master_region.drop(columns=["Hemisphere"], errors="ignore")
             else:
                 self.master_region["ImageROI"] = self.master_region["Region"]
+
+        # Make drawing order available before assigning the final paired labels.
+        if roi_name_map.empty:
+            for data in self.data.values():
+                if "AnimalName" in data.df.columns and "Region" in data.df.columns:
+                    data.df = _apply_roi_name_map(data.df, self.master_region)
 
         source_order = _source_panel_order_rows(self)
         if not source_order.empty:
@@ -3161,14 +3242,9 @@ class Experiment:
         cols = [c for c in df.columns if c not in ['Condition', 'AnimalName']]
         if len(cols) > 0:
             os.makedirs(self.column_path, exist_ok=True)
+        groups = {cond.name: df[df['Condition'] == cond.name] for cond in self.condition_list}
         for col in cols:
-            col_data = {}
-            for cond in self.condition_list:
-                col_data[cond.name] = df[df['Condition'] == cond.name][col]
-            col_df = pd.DataFrame(col_data)
-            cleaned = pd.DataFrame({
-                c: col_df[c].dropna().reset_index(drop=True) for c in col_df.columns
-            })
+            cleaned = _grouped_column_table(groups, col)
             cleaned.to_csv(os.path.join(self.column_path, f'{col}.csv'), index=False)
 
     def save_attribute_csvs(self):
@@ -3228,7 +3304,9 @@ class Experiment:
         print(f"Path: {self.filePath}")
         print(f"Data keys: {list(self.data.keys())}")
         if hasattr(self, 'summary'):
-            print(f"Conditions: {self.summary['Condition'].unique()}")
+            summary = self.summary
+            conditions = summary['Condition'].unique() if 'Condition' in summary else []
+            print(f"Conditions: {conditions}")
 
     # ── Serialization ──────────────────────────────────────────────────
 
@@ -3240,7 +3318,10 @@ class Experiment:
         state.pop('imagesDict', None)
         state.pop('animal_dict', None)
         state.pop('var_name', None)
-        return state
+        state.pop('_ui_initial_catalogue', None)
+        state.pop('_ui_source_version', None)
+        from PyFLASH._state_paths import portable_state
+        return portable_state(state)
 
     def __setstate__(self, state):
         self.__dict__.update(state)
@@ -3279,19 +3360,17 @@ class MiniExperiment(Experiment):
 
     @staticmethod
     def _format_animal_name(value):
+        """Keep text identities exact; canonicalize only exact numeric integers."""
         if pd.isna(value):
             return np.nan
         if isinstance(value, str):
             text = value.strip()
             if text == "":
                 return np.nan
-            numeric = pd.to_numeric(text, errors="coerce")
-            if pd.notna(numeric) and np.isfinite(numeric) and np.isclose(numeric, round(float(numeric))):
-                return str(int(round(float(numeric))))
             return text
         if isinstance(value, (int, np.integer)):
             return str(int(value))
-        if isinstance(value, (float, np.floating)) and np.isfinite(value) and np.isclose(value, round(float(value))):
+        if isinstance(value, (float, np.floating)) and np.isfinite(value) and float(value).is_integer():
             return str(int(round(float(value))))
         text = str(value).strip()
         return text if text != "" else np.nan
@@ -3373,7 +3452,8 @@ class MiniExperiment(Experiment):
                 cond.name
                 for cond in getattr(condition_list, "factorDict", {}).get(factor, [])
             ]
-            out[factor] = self._map_factor_series(out[factor], factor, allowed_names=allowed)
+            out[factor] = (pd.Series(index=out.index, dtype=object) if out.empty else
+                           self._map_factor_series(out[factor], factor, allowed_names=allowed))
             assigned_factor = True
 
         if not assigned_factor:
@@ -3392,89 +3472,170 @@ class MiniExperiment(Experiment):
                     return np.nan
                 return condition_lookup.get(key, "".join(str(value) for value in key))
 
-            out["Condition"] = out.apply(_condition_from_row, axis=1)
+            out["Condition"] = (pd.Series(index=out.index, dtype=object) if out.empty else
+                                out.apply(_condition_from_row, axis=1))
 
         return out, True
 
     def importCSVs(self, progress=True):
         self.createSavePaths()
-
-        labels_path = os.path.join(self.filePath, "Condition Labels.csv")
+        labels_path = os.path.join(self.filePath, 'Condition Labels.csv')
+        labels = None
         if os.path.exists(labels_path):
-            self.condition_labels = pd.read_csv(labels_path)
-            self._declare_provenance_source(labels_path, "condition_labels")
-
-        files = [f for f in sorted(os.listdir(self.filePath)) if f.endswith('.csv') and f != 'Condition Labels.csv']
-        tracker = ProgressTracker(
-            f"{self.name} importCSVs",
-            total=len(files),
-            unit="file",
-            enabled=progress and len(files) > 0,
-        )
-
-        for filename in files:
-            tracker.start_item(filename)
-            if filename.endswith('.csv') and filename != 'Condition Labels.csv':
-                name = os.path.splitext(filename)[0]
+            labels = pd.read_csv(labels_path, dtype=str, keep_default_na=False)
+            if len(labels.columns):
+                first = labels.columns[0]
+                labels[first] = labels[first].map(self._format_animal_name)
+        files = [name for name in sorted(os.listdir(self.filePath))
+                 if name.endswith('.csv') and name != 'Condition Labels.csv']
+        tracker = ProgressTracker(f'{self.name} importCSVs', total=len(files), unit='file',
+                                  enabled=progress and len(files) > 0)
+        from types import SimpleNamespace
+        staging_owner = SimpleNamespace() if labels is None else SimpleNamespace(condition_labels=labels)
+        staged = {}
+        try:
+            for filename in files:
+                tracker.start_item(filename)
                 path = os.path.join(self.filePath, filename)
-                self._declare_provenance_source(path, "raw_csv")
-                self.data[name] = Attribute(name, self._prepare_flat_csv(pd.read_csv(path)), self)
-            tracker.finish_item(filename)
-        self._last_csv_import_summary = f"{len(files)} tables"
+                headers = pd.read_csv(path, nrows=0).columns
+                subject = self._resolve_animal_column(headers)
+                text_columns = set(self.factor_mappings) & set(headers)
+                text_columns.update(set(getattr(self, 'factor', ()) or ()) & set(headers))
+                if subject is not None:
+                    text_columns.add(subject)
+                imported = pd.read_csv(path, converters={column: str for column in text_columns} or None)
+                name = os.path.splitext(filename)[0]
+                carrier = Attribute(name, self._prepare_flat_csv(imported), staging_owner)
+                if carrier.df.empty:
+                    carrier.df['Condition'] = carrier.df['Condition'].astype(object)
+                carrier.experiment = self
+                staged[name] = carrier
+                tracker.finish_item(filename)
+        except Exception:
+            tracker.close('CSV import failed; previous tables retained')
+            raise
+        # Keep the mapping and provenance list identities, while removing stale
+        # CSV ownership only after every new file and condition label is accepted.
+        sources = [entry for entry in self._provenance_sources
+                   if entry['role'] not in {'raw_csv', 'condition_labels'}]
+        incoming = ([(labels_path, 'condition_labels')] if labels is not None else [])
+        incoming.extend((os.path.join(self.filePath, name), 'raw_csv') for name in files)
+        for path, role in incoming:
+            entry = {'path': os.path.abspath(os.fspath(path)), 'role': role, 'project_root': self.source_root}
+            if entry not in sources:
+                sources.append(entry)
+        self.data.clear()
+        self.data.update(staged)
+        if labels is None:
+            self.__dict__.pop('condition_labels', None)
+        else:
+            self.condition_labels = labels
+        self._provenance_sources[:] = sources
+        self._last_csv_import_summary = f'{len(files)} tables'
         tracker.close(self._last_csv_import_summary)
         return self.data
 
     def createSummary(self, progress=True):
         summary_dfs = []
+        protected = set(getattr(self, 'factor', ()) or ()) | set(self.factor_mappings)
         for data in self.data.values():
-            df = data.df
-            numeric_cols, other_cols = get_nonobject_columns(df)
-            other_cols = [c for c in other_cols if c not in {'AnimalName', 'ImageROI', 'ROINameRaw'}]
-            summary_dfs.append(df.groupby('AnimalName')[numeric_cols].mean())
-            summary_dfs.append(df.groupby('AnimalName')[other_cols].first())
+            from ._summary_math import _flat_summary_parts
+            summary_dfs.extend(_flat_summary_parts(data.df, protected))
 
-        self.summary = reduce(
-            lambda l, r: pd.merge(l, r, left_on='AnimalName', right_on='AnimalName', how='outer'),
-            summary_dfs
-        )
-        if "AnimalName" not in self.summary.columns and self.summary.index.name == "AnimalName":
-            self.summary = self.summary.reset_index()
-        if "AnimalName" in self.summary.columns:
-            self.summary["Condition"] = _condition_from_animal_name(self.summary["AnimalName"])
+        def merge_parts(left, right):
+            if 'AnimalName' not in left.columns and left.index.name == 'AnimalName':
+                left = left.reset_index()
+            if 'AnimalName' not in right.columns and right.index.name == 'AnimalName':
+                right = right.reset_index()
+            overlap = protected & set(left.columns) & set(right.columns)
+            if not overlap:
+                return pd.merge(left, right, on='AnimalName', how='outer')
+            tokens = {factor: object() for factor in overlap}
+            result = pd.merge(left, right.rename(columns=tokens), on='AnimalName', how='outer')
+            for factor, token in tokens.items():
+                first = self._map_factor_series(result[factor], factor)
+                second = self._map_factor_series(result[token], factor)
+                shared = first.notna() & second.notna()
+                if first.loc[shared].astype(str).ne(second.loc[shared].astype(str)).any():
+                    raise ValueError('A subject has conflicting condition factor values across tables.')
+                result[factor] = result[factor].where(result[factor].notna(), result[token])
+            return result.drop(columns=list(tokens.values()))
+
+        if summary_dfs:
+            summary = reduce(merge_parts, summary_dfs)
+            if 'AnimalName' not in summary.columns and summary.index.name == 'AnimalName':
+                summary = summary.reset_index()
+            if 'AnimalName' in summary.columns:
+                summary['Condition'] = _condition_from_animal_name(summary['AnimalName'])
+            else:
+                summary['Condition'] = _condition_from_animal_name(summary.index)
         else:
-            self.summary["Condition"] = _condition_from_animal_name(self.summary.index)
-        self.summary = _add_marker_scores(self.summary)
-        self.summary = _fill_intden_totals_with_zero(self.summary)
-        self.summaries = {"SCN": self.summary}
-        self._last_summary_summary = f"{self.summary.shape[0]} subjects x {self.summary.shape[1]} columns"
-        return self.summary
+            summary = pd.DataFrame({'AnimalName': pd.Series(dtype=object), 'Condition': pd.Series(dtype=object)})
+        summary = _add_marker_scores(summary)
+        summary = _fill_intden_totals_with_zero(summary)
+        self.summary = summary
+        self.summaries = {'SCN': summary}
+        self._last_summary_summary = f'{summary.shape[0]} subjects x {summary.shape[1]} columns'
+        return summary
 
     def set_condition_list(self, condition_list):
+        # Stage every derived table before changing the experiment. Conditions
+        # belong to subjects and must reach tables that omit factor columns.
+        summaries = dict(getattr(self, 'summaries', {}))
+        if not summaries and isinstance(getattr(self, 'summary', None), pd.DataFrame):
+            summaries = {'SCN': self.summary}
+        staged_summaries, staged_data = {}, {}
+        assigned = False
+        for region, frame in summaries.items():
+            mapped, changed = self._assign_conditions_from_factor_columns(frame, condition_list)
+            staged_summaries[region] = mapped
+            assigned = assigned or changed
+        for name, carrier in self.data.items():
+            mapped, changed = self._assign_conditions_from_factor_columns(carrier.df, condition_list)
+            staged_data[name] = mapped
+            assigned = assigned or changed
+        if not assigned:
+            return super().set_condition_list(condition_list)
+        factors = list(getattr(condition_list, 'factor', ()) or ())
+        columns = factors + ['Condition']
+        source_frames = [frame.reset_index(level='AnimalName')
+                         if 'AnimalName' not in frame.columns and 'AnimalName' in frame.index.names
+                         else frame for frame in list(staged_summaries.values()) + list(staged_data.values())]
+        sources = [frame[['AnimalName'] + columns] for frame in source_frames
+                   if {'AnimalName', *columns}.issubset(frame.columns)]
+        if sources:
+            combined = pd.concat(sources, ignore_index=True)
+            grouped = combined.groupby('AnimalName')[columns]
+            if grouped.nunique(dropna=True).gt(1).any().any():
+                raise ValueError('A subject has conflicting condition factor values across tables.')
+            lookup = grouped.first()
+            for frame in list(staged_summaries.values()) + list(staged_data.values()):
+                for column in columns:
+                    subjects = frame['AnimalName'] if 'AnimalName' in frame.columns else pd.Series(
+                        frame.index.get_level_values('AnimalName'), index=frame.index)
+                    inherited = (pd.Series(index=frame.index, dtype=object) if frame.empty else
+                                 subjects.map(lookup[column]))
+                    frame[column] = inherited if column not in frame else inherited.where(inherited.notna(), frame[column])
+        images = getattr(self, 'images', None)
+        staged_images = images
+        if isinstance(images, pd.DataFrame) and not images.empty:
+            from types import SimpleNamespace
+            image_source = SimpleNamespace(summary=staged_summaries.get('SCN'), factor=factors)
+            staged_images = _attach_image_metadata(image_source, images)
         self.condition_list = condition_list
         self.conditions = condition_list.conditions
         self.factor = condition_list.factor
         self.factorDict = condition_list.factorDict
-
-        assigned = False
-        if hasattr(self, "summaries"):
-            for roi_base, summary_df in list(self.summaries.items()):
-                mapped, did_assign = self._assign_conditions_from_factor_columns(summary_df, condition_list)
-                self.summaries[roi_base] = mapped
-                assigned = assigned or did_assign
-            if "SCN" in self.summaries:
-                self.summary = self.summaries["SCN"]
-        elif isinstance(getattr(self, "summary", None), pd.DataFrame):
-            self.summary, assigned = self._assign_conditions_from_factor_columns(self.summary, condition_list)
-            self.summaries = {"SCN": self.summary}
-
-        for key in self.data:
-            df = self.data[key].df
-            mapped, did_assign = self._assign_conditions_from_factor_columns(df, condition_list)
-            self.data[key].df = mapped
-            assigned = assigned or did_assign
-
-        if not assigned:
-            return super().set_condition_list(condition_list)
+        if staged_summaries:
+            if not hasattr(self, 'summaries'):
+                self.summaries = {}
+            self.summaries.update(staged_summaries)
+            if 'SCN' in self.summaries:
+                self.summary = self.summaries['SCN']
+        for name, frame in staged_data.items():
+            self.data[name].df = frame
+        if staged_images is not images:
+            self.images = staged_images
         return self.condition_list
 
     def processData(self, import_images=True, progress=True):

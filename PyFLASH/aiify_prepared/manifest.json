@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "kind": "aiify.prepared",
+  "aiify_version": "0.4.2",
+  "app": "PyFLASH",
+  "target": "PyFLASH",
+  "source_root": ".",
+  "source_hash": "7cee07287fb79642ffb64ba1e78cad87ed3c6f512365363abfc5700030cb7f7d",
+  "analysis": "Existing native registries and the shared bridge perform tasks. This reviewed read-only shortcut reduces workspace discovery calls while retaining live job managers, pinned context and specialist action boundaries.",
+  "actions": [
+    {
+      "name": "workspace.overview",
+      "function": "workspace_overview",
+      "summary": "Read this workspace's current native state in one call.",
+      "mutates": false,
+      "destructive": false,
+      "evidence": [
+        "ui/ai_assistant.py:1"
+      ],
+      "tests": [
+        "test_requires_live_binding",
+        "test_real_backend_readback"
+      ]
+    }
+  ],
+  "provider": "developer-reviewed",
+  "model": null,
+  "effort": null,
+  "built": "2026-10-06T21:17:06.367512+00:00",
+  "artifacts": {
+    "actions.py": "c7094f2e8a48ca491e0829e4bdffec82ac39b38ebeaa1333b28bb0f35cb4aba8",
+    "test_actions.py": "171d771db3e2f1a7c8df6ce6843bb6a7d3f3002c28b63418cdfa0eec2e222f71",
+    "guide.md": "7f6b4203cab01cd73496d825a3eece278c0f288688d82a0d43efd3a390814e11",
+    "TEST.md": "4d437cf1f6fb936adb0304b0c33d171140a34e6478c02bddabf885addf497ebd"
+  }
+}

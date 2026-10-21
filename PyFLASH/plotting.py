@@ -429,7 +429,7 @@ def set_display_name(ax, y_label=None, x_label=None, minimal=False, compact_per=
 # order a positional ``column_labels`` list is zipped against.
 _COLUMN_LABEL_SOURCES = ("data_cols", "filtered_columns", "columns",
                          "column_strings", "data_col_contains",
-                         "column", "marker")
+                         "category", "column", "marker")
 
 
 def column_label_scope(func):
@@ -444,15 +444,19 @@ def column_label_scope(func):
     underlying column identity (palette keys, describe records, saved data) is
     unchanged. Safe on plots without column labels: a ``None`` value is a no-op.
     """
+    parameter_names = func.__code__.co_varnames[:func.__code__.co_argcount]
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        labels = kwargs.get("column_labels")
+        arguments = dict(zip(parameter_names, args))
+        arguments.update(kwargs)
+        labels = arguments.get("column_labels")
         if not labels:
             return func(*args, **kwargs)
         cols = None
         if not isinstance(labels, Mapping):
             for key in _COLUMN_LABEL_SOURCES:
-                val = kwargs.get(key)
+                val = arguments.get(key)
                 if val is not None:
                     cols = list(val) if isinstance(val, (list, tuple)) else [val]
                     break
@@ -5070,6 +5074,49 @@ def _filter_marker_df_for_context(ctx: Context, df: pd.DataFrame) -> pd.DataFram
     the corresponding summary subset.
     """
     out = df
+    # A declared empty group cannot acquire measurements from other groups.
+    if ctx.condition is not None and ctx.condition_df.empty:
+        return out.iloc[:0]
+    if ctx.factor is not None and ctx.factor_value is not None and ctx.factor_df.empty:
+        return out.iloc[:0]
+    # Marker objects span regions; the selected summary alone does not filter them.
+    if getattr(ctx, 'roi_base', None) is not None and 'Region' in out.columns:
+        try:
+            region_dict = ctx.region_dict
+        except KeyError:
+            # Factor-only legacy summaries intentionally omit condition metadata.
+            if 'Condition' in ctx.summary.columns:
+                raise
+            region_dict = {}
+            # Acquired region metadata remains usable without condition labels.
+            acquired = getattr(ctx.experiment, 'master_region', None)
+            if isinstance(acquired, pd.DataFrame) and 'Region' in acquired.columns:
+                from PyFLASH.experiment import extract_region_base
+                if 'ROI' in acquired.columns:
+                    bases = acquired['ROI'].fillna('').astype(str).map(extract_region_base)
+                    acquired = acquired[bases == ctx.roi_base]
+                elif ctx.roi_base != 'SCN':
+                    acquired = acquired.iloc[:0]
+                allowed = set(acquired['Region'].astype(str).str.strip().str.casefold())
+                out = out[out['Region'].astype(str).str.strip().str.casefold().isin(allowed)]
+
+        # Older Experiment objects expose condition -> subject lists rather than
+        # region maps. Preserve their implicit single-region-group behavior.
+        region_maps = [animals for animals in region_dict.values() if isinstance(animals, dict)]
+        acquired = getattr(ctx.experiment, 'master_region', None)
+        implicit_unmapped = (ctx.roi_base == 'SCN' and isinstance(acquired, pd.DataFrame)
+                             and acquired.empty and 'ROI' not in acquired.columns)
+        # Flat CSV batches have no acquired ROI table. assign_region records an
+        # empty placeholder, whose empty subject maps must not erase categorical
+        # Region values. Explicit ROI groups still require their acquired map.
+        if region_maps and not implicit_unmapped:
+            allowed_regions = {
+                str(region).strip().casefold()
+                for animals in region_maps
+                for regions in animals.values()
+                for region in regions
+            }
+            out = out[out['Region'].astype(str).str.strip().str.casefold().isin(allowed_regions)]
 
     def _norm(series: pd.Series) -> pd.Series:
         return series.astype(str).str.strip().str.casefold()
@@ -5084,6 +5131,9 @@ def _filter_marker_df_for_context(ctx: Context, df: pd.DataFrame) -> pd.DataFram
             direct = out[_norm(out[ctx.factor]) == target]
             if len(direct) > 0:
                 out = direct
+            elif "AnimalName" in out.columns and "AnimalName" in ctx.factor_df.columns:
+                allowed = set(_norm_animal(ctx.factor_df["AnimalName"]).tolist())
+                out = out[_norm_animal(out["AnimalName"]).isin(allowed)]
         elif "AnimalName" in out.columns and "AnimalName" in ctx.factor_df.columns:
             allowed = set(_norm_animal(ctx.factor_df["AnimalName"]).tolist())
             out = out[_norm_animal(out["AnimalName"]).isin(allowed)]
@@ -5095,6 +5145,9 @@ def _filter_marker_df_for_context(ctx: Context, df: pd.DataFrame) -> pd.DataFram
             direct = out[_norm(out["Condition"]) == target]
             if len(direct) > 0:
                 out = direct
+            elif "AnimalName" in out.columns and "AnimalName" in ctx.condition_df.columns:
+                allowed = set(_norm_animal(ctx.condition_df["AnimalName"]).tolist())
+                out = out[_norm_animal(out["AnimalName"]).isin(allowed)]
         elif "AnimalName" in out.columns and "AnimalName" in ctx.condition_df.columns:
             allowed = set(_norm_animal(ctx.condition_df["AnimalName"]).tolist())
             out = out[_norm_animal(out["AnimalName"]).isin(allowed)]
@@ -10049,7 +10102,8 @@ def _plot_location_marker_group_panel(ax, ctx: Context, state, panel, *,
     }
 
 
-def _save_plotly_figure(fig, save_path, image_name, subfolder=None, verbose=True):
+def _save_plotly_figure(fig, save_path, image_name, subfolder=None, verbose=True,
+                        interactive=False):
     """
     Save a Plotly figure as SVG if possible, else HTML fallback.
 
@@ -10060,6 +10114,18 @@ def _save_plotly_figure(fig, save_path, image_name, subfolder=None, verbose=True
     if subfolder is not None:
         target_dir = os.path.join(target_dir, subfolder)
     os.makedirs(target_dir, exist_ok=True)
+
+    if interactive:
+        html_path = os.path.join(target_dir, f"{image_name}.html")
+        fig.write_html(html_path, include_plotlyjs=True, full_html=True,
+                       default_width='100%', default_height='95vh',
+                       config=dict(scrollZoom=True, displaylogo=False, responsive=True))
+        from PyFLASH import provenance
+        provenance.stamp_figure_artifact(html_path,
+            getattr(fig, '_pyflash_provenance_figure', fig), image_name)
+        if verbose:
+            _log.confirm(f"Interactive figure saved to {html_path}")
+        return html_path
 
     svg_path = os.path.join(target_dir, f"{image_name}.svg")
     try:
@@ -10404,8 +10470,8 @@ def _signed_mean_bar_limits(group_values, auto_ymax, registry_range=None,
     all_values = pd.concat(cleaned, ignore_index=True)
     outward_lows = []
     for values in cleaned:
-        mean = float(values.mean())
-        sem = float(values.std(ddof=1) / np.sqrt(len(values))) if len(values) > 1 else 0.0
+        from PyFLASH.stats import _comparison_sample_moments
+        mean, sem = _comparison_sample_moments(values)
         outward_lows.append(mean - sem if mean < 0 else mean)
     data_low = min(float(all_values.min()), min(outward_lows))
     scale = max(float(auto_ymax) - data_low, abs(data_low), abs(float(auto_ymax)), 1e-12)
@@ -10473,7 +10539,8 @@ def bar_chart_action(ctx: Context, state: dict,
         return {'condition': ctx.condition, 'mean': np.nan, 'n': 0}
 
     group_key = ctx.condition if ctx.condition is not None else ctx.factor_value
-    mean = values.mean()
+    from PyFLASH.stats import _comparison_sample_moments
+    mean, _ = _comparison_sample_moments(values)
     color = state.get('group_color_map', {}).get(group_key, ctx.color or 'black')
     fallback_idx = ctx.condition_index if ctx.condition is not None else ctx.factor_index
     idx = state.get('group_index_map', {}).get(group_key, fallback_idx)
@@ -10590,7 +10657,8 @@ def histogram_action(ctx: Context, state: dict,
     x_label = get_display_name(x, compact_per=True)
     marker_s = str(marker).strip()
     marker_prefix = f"{marker_s}_"
-    if marker_s and str(x).casefold().startswith(marker_prefix.casefold()):
+    from PyFLASH.utils import active_column_label
+    if active_column_label(x) is None and marker_s and str(x).casefold().startswith(marker_prefix.casefold()):
         marker_label = marker_s
         if marker_label.casefold() not in x_label.casefold():
             x_label = f"{marker_label} {x_label}".strip()
@@ -10700,7 +10768,8 @@ def pie_chart_action(ctx: Context, state: dict,
     x_label = get_display_name(x, compact_per=True)
     marker_s = str(marker).strip()
     marker_prefix = f"{marker_s}_"
-    if marker_s and str(x).casefold().startswith(marker_prefix.casefold()):
+    from PyFLASH.utils import active_column_label
+    if active_column_label(x) is None and marker_s and str(x).casefold().startswith(marker_prefix.casefold()):
         marker_label = marker_s
         if marker_label.casefold() not in x_label.casefold():
             x_label = f"{marker_label} {x_label}".strip()
@@ -11766,6 +11835,70 @@ def _annotate_regression_stats_summary(ax, entries, *, test=None, max_items=None
     )
 
 
+def _interactive_scatter_3d(axis, columns, title):
+    """Render the exact native scatter artists as a movable browser figure."""
+    import plotly.graph_objects as go
+
+    figure = go.Figure()
+    tables = []
+    labels = (axis.get_xlabel(), axis.get_ylabel(), axis.get_zlabel())
+    for collection in axis.collections:
+        if not hasattr(collection, '_offsets3d'):
+            continue
+        coordinates = [np.asarray(values, dtype=float) for values in collection._offsets3d]
+        if not len(coordinates[0]):
+            continue
+        color = mpl_to_rgb(collection.get_facecolor()[0])
+        color = f"rgb({','.join(str(round(value * 255)) for value in color)})"
+        identifiers = getattr(collection, '_pyflash_subjects', None)
+        group = collection.get_label()
+        sizes = getattr(collection, '_sizes3d', collection.get_sizes())
+        marker = dict(color=color, size=(np.sqrt(sizes) * 96 / 72).tolist(),
+                      opacity=collection.get_alpha() if collection.get_alpha() is not None else 1)
+        edges, widths = collection.get_edgecolor(), collection.get_linewidths()
+        if len(edges) and len(widths):
+            edge = mpl_to_rgb(edges[0])
+            marker['line'] = dict(width=float(widths[0]) * 96 / 72,
+                color=f"rgb({','.join(str(round(value * 255)) for value in edge)})")
+        figure.add_trace(go.Scatter3d(
+            x=coordinates[0].tolist(), y=coordinates[1].tolist(), z=coordinates[2].tolist(),
+            name=group, mode='markers',
+            customdata=identifiers,
+            marker=marker,
+            hovertemplate=(("Participant: %{customdata}<br>" if identifiers is not None else '')
+                + f"{labels[0]}: %{{x:.5g}}<br>{labels[1]}: %{{y:.5g}}<br>"
+                + f"{labels[2]}: %{{z:.5g}}<extra>%{{fullData.name}}</extra>"),
+        ))
+        table = pd.DataFrame(dict(zip(columns, coordinates)))
+        table['Group'] = group
+        if identifiers is not None:
+            table['Participant'] = identifiers
+        tables.append(table)
+    angle, elevation = np.deg2rad([axis.azim, axis.elev])
+    scene = dict(aspectmode='cube', dragmode='orbit', camera=dict(eye=dict(
+        x=float(2.6 * np.cos(elevation) * np.cos(angle)),
+        y=float(2.6 * np.cos(elevation) * np.sin(angle)), z=float(2.6 * np.sin(elevation)))))
+    # WebGL text is projected with the scene; the native label size avoids
+    # large tick billboards obscuring points in wide browser windows.
+    tick_size = axis.xaxis.label.get_fontsize() * 96 / 72
+    for dimension, label, limits in zip('xyz', labels,
+            (axis.get_xlim3d(), axis.get_ylim3d(), axis.get_zlim3d())):
+        scene[f'{dimension}axis'] = dict(title=dict(text=label), range=list(limits),
+            tickfont=dict(size=tick_size), nticks=5, showgrid=True,
+            showline=True, zeroline=False)
+    figure.update_layout(template='simple_white', scene=scene,
+        title=dict(text=axis.get_title() or title,
+                   font=dict(size=axis.title.get_fontsize() * 96 / 72)), autosize=True,
+        font=dict(family=', '.join(axis.xaxis.label.get_family()),
+                  size=axis.xaxis.label.get_fontsize() * 96 / 72),
+        showlegend=len(figure.data) > 1, margin=dict(l=20, r=20, b=20, t=60))
+    _attach_reprofig(axis.figure, plotted_data=pd.concat(tables, ignore_index=True) if tables else None,
+                    analysis=dict(plot='scatter_3d', interactive=True))
+    # Plotly figures are unhashable; the native figure owns the weak attachment.
+    figure._pyflash_provenance_figure = axis.figure
+    return figure
+
+
 def scatter_3d_action(ctx: Context, state: dict,
                       x=None, y=None, z=None,
                       normalize_x=False, normalize_y=False, normalize_z=False,
@@ -11782,7 +11915,7 @@ def scatter_3d_action(ctx: Context, state: dict,
 
     source_df = ctx.factor_df if by == 'factor' else ctx.condition_df
     size_by = kwargs.get('size_by')
-    cols = [x, y, z]
+    cols = list(dict.fromkeys([x, y, z]))
     if size_by is not None and size_by not in cols:
         cols.append(size_by)
     df = source_df[cols].copy()
@@ -11791,6 +11924,9 @@ def scatter_3d_action(ctx: Context, state: dict,
     z_range = kwargs.get('z_range')
     for col_name in (x, y, z):
         df[col_name] = _to_numeric_excluding_not_included(df[col_name])
+    valid_rows = df[[x, y, z]].notna().all(axis=1).to_numpy()
+    subjects = np.asarray(source_df['AnimalName'] if 'AnimalName' in source_df else source_df.index,
+                          dtype=str)[valid_rows]
     df = df.dropna(subset=[x, y, z])
     df[x] = _normalize_regression_series(df[x], normalize_x, axis_name=x)
     df[y] = _normalize_regression_series(df[y], normalize_y, axis_name=y)
@@ -11820,12 +11956,13 @@ def scatter_3d_action(ctx: Context, state: dict,
         size_factor=size_factor,
         size_norm=state.get('size_norm'),
     )
-    ax.scatter(
+    collection = ax.scatter(
         df[x], df[y], df[z],
         c=group_color, s=sizes, alpha=alpha,
         label=group_name,
         edgecolors=edge_color, linewidths=point_linewidth,
     )
+    collection._pyflash_subjects = subjects.tolist()
 
     if x_range is not None and len(x_range) == 2:
         ax.set_xlim3d(x_range[0], x_range[1])
@@ -14896,8 +15033,8 @@ def plot_mean_bars(experiment, filtered_columns=None,
                 s = pd.to_numeric(pd.Series(s), errors='coerce').dropna()
                 if len(s) == 0:
                     continue
-                mean_s = float(s.mean())
-                sem_s = float(s.std(ddof=1) / np.sqrt(len(s))) if len(s) > 1 else 0.0
+                from PyFLASH.stats import _comparison_sample_moments
+                mean_s, sem_s = _comparison_sample_moments(s)
                 per_group_tops.append(max(float(s.max()), mean_s + sem_s))
             top_val = max(per_group_tops) if len(per_group_tops) > 0 else float(all_vals.max())
             if registry_range is not None and registry_range[1] is not None:
@@ -16336,29 +16473,50 @@ def plot_condition_key(experiment, save=True, save_path=None,
     nrow = int(np.ceil(len(handles) / ncol))
     fig, ax = plt.subplots(figsize=(max(2.5, 3.0 * ncol), max(1.0, 0.5 * nrow)))
     ax.axis("off")
-    ax.legend(
+    legend = ax.legend(
         handles, labels, loc="center", frameon=False, ncol=ncol,
-        handlelength=1.6, handleheight=1.3, fontsize=13, title=title,
+        handlelength=1.6, handleheight=1.3, title=title,
     )
+
+    # Measure actual text, retaining the established size for keys that fit.
+    # Grow the canvas rather than shortening labels or shrinking their type.
+    grew = False
+    for _ in range(3):
+        fig.canvas.draw()
+        bounds = legend.get_window_extent(fig.canvas.get_renderer())
+        overflow_x = max(0., fig.bbox.x0 - bounds.x0, bounds.x1 - fig.bbox.x1)
+        overflow_y = max(0., fig.bbox.y0 - bounds.y0, bounds.y1 - fig.bbox.y1)
+        if overflow_x <= .25 and overflow_y <= .25:
+            break
+        width, height = fig.get_size_inches()
+        fig.set_size_inches(width + (2 * overflow_x / fig.dpi + .2 if overflow_x > .25 else 0),
+                            height + (2 * overflow_y / fig.dpi + .2 if overflow_y > .25 else 0))
+        grew = True
 
     if not save:
         return fig
-    path = save_path or os.path.join(
-        getattr(experiment, "fig_path", "."), f"{filename}.png")
-    output_dir = os.path.dirname(path) or "."
-    output_name, extension = os.path.splitext(os.path.basename(path))
-    extension = extension.lstrip(".") or "png"
-    save_fig(
-        fig,
-        output_dir,
-        output_name,
-        figure_formats=(extension,),
-        dpi=dpi,
-        rasterize=False,
-        transparent=False,
-        verbose=False,
-    )
-    plt.close(fig)
+    try:
+        path = save_path or os.path.join(
+            getattr(experiment, "fig_path", "."), f"{filename}.png")
+        output_dir = os.path.dirname(path) or "."
+        output_name, extension = os.path.splitext(os.path.basename(path))
+        if not extension:
+            path = os.fspath(path) + ".png"
+        extension = extension.lstrip(".") or "png"
+        save_fig(
+            fig,
+            output_dir,
+            output_name,
+            figure_formats=(extension,),
+            dpi=dpi,
+            rasterize=False,
+            transparent=False,
+            verbose=False,
+            sanitize_name=False,
+            **({"save_bbox": "tight"} if grew else {}),
+        )
+    finally:
+        plt.close(fig)
     _log.confirm(f"[plot_condition_key] Saved key to {path}")
     return path
 
@@ -16936,6 +17094,7 @@ def plot_regressions(experiment, x, y,
                 line_width=line_width,
                 show_stats_summary=show_stats_summary,
                 stats_summary_max_items=stats_summary_max_items,
+                column_labels=column_labels,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -16967,7 +17126,10 @@ def plot_regressions(experiment, x, y,
                 if n > 1 or len(x_values) > 1:
                     shared_cols.add(col)
             shared_cols -= set(_get_axis_limits_registry(experiment).keys())
-            summary_df = getattr(experiment, 'summary', None)
+            # Shared scales use the same acquired region as the plotted rows.
+            summary_df = _filtered_summary_for_specificity(
+                experiment, None, roi_base=_roi_base
+            )
             # Restrict to rows that the active specificity/queue will actually
             # plot, otherwise rows filtered out downstream still widen the
             # shared range.
@@ -17027,6 +17189,7 @@ def plot_regressions(experiment, x, y,
                     line_width=line_width,
                     show_stats_summary=show_stats_summary,
                     stats_summary_max_items=stats_summary_max_items,
+                    column_labels=column_labels,
                 )
         return queued_outputs
 
@@ -17049,6 +17212,7 @@ def plot_regressions(experiment, x, y,
                 line_width=line_width,
                 show_stats_summary=show_stats_summary,
                 stats_summary_max_items=stats_summary_max_items,
+                column_labels=column_labels,
             )
         return queued_outputs
 
@@ -17058,7 +17222,7 @@ def plot_regressions(experiment, x, y,
         _init_progress_state(
             state,
             func_name='plot_regressions',
-            total=_count_level_processes(experiment, level, factor=factor, specificity=specificity),
+            total=_count_level_processes(experiment, level, factor=factor, specificity=specificity, roi_base=ctx.roi_base),
         )
         _progress_start_item(state)
         if combine:
@@ -17216,7 +17380,7 @@ def plot_scatter_3d(experiment, x, y, z,
                     elevation=None, azimuth=None,
                     figsize=(10, 8), share_axes=True,
                     point_edge=None, point_linewidth=None,
-                    column_labels=None):
+                    column_labels=None, interactive=False):
     """
     3D scatter plot: one figure per group/factor, or a combined overlay.
     Supports queued x/y/z inputs:
@@ -17234,7 +17398,20 @@ def plot_scatter_3d(experiment, x, y, z,
           combinations to use the same range.
         - Set ``experiment.axis_limits`` via ``set_axis_limits`` to share
           ranges across separate calls.
+    Interactive browser views:
+        - ``interactive=True`` adds offline HTML exports when ``save=True``.
+        - Returned ``interactive`` figures rotate, zoom and show participant
+          values on hover. They use the exact native points and axis ranges.
+        - ``share_axes=False`` disables queued-range sharing; omit explicit
+          ranges and registered bounds for each separate group to auto-scale.
     """
+    if not isinstance(interactive, (bool, np.bool_)):
+        raise TypeError("interactive must be True or False.")
+    if interactive:
+        try:
+            import plotly.graph_objects
+        except ImportError as exc:
+            raise ImportError("Interactive 3D scatter requires plotly; install PyFLASH-analysis[interactive].") from exc
     x_range = _merge_axis_range(x_range, xmin, xmax)
     y_range = _merge_axis_range(y_range, ymin, ymax)
     z_range = _merge_axis_range(z_range, zmin, zmax)
@@ -17260,6 +17437,7 @@ def plot_scatter_3d(experiment, x, y, z,
                 point_edge=point_edge, point_linewidth=point_linewidth,
                 elevation=elevation, azimuth=azimuth,
                 figsize=figsize, share_axes=share_axes,
+                column_labels=column_labels, interactive=interactive,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -17295,7 +17473,7 @@ def plot_scatter_3d(experiment, x, y, z,
                 if z_values.count(col) > 1 or x_by_y > 1:
                     shared_cols.add(col)
             shared_cols -= set(_get_axis_limits_registry(experiment).keys())
-            summary_df = getattr(experiment, 'summary', None)
+            summary_df = _filtered_summary_for_specificity(experiment, specificity, roi_base=_roi_base)
             shared_ranges = _compute_queue_shared_ranges(summary_df, shared_cols)
             # scatter_3d keeps its default autoscale behaviour (no pad) so no
             # extra margin is folded in here. A future `margin` kwarg on
@@ -17321,6 +17499,7 @@ def plot_scatter_3d(experiment, x, y, z,
                         point_edge=point_edge, point_linewidth=point_linewidth,
                         elevation=elevation, azimuth=azimuth,
                         figsize=figsize, share_axes=share_axes,
+                        column_labels=column_labels, interactive=interactive,
                     )
         return queued_outputs
 
@@ -17337,6 +17516,7 @@ def plot_scatter_3d(experiment, x, y, z,
                 point_edge=point_edge, point_linewidth=point_linewidth,
                 elevation=elevation, azimuth=azimuth,
                 figsize=figsize, share_axes=share_axes,
+                column_labels=column_labels, interactive=interactive,
             )
         return queued_outputs
 
@@ -17346,7 +17526,7 @@ def plot_scatter_3d(experiment, x, y, z,
         _init_progress_state(
             state,
             func_name='plot_scatter_3d',
-            total=_count_level_processes(experiment, level, factor=factor, specificity=specificity),
+            total=_count_level_processes(experiment, level, factor=factor, specificity=specificity, roi_base=ctx.roi_base),
         )
         _progress_start_item(state)
         if size_by is not None and 'size_norm' not in state:
@@ -17412,7 +17592,7 @@ def plot_scatter_3d(experiment, x, y, z,
                      f'{x} vs {y} vs {z} ({name})' + suffix, subfolder=subfolder)
         plt.close(fig)
 
-    return run(
+    result = run(
         experiment, over=level, action=scatter_3d_action,
         factor=factor, specificity=specificity,
         column_labels=column_labels,
@@ -17425,6 +17605,25 @@ def plot_scatter_3d(experiment, x, y, z,
         point_edge=point_edge, point_linewidth=point_linewidth,
         roi_base=_roi_base,
     )
+    if interactive:
+        figures, outputs, seen = [], [], set()
+        for axis, group in zip(result.get('scatter', []), result.get('group', [])):
+            if axis is None or id(axis) in seen:
+                continue
+            seen.add(id(axis))
+            title = 'Combined' if combine else group
+            figure = _interactive_scatter_3d(axis, (x, y, z), title)
+            figures.append(figure)
+            if save:
+                subfolder, suffix = build_subfolder(plot_type='Scatter3D', factor=factor,
+                    specificity=specificity, aliases=getattr(experiment, 'aliases', None),
+                    roi_base=_roi_base, multi_roi=_multi_roi)
+                outputs.append(_save_plotly_figure(figure, experiment.fig_path,
+                    f'{x} vs {y} vs {z} ({title})' + suffix,
+                    subfolder=subfolder, interactive=True))
+        result['interactive'] = figures
+        result['interactive_outputs'] = outputs
+    return result
 
 
 def plot_histograms(experiment, marker, x_attr,
@@ -17471,7 +17670,7 @@ def plot_histograms(experiment, marker, x_attr,
         for _rb in _roi_bases:
             _queued[_rb] = plot_histograms(
                 experiment, marker, x_attr,
-                by=by, factor=factor,
+                column_labels=column_labels, by=by, factor=factor,
                 bins=bins, binwidth=binwidth, kde=kde,
                 alpha=alpha, stat=stat,
                 merge=merge, combine=combine, invert_x=invert_x, ymax=ymax, save=save,
@@ -17497,7 +17696,7 @@ def plot_histograms(experiment, marker, x_attr,
                 key = (m_val, xa_val)
                 queued_outputs[key] = plot_histograms(
                     experiment,
-                    marker=m_val,
+                    column_labels=column_labels, marker=m_val,
                     x_attr=xa_val,
                     by=by,
                     factor=factor,
@@ -17525,7 +17724,7 @@ def plot_histograms(experiment, marker, x_attr,
         for spec in _iter_specificities(specificity):
             queued_outputs[spec] = plot_histograms(
                 experiment, marker, x_attr,
-                by=by, factor=factor,
+                column_labels=column_labels, by=by, factor=factor,
                 bins=bins, binwidth=binwidth, bin_range=bin_range,
                 bin_edges=bin_edges, share_bins=share_bins, kde=kde,
                 alpha=alpha, stat=stat, merge=merge, combine=combine, invert_x=invert_x,
@@ -17702,7 +17901,7 @@ def plot_ridgeline(experiment, marker, x_attr,
         for _rb in _roi_bases:
             _queued[_rb] = plot_ridgeline(
                 experiment, marker, x_attr,
-                by=by, factor=factor,
+                column_labels=column_labels, by=by, factor=factor,
                 ridge_height=ridge_height, alpha=alpha,
                 line_width=line_width, bw_adjust=bw_adjust,
                 save=save, specificity=specificity, roi=_rb,
@@ -17727,7 +17926,7 @@ def plot_ridgeline(experiment, marker, x_attr,
                 key = (m_val, xa_val)
                 queued_outputs[key] = plot_ridgeline(
                     experiment,
-                    marker=m_val,
+                    column_labels=column_labels, marker=m_val,
                     x_attr=xa_val,
                     by=by,
                     factor=factor,
@@ -17750,7 +17949,7 @@ def plot_ridgeline(experiment, marker, x_attr,
         for spec in _iter_specificities(specificity):
             queued_outputs[spec] = plot_ridgeline(
                 experiment,
-                marker=marker,
+                column_labels=column_labels, marker=marker,
                 x_attr=x_attr,
                 by=by,
                 factor=factor,
@@ -17864,7 +18063,8 @@ def plot_ridgeline(experiment, marker, x_attr,
         x_label = get_display_name(x, compact_per=True)
         marker_s = str(marker_key).strip()
         marker_prefix = f"{marker_s}_"
-        if marker_s and str(x).casefold().startswith(marker_prefix.casefold()):
+        from PyFLASH.utils import active_column_label
+        if active_column_label(x) is None and marker_s and str(x).casefold().startswith(marker_prefix.casefold()):
             if marker_s.casefold() not in x_label.casefold():
                 x_label = f"{marker_s} {x_label}".strip()
         ax.set_xlabel(x_label)
@@ -17923,6 +18123,8 @@ def ecdf_action(ctx: Context, state: dict,
     if x not in df.columns:
         raise ValueError(f"Column '{x}' not found in marker '{marker}' dataframe.")
     values = _to_numeric_excluding_not_included(df[x]).dropna()
+    # Count the same finite measurements the plotting backend draws.
+    values = values[np.isfinite(values)]
 
     group_name, group_color = _resolve_group_label_color(ctx)
     if len(values) == 0:
@@ -17943,7 +18145,8 @@ def ecdf_action(ctx: Context, state: dict,
     x_label = get_display_name(x, compact_per=True)
     marker_s = str(marker).strip()
     marker_prefix = f"{marker_s}_"
-    if marker_s and str(x).casefold().startswith(marker_prefix.casefold()):
+    from PyFLASH.utils import active_column_label
+    if active_column_label(x) is None and marker_s and str(x).casefold().startswith(marker_prefix.casefold()):
         if marker_s.casefold() not in x_label.casefold():
             x_label = f"{marker_s} {x_label}".strip()
     ax.set_xlabel(x_label)
@@ -17999,6 +18202,7 @@ def plot_ecdf(experiment, marker, x_attr,
                 save=save, specificity=specificity, roi=_rb,
                 bottom_ticks=bottom_ticks, bottom_tick_labels=bottom_tick_labels,
                 x_range=x_range, share_axes=share_axes,
+                column_labels=column_labels,
             )
         return _queued
     _roi_base = _roi_bases[0]
@@ -18033,6 +18237,7 @@ def plot_ecdf(experiment, marker, x_attr,
                     bottom_tick_labels=bottom_tick_labels,
                     x_range=x_range,
                     share_axes=share_axes,
+                    column_labels=column_labels,
                 )
         return queued_outputs
 
@@ -18056,6 +18261,7 @@ def plot_ecdf(experiment, marker, x_attr,
                 bottom_tick_labels=bottom_tick_labels,
                 x_range=x_range,
                 share_axes=share_axes,
+                column_labels=column_labels,
             )
         return queued_outputs
 
@@ -19101,7 +19307,7 @@ def plot_pie_charts(experiment, marker, x_attr,
         for _rb in _roi_bases:
             _queued[_rb] = plot_pie_charts(
                 experiment, marker, x_attr,
-                auto_style=auto_style, style_cycle=style_cycle,
+                column_labels=column_labels, auto_style=auto_style, style_cycle=style_cycle,
                 by=by, factor=factor, threshold=threshold,
                 start_angle=start_angle, line_width=line_width,
                 save=save, specificity=specificity, roi=_rb,
@@ -19130,7 +19336,7 @@ def plot_pie_charts(experiment, marker, x_attr,
                 key = (m_val, xa_val)
                 queued_outputs[key] = plot_pie_charts(
                     experiment,
-                    marker=m_val,
+                    column_labels=column_labels, marker=m_val,
                     x_attr=xa_val,
                     auto_style=auto_style, style_cycle=style_cycle,
                     by=by,
@@ -19157,7 +19363,7 @@ def plot_pie_charts(experiment, marker, x_attr,
         for spec in _iter_specificities(specificity):
             queued_outputs[spec] = plot_pie_charts(
                 experiment,
-                marker=marker,
+                column_labels=column_labels, marker=marker,
                 x_attr=x_attr,
                 auto_style=auto_style, style_cycle=style_cycle,
                 by=by,
@@ -19335,7 +19541,8 @@ def plot_pie_charts(experiment, marker, x_attr,
                 marker_s = str(marker_key).strip()
                 marker_prefix = f"{marker_s}_"
                 axis_label = legend_title
-                if marker_s and str(x).casefold().startswith(marker_prefix.casefold()):
+                from PyFLASH.utils import active_column_label
+                if active_column_label(x) is None and marker_s and str(x).casefold().startswith(marker_prefix.casefold()):
                     if marker_s.casefold() not in axis_label.casefold():
                         axis_label = f"{marker_s} {axis_label}".strip()
                     leading = f"{marker_s} "
@@ -22690,6 +22897,7 @@ def plot_model_result_matrix(
     show_stats_summary=True,
     stats_summary_max_items=10,
     return_data=True,
+    save_path=None,
 ):
     """Render a long-form precomputed model-result table as one heatmap.
 
@@ -23044,7 +23252,7 @@ def plot_model_result_matrix(
 
     output_path = None
     if save:
-        save_root = _model_result_save_root(source_experiment, source_path=source_path)
+        save_root = save_path if save_path is not None else _model_result_save_root(source_experiment, source_path=source_path)
         subfolder_out, suffix = build_subfolder(
             plot_type=subfolder,
             specificity=specificity,
@@ -24890,6 +25098,8 @@ _PARAM_DESCRIPTIONS = {
     'y_label':              'Optional y-axis label override.',
     'footer':               'Optional footer text below the plot. Pass "auto" for a generic paired-ratio note or a list of footer lines.',
     'primary_comparison':   'Preferred contrast to headline in the paired-ratio stats card, e.g. "AD vs Control" or ("Control", "AD").',
+    'comparison_test':      'Association-coefficient reference comparisons: "bootstrap_wald" (default; two-sided pooled-model bootstrap-SE Wald z tests) or "ols_t" (separate two-group OLS interaction t-tests). Does not change plotted slopes, confidence intervals or the joint bootstrap chi-square.',
+    'comparison_tail':      'Association-coefficient OLS alternative for group slope minus reference slope: "two" (default), "less", or "greater". Directional alternatives require comparison_test="ols_t".',
     'show_sample_lines':  'Draw one line per subject joining denominator and numerator endpoints in paired-ratio endpoint plots (default True).',
     'show_participant_lines': 'Legacy alias for show_sample_lines.',
     'show_reference_line':  'Retained for backwards compatibility; paired endpoint plots do not draw a ratio=1 line on the endpoint axis.',
@@ -25050,6 +25260,8 @@ _PARAM_DESCRIPTIONS = {
     'share_axes':           'When True (default), consult the experiment-level axis registry '
                             '(see `set_axis_limits`) for any missing x/y/z bounds, and reuse the '
                             'same range across queued sibling combinations when a column repeats.',
+    'interactive':          'For 3D scatter, add rotatable Plotly figures and offline HTML exports '
+                            '(save=True). Requires PyFLASH-analysis[interactive]. Default False.',
     'clip_fit_line':        'Trim the regression line to the active x/y limits (default True).',
     'marginal_hist':        'Add 20-bin marginal histograms above (x) and to the right (y) '
                             'of a regression scatter. Groups use the scatter colours and '
@@ -27048,7 +27260,10 @@ def _linear_model_coefficient_forest_figure(
     df = df[df["term"].astype(str).ne("Intercept")].copy()
     if df.empty:
         return None
-    gate_col = "q_value" if str(gate).lower() in {"fdr", "q", "q_value"} else "p_value"
+    normalized_gate = str(gate).strip().lower()
+    if normalized_gate not in {"p", "p_value", "q", "q_value", "fdr"}:
+        raise ValueError("gate must be 'p', 'p_value', 'q', 'q_value' or 'fdr'.")
+    gate_col = "q_value" if normalized_gate in {"fdr", "q", "q_value"} else "p_value"
     if gate_col not in df.columns:
         gate_col = "p_value"
     df["_gate"] = pd.to_numeric(df.get(gate_col), errors="coerce")
@@ -27077,8 +27292,9 @@ def _linear_model_coefficient_forest_figure(
     lo = pd.to_numeric(df["ci_low"], errors="coerce").to_numpy(float)
     hi = pd.to_numeric(df["ci_high"], errors="coerce").to_numpy(float)
     y = np.arange(len(df), dtype=float)
-    lower = np.where(np.isfinite(est) & np.isfinite(lo), est - lo, 0.0)
-    upper = np.where(np.isfinite(est) & np.isfinite(hi), hi - est, 0.0)
+    interval_available = np.isfinite(lo) & np.isfinite(hi)
+    if np.any(interval_available & (lo > hi)):
+        raise ValueError("Coefficient interval lower bounds must not exceed upper bounds.")
     sig = pd.to_numeric(df.get(gate_col), errors="coerce").to_numpy(float) < float(alpha)
     colors = np.where(sig, "#C43C39", "#606060")
     labels = [
@@ -27092,10 +27308,13 @@ def _linear_model_coefficient_forest_figure(
     fig_h = max(4.5, min(18.0, 0.34 * len(df) + 1.8))
     fig, ax = plt.subplots(figsize=(9.0, fig_h))
     ax.axvline(0, color="#B8B8B8", linewidth=1.2, zorder=0)
-    ax.errorbar(
-        est, y, xerr=np.vstack([lower, upper]), fmt="none",
-        ecolor="#303030", elinewidth=1.5, capsize=3, zorder=2,
-    )
+    # Draw the supplied endpoints directly: a missing bound is not a zero
+    # error, and a supplied interval need not contain the supplied estimate.
+    ax.hlines(y[interval_available], lo[interval_available], hi[interval_available],
+              colors="#303030", linewidths=1.5, zorder=2)
+    for bounds in (lo, hi):
+        ax.plot(bounds[interval_available], y[interval_available], linestyle="none",
+                marker="|", markersize=6, color="#303030", zorder=2)
     ax.scatter(est, y, s=pyflash_point_size(backend="area"), c=colors,
                edgecolors="black", linewidths=0.6, zorder=3)
     ax.set_yticks(y)
@@ -27688,6 +27907,7 @@ def _filter_coefficient_terms(coeffs, terms):
     return coeffs[mask].copy()
 
 
+@column_label_scope
 def plot_linear_model_coefficient_forest(
     experiment=None,
     coefficients=None,
@@ -27715,6 +27935,12 @@ def plot_linear_model_coefficient_forest(
     ``":"`` (interaction terms only) or an iterable of exact names/substrings.
     Useful when main effects and interactions sit on very different scales and
     a shared x-axis would flatten the terms of interest.
+
+    ``gate`` selects raw probabilities (``p``/``p_value``) or corrected
+    probabilities (``q``/``q_value``/``fdr``), ignoring case and surrounding
+    whitespace. Other choices are refused. If the requested q column is absent,
+    the existing p-column fallback applies and the title names that column.
+    ``alpha`` controls significance colors; supplied intervals are unchanged.
     """
     coeffs, source_path, source_experiment = _load_linear_model_table(
         experiment=experiment,
@@ -27734,8 +27960,6 @@ def plot_linear_model_coefficient_forest(
         coeffs = _filter_coefficient_terms(coeffs, terms)
         if coeffs.empty:
             raise ValueError(f"No coefficient rows remain after terms filtering ({terms!r}).")
-    if emit_report:
-        _emit_linear_model_plot_records(coefficients=coeffs)
     fig = _linear_model_coefficient_forest_figure(
         coeffs,
         alpha=alpha,
@@ -27747,6 +27971,8 @@ def plot_linear_model_coefficient_forest(
     )
     if fig is None:
         raise ValueError("No coefficient forest figure could be created.")
+    if emit_report:
+        _emit_linear_model_plot_records(coefficients=coeffs)
     output_path = None
     if save:
         output_path = save_fig(
@@ -30316,56 +30542,104 @@ def _association_coefficient_summary_lines(
     value,
     bootstrap,
     max_items,
+    comparisons=None,
 ):
-    unit = "standardized beta" if value == "beta" else "raw slope"
     component_models = _association_component_models_from_coefficients(
         coefficients,
         factor_name,
     )
-    lines = [
-        *_association_model_summary_lines(component_models),
-        f"Value: {unit}",
-        f"Bootstrap: {bootstrap['valid']}/{bootstrap['requested']} valid",
-        f"Seed: {bootstrap['random_state']}",
-        (
-            f"Joint Wald: chi-square({int(joint_test['df'])})="
-            f"{_format_side_stats_value(joint_test['statistic'])}, "
-            f"p={_format_side_stats_pvalue(joint_test['p'])}"
-        ),
-        "Details:",
+    display_models = [
+        {**model, "formula": _association_model_formula(
+            get_display_name(model["y"], minimal=True),
+            get_display_name(model["x"], minimal=True),
+            get_display_name(model["group"], minimal=True),
+            [get_display_name(column, minimal=True) for column in model["covariates"]],
+        )}
+        for model in component_models
     ]
-    interaction_lookup = {
-        (str(row.association), str(row.group)): row
-        for row in interactions.itertuples(index=False)
-    }
+    confidence = 100 * (1 - float(coefficients.iloc[0].get("ci_alpha", 0.05)))
+    ci_method = str(coefficients.iloc[0]["ci_method"])
+    interval_method = "group-stratified bootstrap" if ci_method == "bootstrap" else "OLS t"
+    unit = "beta" if value == "beta" else "slope"
+    lines = [
+        *_association_model_summary_lines(display_models),
+        "Plotted group slopes:",
+        ("  beta = outcome SD per predictor SD (all-group scaling)"
+         if value == "beta" else "  slope = outcome units per predictor unit"),
+        *(["  SD = standard deviation across all included participants"]
+          if value == "beta" else []),
+        f"  Brackets: {confidence:g}% {interval_method} confidence interval",
+        "  n = complete participants in that group",
+        "  These intervals describe slopes, not group differences.",
+    ]
     coefficient_rows = list(coefficients.itertuples(index=False))
     if max_items is None:
         shown_rows = coefficient_rows
     else:
         shown_rows = coefficient_rows[:max(0, int(max_items))]
-    detail = []
     active_association = None
     for row in shown_rows:
         if str(row.association) != active_association:
             active_association = str(row.association)
-            detail.append(f"{active_association}:")
-        text = (
-            f"  {row.group}: "
+            lines.append(f"{active_association}:")
+        lines.append(
+            f"  {row.group}: {unit}="
             f"{_format_side_stats_value(row.estimate)} "
             f"[{_format_side_stats_value(row.ci_low)}, "
             f"{_format_side_stats_value(row.ci_high)}], n={int(row.n)}"
         )
-        interaction = interaction_lookup.get((str(row.association), str(row.group)))
-        if interaction is not None:
-            text += (
-                f", delta={_format_side_stats_value(interaction.estimate)}, "
-                f"p={_format_side_stats_pvalue(interaction.p)}"
-            )
-        detail.append(text)
     omitted = len(coefficient_rows) - len(shown_rows)
     if omitted > 0:
-        detail.append(f"... {omitted} more")
-    return lines + detail
+        lines.append(f"... {omitted} more group slopes")
+
+    comparisons = interactions if comparisons is None else comparisons
+    ols = not comparisons.empty and "method" in comparisons and comparisons.iloc[0]["method"] == "ols_t"
+    lines.append("Group vs reference slope tests:")
+    if ols:
+        tail = str(comparisons.iloc[0]["tail"])
+        alternative = {"two": "two-sided: group slope != reference",
+                       "less": "one-sided: group slope < reference",
+                       "greater": "one-sided: group slope > reference"}[tail]
+        lines.extend(["  Separate two-group ordinary least-squares (OLS) t-tests",
+                      "  Same covariates; only group and reference participants",
+                      f"  Alternative: {alternative}",
+                      "  delta = fitted group slope - reference slope",
+                      "  t = delta / OLS standard error; df = residual degrees of freedom"])
+        if value == "beta":
+            lines.append("  delta uses pair scaling; plotted beta uses all groups.")
+    else:
+        lines.extend(["  Pooled all-group model; two-sided Wald z-tests",
+                      "  Standard errors from the group-stratified bootstrap",
+                      "  z = delta / bootstrap standard error",
+                      "  delta = group slope - reference slope (plotted scale)"])
+    lines.extend(["  p = tail probability under no slope difference",
+                  "  Nominal p-values; no correction for multiple tests"])
+    comparison_rows = list(comparisons.itertuples(index=False))
+    shown_comparisons = comparison_rows if max_items is None else comparison_rows[:max(0, int(max_items))]
+    active_association = None
+    for row in shown_comparisons:
+        if str(row.association) != active_association:
+            active_association = str(row.association)
+            lines.append(f"{active_association}:")
+        n = getattr(row, "n", coefficients.loc[coefficients.association.eq(row.association), "n"].sum())
+        statistic = (f"t={_format_side_stats_value(row.t)}, df={int(row.df)}"
+                     if ols else f"z={_format_side_stats_value(row.z)}")
+        lines.extend([
+            f"  {row.group} vs {row.reference}: delta={_format_side_stats_value(row.estimate)}",
+            f"    {statistic}, p={float(row.p):.6g}, model n={int(n)}",
+        ])
+    if len(comparison_rows) > len(shown_comparisons):
+        lines.append(f"... {len(comparison_rows) - len(shown_comparisons)} more comparisons")
+    total_n = int(coefficients.groupby("association")["n"].sum().max())
+    lines.extend([
+        "Overall test (all groups and associations):",
+        "  Null: all predictor-by-group slope differences = 0",
+        f"  Joint bootstrap Wald: chi-square({int(joint_test['df'])})="
+        f"{_format_side_stats_value(joint_test['statistic'])}, p={float(joint_test['p']):.6g}, n={total_n}",
+        "  df = number of independently tested interaction terms",
+        f"  Bootstrap refits: {bootstrap['valid']}/{bootstrap['requested']} valid; seed={bootstrap['random_state']}",
+    ])
+    return lines
 
 
 def _association_correlation_method_label(
@@ -30534,10 +30808,14 @@ def _association_correlations_figure(
         x = np.asarray(
             [positions[str(group)] for group in group_order], dtype=float
         ) + offsets[association_index]
-        ax.errorbar(
+        # Percentile intervals need not contain the original estimate.
+        # Draw their original endpoints, then position only the point marker.
+        anchors = np.where((estimates < low) | (estimates > high),
+                           (low + high) / 2.0, estimates)
+        errors = ax.errorbar(
             x,
-            estimates,
-            yerr=np.vstack([estimates - low, high - estimates]),
+            anchors,
+            yerr=np.vstack([anchors - low, high - anchors]),
             fmt=_ASSOCIATION_COEFFICIENT_MARKERS[
                 association_index % len(_ASSOCIATION_COEFFICIENT_MARKERS)
             ],
@@ -30553,6 +30831,7 @@ def _association_correlations_figure(
             label=str(association),
             zorder=3,
         )
+        errors.lines[0].set_ydata(estimates)
         if show_values:
             for x_value, estimate in zip(x, estimates):
                 tier = abs(association_index - (len(associations) - 1) / 2.0)
@@ -30654,6 +30933,7 @@ def _association_coefficients_figure(
     bootstrap=None,
     title=None,
     subtitle=None,
+    comparisons=None,
 ):
     from PyFLASH.layout import mark_manual_layout
 
@@ -30670,7 +30950,22 @@ def _association_coefficients_figure(
         16.0,
         max(9.2, 1.6 * len(group_order) + 4.4, legend_width),
     )
-    fig, ax = plt.subplots(figsize=(fig_width, 7.2))
+    summary_lines = (
+        _association_coefficient_summary_lines(
+            coefficients, interactions, joint_test,
+            factor_name=factor_name, value=value, bootstrap=bootstrap,
+            max_items=stats_summary_max_items, comparisons=comparisons,
+        )
+        if show_stats_summary else []
+    )
+    # Reserve the same plotting area and two sidecar columns, even when hidden.
+    # Stats content must never change either the canvas or the data-axis size.
+    canvas_width, canvas_height = fig_width + 9.2, 8.4
+    fig, ax = plt.subplots(figsize=(canvas_width, canvas_height))
+    data_width = fig_width - 1.8
+    ax.set_position([0.8 / canvas_width, 0.85 / canvas_height,
+                     data_width / canvas_width, 5.4 / canvas_height])
+    fig._pyflash_fixed_canvas = True
 
     for association_index, association in enumerate(associations):
         subset = (
@@ -30763,49 +31058,33 @@ def _association_coefficients_figure(
         else "Association coefficients across groups"
     )
     ax.set_title(str(title) if title is not None else default_title, loc="left", pad=92)
-    ax.text(
-        0.0,
-        1.135,
+    ax.annotate(
         str(subtitle or "Group-specific model slopes with confidence intervals."),
-        transform=ax.transAxes,
+        xy=(0.0, 1.0),
+        xycoords="axes fraction",
+        xytext=(0, 44),
+        textcoords="offset points",
         ha="left",
         va="bottom",
         fontsize=16,
         color="#374151",
-        clip_on=False,
-    )
-    ax.text(
-        0.0,
-        1.075,
-        (
-            f"Joint group-moderation test: chi-square({int(joint_test['df'])})="
-            f"{joint_test['statistic']:.2f}, p={joint_test['p']:.3f}"
-        ),
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=16,
-        fontweight="bold",
-        color="#111827",
-        clip_on=False,
+        annotation_clip=False,
     )
     if show_stats_summary:
-        lines = _association_coefficient_summary_lines(
-            coefficients,
-            interactions,
-            joint_test,
-            value=value,
-            factor_name=factor_name,
-            bootstrap=bootstrap,
-            max_items=stats_summary_max_items,
-        )
-        _annotate_stats_detail_text(ax, lines, x=1.07, y=0.82)
+        comparison_start = summary_lines.index("Group vs reference slope tests:")
+        overall_start = summary_lines.index("Overall test (all groups and associations):")
+        estimates = summary_lines[:comparison_start] + summary_lines[overall_start:]
+        comparisons_text = summary_lines[comparison_start:overall_start]
+        _annotate_stats_detail_text(ax, estimates, x=1.07, y=0.82)
+        second_column_x = 1.07 + 4.7 / data_width
+        _annotate_stats_detail_text(ax, comparisons_text, x=second_column_x, y=0.82)
     mark_manual_layout(fig)
     return fig
 
 
 def _emit_association_coefficients_report(
-    schemas, coefficients, interactions, joint_test, *, factor_name, value
+    schemas, coefficients, interactions, joint_test, *, factor_name, value,
+    comparisons=None,
 ):
     try:
         import PyFLASH.report as report
@@ -30866,21 +31145,26 @@ def _emit_association_coefficients_report(
                         "estimate": row.estimate,
                         "se": row.standard_error,
                         "p": row.p,
+                        "method": "pooled bootstrap-SE Wald z",
+                        "tail": "two",
                     }
                     for row in model_interactions.itertuples(index=False)
                 }
             )
-            report.emit(
-                report.build_linear_model_record(
-                    dependent_variable=spec["y"],
-                    formula=formula,
-                    group=factor_name or "group",
-                    predictors=[spec["x"], *covariates],
-                    covariates=covariates,
-                    n=int(nodes["n"].sum()),
-                    coefficients=model_coefficients,
-                )
+            model_record = report.build_linear_model_record(
+                dependent_variable=spec["y"],
+                formula=formula,
+                group=factor_name or "group",
+                predictors=[spec["x"], *covariates],
+                covariates=covariates,
+                n=int(nodes["n"].sum()),
+                coefficients=model_coefficients,
             )
+            if comparisons is not None:
+                model_record["slope_comparisons"] = report.coerce(
+                    comparisons.loc[comparisons["association"].eq(spec["label"])].to_dict("records")
+                )
+            report.emit(model_record)
         report.emit(
             report.build_linear_model_record(
                 dependent_variable="joint association moderation",
@@ -31277,6 +31561,8 @@ def plot_association_coefficients(
     group_cols=None,
     subject_col=None,
     dataframe_kwargs=None,
+    comparison_test="bootstrap_wald",
+    comparison_tail="two",
 ):
     """Plot several adjusted association coefficients across the same groups.
 
@@ -31290,6 +31576,15 @@ def plot_association_coefficients(
     applicable. Use ``return_data=True`` to receive the plot-ready coefficient
     and interaction tables, joint test, and bootstrap metadata with the figure.
     Set ``show_values=False`` to hide the plotted coefficient labels.
+
+    Reference-comparison p-values are separate from group-slope confidence
+    intervals and the overall joint test. ``comparison_test="bootstrap_wald"``
+    keeps two-sided pooled-model bootstrap-SE Wald z-tests. Select ``"ols_t"``
+    for separately fitted two-group OLS interaction t-tests, and select
+    ``comparison_tail="less"`` or ``"greater"`` only for a directional hypothesis.
+    The right-side summary states the method, alternative, scaling and sample
+    size. ``return_data=True`` also returns the selected ``comparisons`` table;
+    ``interactions`` remains the original pooled bootstrap table.
     """
     from PyFLASH.association_coefficients import analyze, normalize_specs
 
@@ -31340,6 +31635,8 @@ def plot_association_coefficients(
                 roi=roi_base,
                 save=save,
                 return_data=return_data,
+                comparison_test=comparison_test,
+                comparison_tail=comparison_tail,
             )
             for roi_base in roi_bases
         }
@@ -31369,6 +31666,8 @@ def plot_association_coefficients(
                 roi=roi,
                 save=save,
                 return_data=return_data,
+                comparison_test=comparison_test,
+                comparison_tail=comparison_tail,
             )
             for spec in iter_specificities(specificity)
         }
@@ -31444,6 +31743,8 @@ def plot_association_coefficients(
             bootstrap_resamples=bootstrap_resamples,
             random_state=random_state,
             min_n=min_n,
+            comparison_test=comparison_test,
+            comparison_tail=comparison_tail,
         )
         fig = _association_coefficients_figure(
             analysis["coefficients"],
@@ -31459,6 +31760,7 @@ def plot_association_coefficients(
             bootstrap=analysis["bootstrap"],
             title=title,
             subtitle=subtitle,
+            comparisons=analysis["comparisons"],
         )
         _emit_association_coefficients_report(
             analysis["schemas"],
@@ -31467,6 +31769,7 @@ def plot_association_coefficients(
             analysis["joint_test"],
             factor_name=factor,
             value=str(value).lower(),
+            comparisons=analysis["comparisons"],
         )
 
     multi_roi = len(_resolve_roi_bases(None, experiment)) > 1
@@ -31490,6 +31793,7 @@ def plot_association_coefficients(
         "figure": fig,
         "coefficients": analysis["coefficients"],
         "interactions": analysis["interactions"],
+        "comparisons": analysis["comparisons"],
         "joint_test": {
             key: item
             for key, item in analysis["joint_test"].items()

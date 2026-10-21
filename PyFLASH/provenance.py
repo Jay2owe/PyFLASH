@@ -203,21 +203,35 @@ def describe_caller():
                 and module not in _TRANSPARENT
                 and not function.startswith("_")
             ):
-                code = frame.f_code
-                count = code.co_argcount + code.co_kwonlyargcount
                 args = {}
-                for variable in code.co_varnames[:count]:
+                described_function = function
+                wrapped_target = frame.f_locals.get("func") if function == "wrapper" else None
+                wrapped_arguments = frame.f_locals.get("arguments") if function == "wrapper" else None
+                if (
+                    callable(wrapped_target)
+                    and getattr(wrapped_target, "__module__", None) == module
+                    and isinstance(wrapped_arguments, dict)
+                ):
+                    described_function = wrapped_target.__name__
+                    argument_values = wrapped_arguments
+                    parameter_names = tuple(wrapped_arguments)
+                else:
+                    code = frame.f_code
+                    count = code.co_argcount + code.co_kwonlyargcount
+                    argument_values = frame.f_locals
+                    parameter_names = code.co_varnames[:count]
+                for variable in parameter_names:
                     if variable in ("self", "cls") or variable in _PLUMBING:
                         continue
-                    if variable not in frame.f_locals:
+                    if variable not in argument_values:
                         continue
-                    value = frame.f_locals[variable]
+                    value = argument_values[variable]
                     # A parameter left at its default is not a choice anyone made;
                     # recording every unset option would bury the ones that were.
                     if value is None:
                         continue
                     args[variable] = summarise(value)
-                best = {"function": "{}.{}".format(module, function), "args": args}
+                best = {"function": "{}.{}".format(module, described_function), "args": args}
             frame = frame.f_back
     except Exception:
         pass
@@ -342,8 +356,9 @@ def record(
         payload["written_by"] = "PyFLASH {} provenance".format(_version())
         payload["figures"][filename] = entry
         _write(manifest_path, payload)
-    except Exception:
-        pass
+    except Exception as exc:
+        from PyFLASH._logging import logger
+        logger.warn(f"Could not record figure provenance for {full_path}: {exc}")
 
 
 def _stats_enabled() -> bool:
@@ -778,3 +793,18 @@ def disable() -> None:
         utils.unregister_fig_saved_observer(_observer)
     except Exception:
         pass
+
+
+@contextmanager
+def _unstaged_save(full_path):
+    """Capture preview evidence without reserving or replacing a primary write."""
+    key = os.path.normcase(str(full_path))
+    absent = object()
+    previous = _PENDING.get(key, absent)
+    try:
+        yield
+    finally:
+        if previous is absent:
+            _PENDING.pop(key, None)
+        else:
+            _PENDING[key] = previous

@@ -15,54 +15,15 @@ from scipy import stats
 
 VALUES = ("beta", "slope")
 CI_METHODS = ("bootstrap", "ols")
+COMPARISON_TESTS = ("bootstrap_wald", "ols_t")
+COMPARISON_TAILS = ("two", "less", "greater")
 
 
 def normalize_specs(associations):
-    """Normalize named or unnamed ``{x, y, covariates}`` specifications."""
-    if isinstance(associations, Mapping):
-        items = list(associations.items())
-    elif isinstance(associations, (list, tuple)):
-        items = [(None, spec) for spec in associations]
-    else:
-        raise ValueError(
-            "associations must be a mapping of {name: {x, y, covariates}} "
-            "or a list of specification mappings"
-        )
-    if not items:
-        raise ValueError("associations cannot be empty")
+    """Normalize association specifications through the shared request schema."""
+    from PyFLASH._association_specs import normalize_association_specs
+    return normalize_association_specs(associations, include_label=False)
 
-    normalized = []
-    for index, (name, spec) in enumerate(items):
-        if not isinstance(spec, Mapping):
-            raise ValueError(f"association {index + 1} must be a mapping")
-        x = spec.get("x")
-        y = spec.get("y")
-        if x is None or y is None:
-            raise ValueError(f"association {index + 1} requires 'x' and 'y'")
-        if str(x) == str(y):
-            raise ValueError(f"association {index + 1} has identical x and y")
-        covariates = spec.get("covariates", [])
-        if covariates is None:
-            covariates = []
-        elif isinstance(covariates, str):
-            covariates = [covariates]
-        else:
-            covariates = list(covariates)
-        if any(str(column) in {str(x), str(y)} for column in covariates):
-            raise ValueError(f"association {index + 1} repeats x or y as a covariate")
-        normalized.append(
-            {
-                "name": None if name is None else str(name),
-                "x": str(x),
-                "y": str(y),
-                "covariates": [str(column) for column in covariates],
-            }
-        )
-
-    names = [spec["name"] for spec in normalized if spec["name"] is not None]
-    if len(names) != len(set(names)):
-        raise ValueError("association names must be unique")
-    return normalized
 
 
 def _model_schema(scope_df, group_col, spec, group_order, min_n, value):
@@ -428,6 +389,54 @@ def _tables(
     return pd.DataFrame(coefficient_rows), pd.DataFrame(interaction_rows)
 
 
+def _comparison_table(scope_df, group_col, schemas, interactions, group_order,
+                      reference, value, comparison_test, comparison_tail):
+    """Keep pooled bootstrap contrasts distinct from separate two-group fits."""
+    shared = scope_df.loc[schemas[0]["valid"]].copy()
+    counts = shared[group_col].astype(str).value_counts()
+    if comparison_test == "bootstrap_wald":
+        comparisons = interactions.copy()
+        comparisons["method"] = "bootstrap_wald"
+        comparisons["tail"] = "two"
+        comparisons["model_scope"] = "all_groups"
+        comparisons["n"] = len(shared)
+        comparisons["n_reference"] = int(counts[reference])
+        comparisons["n_group"] = comparisons["group"].map(counts).astype(int)
+        return comparisons
+
+    from PyFLASH.stats import interaction_slope_difference
+    rows = []
+    for order, schema in enumerate(schemas):
+        spec = schema["spec"]
+        for group in group_order:
+            if group == reference:
+                continue
+            pair = shared.loc[shared[group_col].astype(str).isin([reference, group])]
+            result = interaction_slope_difference(
+                pair[spec["x"]], pair[spec["y"]], pair[group_col].astype(str),
+                reference=reference, covariates=pair[spec["covariates"]],
+                tail=comparison_tail, standardize=value == "beta", rank=False,
+            )
+            if not np.isfinite(result["p"]):
+                raise ValueError(
+                    f"OLS slope comparison cannot be fitted for {spec['label']!r}: "
+                    f"{group!r} vs {reference!r}"
+                )
+            rows.append({
+                "association_order": order, "association": spec["label"],
+                "x": spec["x"], "y": spec["y"],
+                "covariates": ", ".join(spec["covariates"]),
+                "reference": reference, "group": group,
+                "estimate": result["estimate"], "standard_error": result["se"],
+                "t": result["t"], "df": result["df"], "p": result["p"],
+                "n": result["n"], "n_reference": int(counts[reference]),
+                "n_group": int(counts[group]), "value": value,
+                "method": "ols_t", "tail": comparison_tail,
+                "model_scope": "two_groups",
+            })
+    return pd.DataFrame(rows)
+
+
 def analyze(
     scope_df,
     *,
@@ -441,14 +450,24 @@ def analyze(
     bootstrap_resamples=5000,
     random_state=0,
     min_n=4,
+    comparison_test="bootstrap_wald",
+    comparison_tail="two",
 ):
     """Fit all association models and return plot-ready tables and joint test."""
     value = str(value).lower()
     ci_method = str(ci_method).lower()
+    comparison_test = str(comparison_test).lower()
+    comparison_tail = str(comparison_tail).lower()
     if value not in VALUES:
         raise ValueError(f"value must be one of {VALUES}; got {value!r}")
     if ci_method not in CI_METHODS:
         raise ValueError(f"ci_method must be one of {CI_METHODS}; got {ci_method!r}")
+    if comparison_test not in COMPARISON_TESTS:
+        raise ValueError(f"comparison_test must be one of {COMPARISON_TESTS}")
+    if comparison_tail not in COMPARISON_TAILS:
+        raise ValueError(f"comparison_tail must be one of {COMPARISON_TAILS}")
+    if comparison_test == "bootstrap_wald" and comparison_tail != "two":
+        raise ValueError("bootstrap_wald comparisons are two-sided; choose ols_t for directional tests")
     if not (0 < float(ci_alpha) < 1):
         raise ValueError("ci_alpha must be between 0 and 1")
     if int(bootstrap_resamples) < 100:
@@ -487,6 +506,11 @@ def analyze(
         ci_method,
         ci_alpha,
     )
+    coefficients["ci_alpha"] = float(ci_alpha)
+    comparisons = _comparison_table(
+        scope_df, group_col, schemas, interactions, group_order, reference,
+        value, comparison_test, comparison_tail,
+    )
     joint = _joint_test(observed_interactions, bootstrap_interactions)
     joint.update(
         {
@@ -500,6 +524,7 @@ def analyze(
         "schemas": schemas,
         "coefficients": coefficients,
         "interactions": interactions,
+        "comparisons": comparisons,
         "joint_test": joint,
         "bootstrap": {
             "requested": int(bootstrap_resamples),

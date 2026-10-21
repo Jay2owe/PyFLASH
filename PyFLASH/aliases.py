@@ -247,3 +247,16 @@ def resolve_split_filter_aliases(
         alias_name="split_by",
     )
     return by, factor, specificity
+
+
+def _normalize_outlier_methods(methods):
+    """Materialize method choices once without splitting a single text name."""
+    if isinstance(methods, str):
+        return (methods.lower(),)
+    if methods is None:
+        return ()
+    try:
+        values = tuple(methods)
+    except TypeError as error:
+        raise ValueError("methods must name IQR, MAD or ROUT.") from error
+    return tuple(value.lower() if isinstance(value, str) else value for value in values)

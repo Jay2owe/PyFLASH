@@ -28,7 +28,7 @@ columns. It supports ROI-base selection when the input object exposes
 | Function | Registry name | Use |
 |---|---|---|
 | [`plot_locations`](../functions/plot_locations.md) | `locations` | Draw object coordinate panels, optional filtered overlays, image backgrounds, and ROI outlines. |
-| [`plot_scatter_3d`](../functions/plot_scatter_3d.md) | `scatter_3d` | Draw 3D scatter plots from three summary columns. |
+| [`plot_scatter_3d`](../functions/plot_scatter_3d.md) | `scatter_3d` | Draw 3D scatter plots; `interactive=True` also saves offline, rotatable browser views. |
 
 ## Common Options
 

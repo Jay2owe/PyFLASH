@@ -17,9 +17,7 @@ import re
 from PyFLASH._logging import Verbosity, logger
 from PyFLASH.conditions import _resolve_color
 from PyFLASH.config import Config, check_directory
-from PyFLASH.experiment import resolve_experiment_paths
 from PyFLASH.export import format_summary_for_display
-from PyFLASH.factory import create_batch
 from PyFLASH.serialization import load_state, save_state
 from PyFLASH.ui.project_io import build_condition_list
 from PyFLASH.utils import get_columns
@@ -56,13 +54,29 @@ __all__ = [
 ]
 
 
-def open_pickle(path: str):
+def resolve_experiment_paths(*args, **kwargs):
+    """Import folder-discovery code only when the folder workflow needs it."""
+    from PyFLASH.experiment import resolve_experiment_paths as resolve
+    return resolve(*args, **kwargs)
+
+
+def create_batch(*args, **kwargs):
+    """Import microscopy processing only for an explicit build request."""
+    from PyFLASH.factory import create_batch as create
+    return create(*args, **kwargs)
+
+
+def open_pickle(path: str, *, source_sha256=None):
     """Load a saved ``Batch`` or ``Experiment`` from a ``.pkl`` file.
 
-    Thin wrapper over :func:`PyFLASH.serialization.load_state`. Paths are
-    normalized (the default) so stale absolute paths rebase across machines.
+    Uses the serialization owner's read-only, consumed-byte verification.
+    Paths are normalized so stale absolute paths rebase across machines.
+    ``source_sha256`` carries an identity already captured by the UI; that UI
+    retains its final after-preparation check before accepting the dataset.
     """
-    return load_state(path, verbose=False)
+    from PyFLASH.serialization import _load_cached_state
+    return _load_cached_state(path, expected_sha256=source_sha256,
+                              verify_current=source_sha256 is None, verbose=False)
 
 
 def save_pickle(obj, path: str | None = None):
@@ -461,7 +475,7 @@ def export_excel(batch, *, save_path=None, if_summary=True, if_extended=True,
                  if_summary_include=None, if_extended_include=None,
                  behaviour_include=None,
                  if_summary_save_name=None, if_extended_save_name=None,
-                 behaviour_save_name=None, capture=True):
+                 behaviour_save_name=None, capture=True, return_paths=False):
     """Export the formatted Excel workbooks, capturing the progress log.
 
     Thin wrapper over :meth:`PyFLASH.batch.Batch.export_all_excel` (which
@@ -510,7 +524,7 @@ def export_excel(batch, *, save_path=None, if_summary=True, if_extended=True,
         restored because :func:`capture_output` restores in ``finally``.
     """
     def _run():
-        batch.export_all_excel(
+        return batch.export_all_excel(
             save_path=save_path,
             if_summary=if_summary,
             if_extended=if_extended,
@@ -528,10 +542,10 @@ def export_excel(batch, *, save_path=None, if_summary=True, if_extended=True,
 
     if capture:
         with capture_output() as buf:
-            _run()
-        return buf.getvalue()
-    _run()
-    return ""
+            paths = _run()
+        return list(paths or []) if return_paths else buf.getvalue()
+    paths = _run()
+    return list(paths or []) if return_paths else ""
 
 
 def save_batch(batch, filename):
@@ -557,6 +571,27 @@ def save_batch(batch, filename):
     """
     save_state(batch, filename, verbose=False)
     return filename
+
+
+def export_summary_csv(batch, filename, *, region=None, groups=None, columns=None):
+    """Write the complete region table through the shared summary adapter."""
+    from pathlib import Path
+    table = summary_table(batch, roi_base=region, display=False)
+    if table is None:
+        raise ValueError('This region has no summary measurements.')
+    if groups is not None:
+        if 'Condition' not in table:
+            raise ValueError('The table has no group identities to filter.')
+        table = table.loc[table['Condition'].astype(str).isin(list(map(str,groups)))]
+    if columns is not None:
+        missing = set(columns) - set(table.columns)
+        if missing:
+            raise ValueError('Unknown export columns: '+', '.join(sorted(missing)))
+        table = table.loc[:,list(columns)]
+    filename = Path(filename)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    table.to_csv(filename, index=False)
+    return str(filename.resolve())
 
 
 # ── Plotting presets (Stage 07) ─────────────────────────────────────────────
@@ -701,6 +736,11 @@ def run_quick_plot(batch, plot_type: str, params: dict):
 
     func = _resolve_func(PLOT_REGISTRY[plot_type])
     kwargs = _build_plot_kwargs(func, params)
+    if plot_type == "representative_images":
+        # Its **kwargs forwards declared image-renderer controls. Filtering only
+        # by the outer signature dropped tile sizes and browser save/show.
+        delegated = _build_plot_kwargs(_resolve_func(PLOT_REGISTRY["images"]), params)
+        kwargs.update(delegated)
     return func(batch, **kwargs)
 
 

@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "source": "software-development/scripts/verification_workflow.py",
+  "installed": "reproducibility/workflow_engine.py",
+  "sha256": "a71449a41a7677bacb65a2be5ceb03b3a7a8670fc89d9affb4ab9a0bd0de0570"
+}

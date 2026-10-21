@@ -78,7 +78,8 @@ def to_csv(frame, path, **kwargs):
 
 def write_json(payload, path):
     makedirs(os.path.dirname(path) or ".")
-    with open(windows_extended_path(path), "w", encoding="utf-8") as fh:
+    from PyFLASH._persistence import atomic_text
+    with atomic_text(windows_extended_path(path)) as fh:
         json.dump(payload, fh, indent=2, default=str)
 
 
@@ -106,6 +107,97 @@ def sha256_file(path, *, chunk=1 << 20, max_bytes=None):
         return h.hexdigest()
     except Exception:
         return None
+
+
+def output_identity(directory, *, exclude=("manifest.json",)):
+    """Hash generated run files by relative path; fail if a file is unreadable."""
+    from pathlib import Path
+    root = Path(windows_extended_path(directory))
+    from PyFLASH._cache_identity import file_hash
+    return {path.relative_to(root).as_posix(): file_hash(path)
+            for path in sorted(root.rglob('*'))
+            if path.is_file() and path.relative_to(root).as_posix() not in exclude}
+
+
+def verify_cached_run(cached, identity, directory):
+    """Reject unverified, mismatched or damaged saved results without rewriting."""
+    if cached.get('completion_status') != 'complete':
+        raise ValueError("Cannot reuse this saved run: its outputs are not complete. "
+                         "Wait for the active run or use if_exists='version'.")
+    if not identity.get('reusable') or cached.get('request_identity') != identity:
+        raise ValueError(
+            "Cannot reuse this saved run: inputs, settings or software do not "
+            "match a verified request. Use if_exists='version' to preserve it "
+            "and compute a new run.")
+    expected = cached.get('output_sha256')
+    actual = output_identity(directory)
+    if not expected or actual != expected:
+        raise ValueError(
+            "Cannot reuse this saved run: output files are missing or changed. "
+            "Use if_exists='version' to preserve it and compute a new run.")
+
+
+RUN_PATH_KEYS = ('fig_dir', 'data_dir', 'adjusted_means_dir', 'montage')
+
+
+def write_run_record(manifest, directory):
+    """Publish a run manifest with versioned paths relative to its own folder."""
+    payload = dict(manifest)
+    already_relative = payload.get('path_schema_version') == 1
+    for key in RUN_PATH_KEYS:
+        value = payload.get(key)
+        if value is None:
+            continue
+        if not already_relative or os.path.isabs(value):
+            payload[key] = os.path.relpath(os.path.abspath(value), os.path.abspath(directory))
+    payload['path_schema_version'] = 1
+    write_json(payload, os.path.join(directory, 'manifest.json'))
+
+
+def resolve_run_record(manifest, directory):
+    """Resolve a verified portable record at its current output-folder location."""
+    if manifest.get('path_schema_version') != 1:
+        raise ValueError('Cannot reuse this saved run: its path schema is unverified.')
+    root = os.path.abspath(directory)
+    resolved = dict(manifest)
+    for key in RUN_PATH_KEYS:
+        value = resolved.get(key)
+        if value is None:
+            continue
+        path = os.path.abspath(os.path.join(root, value))
+        if os.path.isabs(value) or os.path.commonpath([root, path]) != root:
+            raise ValueError('Cannot reuse this saved run: an output path escapes its folder.')
+        resolved[key] = path
+    return resolved
+
+
+def finalize_run_record(result):
+    """Publish complete output identities after outer figure collectors finish.
+
+    Only a fresh verified-record producer may update its own manifest. Never
+    bless cached results or replace a record another request has published.
+    """
+    if not isinstance(result, dict) or result.get('reused') or result.get('queued'):
+        return
+    identity = result.get('request_identity')
+    directory = result.get('data_dir')
+    if identity is None or not directory or 'output_sha256' not in result:
+        return
+    path = os.path.join(directory, 'manifest.json')
+    if not isfile(path):
+        return
+    manifest = read_json(path)
+    if manifest.get('request_identity') != identity:
+        raise RuntimeError('Saved run record changed while finishing its figures.')
+    manifest['output_sha256'] = output_identity(directory)
+    manifest['completion_status'] = 'partial' if result.get('montage_error') else 'complete'
+    if result.get('montage_error'):
+        manifest['montage_error'] = result['montage_error']
+    if result.get('montage'):
+        manifest['montage'] = result['montage']
+    write_run_record(manifest, directory)
+    result['output_sha256'] = manifest['output_sha256']
+    result['completion_status'] = manifest['completion_status']
 
 
 # ── run-folder resolution ────────────────────────────────────────────────────

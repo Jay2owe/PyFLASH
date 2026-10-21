@@ -4,21 +4,48 @@ Shared image loading helpers for import and plotting.
 
 import importlib
 import os
-from functools import lru_cache
+import contextlib
 
 import numpy as np
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 
 TIFF_EXTENSIONS = {".tif", ".tiff"}
 RASTER_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
 _OPTIONAL_MODULES = {}
+_READ_OBSERVERS = []
 
 
-@lru_cache(maxsize=4096)
+@contextlib.contextmanager
+def observe_image_reads(observer):
+    """Observe actual header/pixel inputs, including background image loaders."""
+    _READ_OBSERVERS.append(observer)
+    try:
+        yield
+    finally:
+        _READ_OBSERVERS.remove(observer)
+
+
+def _observe_read(path):
+    for observer in tuple(_READ_OBSERVERS):
+        observer(os.fspath(path))
+
+
 def get_image_shape(image_path):
-    with Image.open(os.fspath(image_path)) as img:
-        width, height = img.size
+    # Reading the image header is cheap; a path-only cache hides replaced images.
+    _observe_read(image_path)
+    try:
+        with Image.open(os.fspath(image_path)) as img:
+            width, height = img.size
+    except UnidentifiedImageError:
+        if os.path.splitext(str(image_path))[1].lower() not in TIFF_EXTENSIONS:
+            raise
+        tifffile = _optional_import("tifffile")
+        if tifffile is None:
+            raise
+        with tifffile.TiffFile(image_path) as handle:
+            page = handle.pages[0]
+            height, width = page.imagelength, page.imagewidth
     return int(height), int(width)
 
 
@@ -79,7 +106,7 @@ def _normalize_image_array(array):
     if arr.ndim == 0:
         raise ValueError("Image data could not be interpreted as an array")
 
-    arr = np.squeeze(arr)
+    # Preserve the two spatial axes, including one-row/one-column images.
 
     # Keep plotting-friendly outputs: grayscale 2D or color HxWx3/4.
     while arr.ndim > 3:
@@ -143,8 +170,18 @@ def _downsample_image_array(array, preview_max_dim=None):
     return _normalize_image_array(np.asarray(resized))
 
 
+def _display_image_mode(mode):
+    if mode in {"P", "PA", "RGB", "RGBA", "CMYK", "YCbCr", "LAB", "HSV", "LA"}:
+        return "RGBA" if "A" in mode or mode in {"P", "PA"} else "RGB"
+    return "L" if mode == "1" else None
+
+
 def _read_image_with_pil(image_path, preview_max_dim=None):
-    with Image.open(image_path) as img:
+    with Image.open(os.fspath(image_path)) as img:
+        if int(getattr(img, "tag_v2", {}).get(32997, 1)) > 1:
+            # Pillow chooses the final strip plane for a single-page volume.
+            # Delegate to the metadata-aware decoder instead of changing slices.
+            return _read_image_with_tifffile(image_path, preview_max_dim=preview_max_dim)
         max_dim = _normalize_preview_max_dim(preview_max_dim)
         if max_dim is not None:
             try:
@@ -152,26 +189,68 @@ def _read_image_with_pil(image_path, preview_max_dim=None):
             except Exception:
                 pass
         mode = str(getattr(img, "mode", "") or "")
-        if mode in {"P", "PA", "RGB", "RGBA", "CMYK", "YCbCr", "LAB", "HSV", "LA"}:
-            if "A" in mode or mode in {"P", "PA"}:
-                img = img.convert("RGBA")
-            else:
-                img = img.convert("RGB")
-        elif mode == "1":
-            img = img.convert("L")
-        else:
-            img = img.copy()
+        display_mode = _display_image_mode(mode)
+        img = img.convert(display_mode) if display_mode is not None else img.copy()
 
         if max_dim is not None:
             img.thumbnail((max_dim, max_dim), Image.Resampling.BILINEAR)
         return _normalize_image_array(img)
 
 
+def _tiff_display_plane(array, axes):
+    """Choose the first non-spatial plane; S denotes samples, never Z depth."""
+    array = np.asarray(array)
+    if len(axes) != array.ndim or "Y" not in axes or "X" not in axes:
+        raise ValueError("TIFF axes do not identify the two spatial dimensions.")
+    for index in range(len(axes) - 1, -1, -1):
+        if axes[index] not in "YXS":
+            array = np.take(array, 0, axis=index)
+            axes = axes[:index] + axes[index + 1:]
+    if "S" in axes and array.shape[axes.index("S")] == 1:
+        index = axes.index("S")
+        array = np.take(array, 0, axis=index)
+        axes = axes[:index] + axes[index + 1:]
+    order = [axes.index("Y"), axes.index("X")]
+    if "S" in axes:
+        order.append(axes.index("S"))
+    return np.transpose(array, order)
+
+
+def _tiff_display_colours(array, photometric, bits, colormap=None):
+    """Interpret photometric metadata after selecting a spatial plane."""
+    photometric = int(photometric)
+    bits = bits[0] if isinstance(bits, (tuple, list)) else bits
+    if photometric == 0 and array.dtype == np.bool_:
+        return np.logical_not(array).astype(np.uint8) * 255
+    if photometric == 0 and array.dtype == np.uint8:
+        return np.asarray((2 ** int(bits) - 1) - array, dtype=array.dtype)
+    if photometric == 3:
+        if colormap is None:
+            raise ValueError("Palette TIFF has no colour map.")
+        colours = (np.asarray(colormap) >> 8).astype(np.uint8)
+        rgb = np.moveaxis(colours[:, array], 0, -1)
+        return np.concatenate([rgb, np.full((*rgb.shape[:2], 1), 255, dtype=np.uint8)], axis=-1)
+    if photometric == 5:
+        if array.dtype != np.uint8:
+            raise ValueError("CMYK TIFF conversion requires 8-bit colour samples.")
+        return np.asarray(Image.fromarray(array, mode="CMYK").convert(_display_image_mode("CMYK")))
+    if array.dtype == np.bool_:
+        return array.astype(np.uint8) * 255
+    if photometric == 1 and array.ndim == 3 and array.shape[-1] == 2:
+        return np.concatenate([np.repeat(array[..., :1], 3, axis=-1), array[..., 1:]], axis=-1)
+    return array
+
+
 def _read_image_with_tifffile(image_path, preview_max_dim=None):
     tifffile = _optional_import("tifffile")
     if tifffile is None:
         raise ImportError("tifffile is not installed")
-    return _downsample_image_array(tifffile.imread(image_path), preview_max_dim=preview_max_dim)
+    with tifffile.TiffFile(image_path) as handle:
+        page = handle.pages[0]
+        array = page.asarray()
+        array = _tiff_display_plane(array, page.axes)
+        array = _tiff_display_colours(array, page.photometric, page.bitspersample, page.colormap)
+    return _downsample_image_array(array, preview_max_dim=preview_max_dim)
 
 
 def _read_image_with_cv2(image_path, preview_max_dim=None):
@@ -179,6 +258,12 @@ def _read_image_with_cv2(image_path, preview_max_dim=None):
     if cv2 is None:
         raise ImportError("cv2 is not installed")
 
+    if os.path.splitext(str(image_path))[1].lower() in TIFF_EXTENSIONS:
+        with Image.open(os.fspath(image_path)) as header:
+            if header.mode in {"RGBA", "LA", "PA", "CMYK"}:
+                # OpenCV's TIFF codec premultiplies unassociated alpha samples.
+                # The existing fallback preserves the declared original pixels.
+                return _read_image_with_pil(image_path, preview_max_dim=preview_max_dim)
     raw = np.fromfile(image_path, dtype=np.uint8)
     image = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED)
     if image is None:
@@ -196,7 +281,22 @@ def _read_image_with_imageio(image_path, preview_max_dim=None):
     imageio = _optional_import("imageio.v3")
     if imageio is None:
         raise ImportError("imageio is not installed")
-    return _downsample_image_array(imageio.imread(image_path), preview_max_dim=preview_max_dim)
+    if os.path.splitext(str(image_path))[1].lower() in TIFF_EXTENSIONS:
+        array = imageio.imread(image_path, index=0, page=0)
+        metadata = imageio.immeta(image_path, index=0, page=0)
+        axes = "ZYX" if metadata.get("ImageDepth", 1) > 1 else "YX"
+        if metadata.get("SamplesPerPixel", 1) > 1:
+            axes = "S" + axes if metadata.get("PlanarConfiguration") == 2 else axes + "S"
+        array = _tiff_display_plane(array, axes)
+        array = _tiff_display_colours(array, metadata.get("PhotometricInterpretation", 1),
+                                     metadata.get("BitsPerSample", array.dtype.itemsize * 8),
+                                     metadata.get("ColorMap"))
+    else:
+        with Image.open(os.fspath(image_path)) as header:
+            display_mode = _display_image_mode(header.mode)
+        options = {"mode": display_mode} if display_mode is not None else {}
+        array = imageio.imread(image_path, index=0, **options)
+    return _downsample_image_array(array, preview_max_dim=preview_max_dim)
 
 
 def image_backend_order(image_path, backend="auto"):
@@ -227,7 +327,25 @@ def image_backend_order(image_path, backend="auto"):
 
 
 def read_image_array(image_path, backend="auto", fast_loading=False, preview_max_dim=None):
+    """Read display pixels as a contiguous grayscale or RGB/RGBA image.
+
+    Spatial axes remain present for single-row/column images. TIFF metadata
+    distinguishes depth from colour samples; stacks/volumes use their first
+    spatial plane. Volume TIFFs require the optional metadata-aware decoder.
+    Colour modes preserve transparency and use the shared RGB/RGBA conversion.
+    A requested decoder falls back to Pillow when unavailable or unable to
+    preserve the declared pixels. High-precision grayscale retains stored
+    intensities, including photometric-white encodings; byte/bilevel display
+    modes interpret their colour metadata. Full-resolution colour reads preserve
+    supported floating samples;
+    preview sizing uses the selected decoder's recorded resize policy.
+    ``fast_loading`` caps an otherwise uncapped preview at 1024 pixels;
+    ``preview_max_dim`` supplies an explicit cap, or disables it when nonpositive.
+    Invalid settings fail before recording an unread file as an input.
+    """
     max_dim = _normalize_preview_max_dim(preview_max_dim)
+    backend_order = image_backend_order(image_path, backend=backend)
+    _observe_read(image_path)
     if fast_loading and max_dim is None:
         max_dim = 1024
 
@@ -239,7 +357,7 @@ def read_image_array(image_path, backend="auto", fast_loading=False, preview_max
     }
 
     last_error = None
-    for backend_name in image_backend_order(image_path, backend=backend):
+    for backend_name in backend_order:
         try:
             return readers[backend_name](image_path)
         except Exception as exc:

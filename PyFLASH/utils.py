@@ -16,6 +16,10 @@ import pandas as pd
 
 from PyFLASH._logging import logger as _log
 
+# Shared missing-value tag; presentation code must not import microscopy
+# processing merely to recognise an excluded experiment measurement.
+NOT_INCLUDED_SENTINEL = "NOT_INCLUDED_IN_EXPERIMENT"
+
 
 # ── Figure-save observers ─────────────────────────────────────────────
 # A decoupled hook so higher layers can watch every figure as it is saved without
@@ -954,46 +958,124 @@ def normalize_hemisphere(value):
 
 
 def adjust_for_volumemm(df, columns, volume_column):
-    """Divide each column by the volume in units of 0.1 mm³."""
-    from PyFLASH.config import Config
-    for col in columns:
-        volume_um_cubed = df[volume_column] * Config.SECTION_THICKNESS_UM
-        volume_0_1_mm_cubed = volume_um_cubed / 100000000
+    """Normalize selected measurements per 0.1 cubic millimetres of tissue.
 
-        df[col] = df[col] / volume_0_1_mm_cubed
+    The historical ``volume_column`` argument names an area in square
+    micrometres. Multiply that original area by the configured section
+    thickness in micrometres, even when the area itself is a selected target.
+    Each requested column is normalized once; validation precedes all writes.
+    Missing areas or measurements give missing outputs.
+    """
+    from PyFLASH.config import Config
+    if not df.columns.is_unique:
+        raise ValueError("Volume-normalization columns must have unique names.")
+    columns = list(dict.fromkeys([columns] if isinstance(columns, str) else columns))
+    if not columns:
+        return df
+    missing = [name for name in [volume_column] + columns if name not in df.columns]
+    if missing:
+        raise KeyError("Missing volume-normalization columns: " + str(missing))
+    thickness = _finite_real_fraction(Config.SECTION_THICKNESS_UM,
+        label="Section thickness", allow_missing=False, positive=True)
+    areas = [_finite_real_fraction(value, label="Tissue area", positive=True)
+             for value in df[volume_column]]
+    computed = {}
+    for name in columns:
+        values = []
+        for value, area in zip(df[name], areas):
+            measurement = _finite_real_fraction(value, label="Measurements")
+            if measurement is None or area is None:
+                values.append(np.nan)
+            else:
+                try:
+                    values.append(float(measurement * 100000000 / (area * thickness)))
+                except OverflowError as error:
+                    raise ValueError("Normalized measurement exceeds the supported floating-point range.") from error
+        computed[name] = np.asarray(values, dtype=float)
+    for name, values in computed.items():
+        df[name] = values
     return df
 
 
 def add_coloc_percentages(df):
-    """Add percentage colocalisation columns from count columns."""
-    coloc_cols = [c for c in df.columns if 'ColocCount' in c]
-    non_cols = [c for c in df.columns if 'NonColocCount' in c]
+    """Add percentages for exact positive/negative count-column pairs.
 
-    suffixes = set()
-    for col in coloc_cols + non_cols:
-        suffix = col.split('_')[1]
-        suffix = suffix.replace('ColocCount', '').replace('Non', '')
-        suffixes.add(suffix)
-
-    for suffix in suffixes:
-        coloc_col = next((s for s in coloc_cols if suffix in s), None)
-        noncoloc_col = next((s for s in non_cols if suffix in s), None)
-        if coloc_col and noncoloc_col:
-            total = df[coloc_col] + df[noncoloc_col]
-            coloc_pct = np.where(total != 0, (df[coloc_col] / total) * 100.0, np.nan)
-            df[coloc_col + "%"] = coloc_pct
-            df[noncoloc_col + "%"] = 100.0 - coloc_pct
+    Preserve original columns and append new percentages in count-name order.
+    Existing percentage columns are refreshed, never used as counts themselves.
+    Counts must be finite, nonnegative integers or floats; missing counts give
+    missing percentages. Calculate each percentage from the represented counts
+    before rounding, so a large sum or tiny fraction cannot erase a percentage.
+    """
+    if not df.columns.is_unique:
+        raise ValueError("Colocalisation count columns must have unique names.")
+    token = '_NonColocCount'
+    pairs = {}
+    for negative in df.columns:
+        if not isinstance(negative, str) or negative.endswith('%'):
+            continue
+        candidates = []
+        for match in re.finditer(re.escape(token), negative):
+            positive = negative[:match.start()]+'_ColocCount'+negative[match.end():]
+            if positive in df.columns:
+                candidates.append(positive)
+        if len(candidates) > 1:
+            raise ValueError("Ambiguous colocalisation count pair: " + negative)
+        if candidates:
+            positive = candidates[0]
+            if positive in pairs and pairs[positive] != negative:
+                raise ValueError("Ambiguous colocalisation count pair: " + positive)
+            pairs[positive] = negative
+    computed = {}
+    for positive in sorted(pairs):
+        negative = pairs[positive]
+        positive_percentages = []
+        negative_percentages = []
+        for positive_count, negative_count in zip(df[positive], df[negative]):
+            numerator = _finite_real_fraction(positive_count, label="Colocalisation counts", nonnegative=True)
+            remainder = _finite_real_fraction(negative_count, label="Colocalisation counts", nonnegative=True)
+            if numerator is None or remainder is None or numerator + remainder == 0:
+                positive_percentages.append(np.nan)
+                negative_percentages.append(np.nan)
+            else:
+                total = numerator + remainder
+                positive_percentages.append(float(100 * numerator / total))
+                negative_percentages.append(float(100 * remainder / total))
+        computed[positive+'%'] = np.asarray(positive_percentages, dtype=float)
+        computed[negative+'%'] = np.asarray(negative_percentages, dtype=float)
+    # All pairs must be computable before any existing table field is changed.
+    for name, values in computed.items():
+        df[name] = values
     return df
 
 
 # ── Numeric helpers ────────────────────────────────────────────────────
 
 def round_up_to_nearest_5(x):
-    """Round up to the nearest 5 in the second significant figure."""
-    if np.isnan(x) or x == 0:
+    """Return the next half-decade plot bound that encloses the input.
+
+    Compare the converted floating-point bounds, preserving familiar decimal
+    boundaries such as 0.4. Missing and zero inputs retain their zero bound.
+    Refuse an input or rounded bound that cannot be represented on the plot.
+    """
+    from decimal import Decimal, ROUND_CEILING, localcontext
+    supplied = _finite_real_fraction(x, label="Axis bound")
+    if supplied is None or supplied == 0:
         return 0
-    order = 10 ** (np.floor(np.log10(abs(x))) - 1)
-    return math.ceil(x / order / 5) * 5 * order
+    if abs(supplied) > float.fromhex('0x1.fffffffffffffp+1023'):
+        raise ValueError("Axis bound exceeds the supported floating-point range.")
+    with localcontext() as context:
+        # Every binary64 input has a terminating decimal representation with
+        # fewer than 1,100 digits. This also makes the division by 5 exact.
+        context.prec = 2200
+        value = Decimal(supplied.numerator) / Decimal(supplied.denominator)
+        increment = Decimal(5).scaleb(value.copy_abs().adjusted() - 1)
+        multiplier = (value / increment).to_integral_value(rounding=ROUND_CEILING)
+        while float((multiplier - 1) * increment) >= supplied:
+            multiplier -= 1
+        rounded = float(multiplier * increment)
+    if not math.isfinite(rounded):
+        raise ValueError("Rounded axis bound exceeds the supported floating-point range.")
+    return rounded
 
 
 def flatten(xss):
@@ -1007,99 +1089,269 @@ def remove_none(data):
 
 
 def convert_microns_to_pixels(microns, pixel_size=None):
-    """Convert micron measurements to pixel coordinates (or vice versa)."""
+    """Convert micrometres using explicit um/px or default px/um calibration."""
     from PyFLASH.config import Config
-    if pixel_size is None:
-        pixel_size = 1 / Config.PIXEL_SIZE
-    return microns / pixel_size
+    calibration, direct_default = _pixel_conversion_scale(pixel_size, Config.PIXEL_SIZE)
+    return _calibrated_conversion(microns, calibration, multiply=direct_default)
 
 
 def convert_pixels_to_microns(pixels, pixel_size=None):
-    """Convert pixel measurements to microns."""
+    """Convert pixels using explicit um/px or default px/um calibration."""
     from PyFLASH.config import Config
-    if pixel_size is None:
-        pixel_size = 1 / Config.PIXEL_SIZE
-    return pixels * pixel_size
+    calibration, direct_default = _pixel_conversion_scale(pixel_size, Config.PIXEL_SIZE)
+    return _calibrated_conversion(pixels, calibration, multiply=not direct_default)
 
 
 # ── Geometry / ROI helpers ─────────────────────────────────────────────
 
+def _numeric_array_preserving_integers(values):
+    """Delay a lossy mixed integer/float conversion until after arithmetic."""
+    array = np.asarray(values)
+    if isinstance(values, np.ndarray) or array.dtype.kind not in 'fc':
+        return array
+    supplied = np.asarray(values, dtype=object)
+    for value, converted in zip(supplied.flat, array.flat):
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, int) and value != float(converted.real):
+            return supplied
+    return array
+
+
+def _real_coordinate_array(values, *, label, allow_zero_imaginary=False):
+    """Keep integer coordinates exact when another cell is a floating value."""
+    array = _numeric_array_preserving_integers(values)
+    if array.dtype.kind in 'biuf' and isinstance(values, np.ndarray):
+        if not np.isfinite(array).all():
+            raise ValueError(label + ' needs finite real coordinates.')
+        return array
+    supplied = np.array(values, dtype=object, copy=True)
+    keep_exact = array.dtype.kind == 'O'
+    for index, value in enumerate(supplied.flat):
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, complex):
+            if not allow_zero_imaginary or value.imag != 0:
+                raise ValueError(label + ' needs finite real coordinates.')
+            value = value.real
+        if not isinstance(value, (bool, int, float)) or isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(label + ' needs finite real coordinates.')
+        supplied.flat[index] = value
+        if isinstance(value, int) and array.dtype.kind in 'fc' and value != float(array.flat[index].real):
+            keep_exact = True
+    if array.dtype.kind not in 'biufcO':
+        raise ValueError(label + ' needs finite real coordinates.')
+    if keep_exact:
+        return supplied
+    return array.real if array.dtype.kind == 'c' else array
+
+
 def trace_downward_nearest(x, y):
-    """Trace a downward path through points by nearest-neighbour."""
-    x = np.asarray(x)
-    y = np.asarray(y)
-    y_min = y.min()
-    top = np.flatnonzero(y == y_min)
-    cur = top[np.argmax(x[top])]
+    """Trace downward with exact nearest-point ordering and original row indices.
 
-    path_idx = [cur]
-    cur_x, cur_y = x[cur], y[cur]
-    used = np.zeros(x.shape[0], dtype=bool)
-    used[cur] = True
-    max_left_slope = -2
-
-    while True:
-        mask = (y > cur_y) & (~used)
-        if not np.any(mask):
-            break
-        dx = x[mask] - cur_x
-        dy = y[mask] - cur_y
-        d2 = dx * dx + dy * dy
-        j = np.argmin(d2)
-        nxt = np.flatnonzero(mask)[j]
-        slope = (x[nxt] - cur_x) / (y[nxt] - cur_y)
-        if slope < max_left_slope:
-            break
-        path_idx.append(nxt)
-        used[nxt] = True
-        cur_x, cur_y = x[nxt], y[nxt]
-
-    if len(path_idx) <= 1:
-        y_min = y.min()
-        top = np.flatnonzero(y == y_min)
-        cur = top[np.argmax(x[top])]
-        x = np.delete(x, cur)
-        y = np.delete(y, cur)
-        return trace_downward_nearest(x, y)
-
-    path_idx = np.array(path_idx, dtype=int)
-    return x[path_idx], y[path_idx], path_idx
+    Distances and the slope cutoff use the exact represented coordinates.
+    An enclosing vertical bound excludes distant points before comparison;
+    approximate proposals can tighten that bound but never select the path.
+    """
+    from bisect import bisect_right
+    try:
+        x = _real_coordinate_array(x, label='Tracing')
+        y = _real_coordinate_array(y, label='Tracing')
+    except ValueError as error:
+        raise ValueError('Tracing needs paired finite one-dimensional real coordinates with at least two points.') from error
+    if (x.ndim!=1 or y.ndim!=1 or len(x)!=len(y) or len(x)<2
+):
+        raise ValueError('Tracing needs paired finite one-dimensional real coordinates with at least two points.')
+    if y.min()==y.max():
+        raise ValueError('Coordinates cannot form a downward path within the slope limit.')
+    ratios=[value.as_integer_ratio() for value in x.tolist()+y.tolist()]
+    denominator=max(value[1] for value in ratios)
+    coordinates=[numerator*(denominator//divisor) for numerator,divisor in ratios]
+    x_grid=np.asarray(coordinates[:len(x)],dtype=object)
+    y_grid=np.asarray(coordinates[len(x):],dtype=object)
+    y_order=np.argsort(y,kind='stable')
+    y_sorted=y_grid[y_order]
+    starts=sorted(range(len(x)),key=lambda i:(y_grid[i],-x_grid[i],i))
+    def squared_distance(first,second):
+        dx=x_grid[first]-x_grid[second];dy=y_grid[first]-y_grid[second]
+        return dx*dx+dy*dy
+    for start in starts:
+        path=[start];cur=start
+        while True:
+            lower=bisect_right(y_sorted,y_grid[cur])
+            if lower==len(y_sorted):break
+            first=int(y_order[lower])
+            bound=squared_distance(first,cur)
+            upper=bisect_right(y_sorted,y_grid[cur]+math.isqrt(bound),lo=lower)
+            if upper-lower>32:
+                eligible=y_order[lower:upper]
+                # This is a proposal only. Its exact distance supplies an
+                # enclosing bound even if the approximate choice is wrong.
+                try:
+                    with np.errstate(all='ignore'):
+                        dx=np.asarray(x[eligible],dtype=float)-float(x[cur])
+                        dy=np.asarray(y[eligible],dtype=float)-float(y[cur])
+                        proposal=int(eligible[np.argmin(np.hypot(dx,dy))])
+                    bound=min(bound,squared_distance(proposal,cur))
+                except OverflowError:
+                    pass  # Exact bounds still choose the path; the proposal is optional.
+                upper=bisect_right(y_sorted,y_grid[cur]+math.isqrt(bound),lo=lower)
+            candidates=np.sort(y_order[lower:upper])
+            dx=x_grid[candidates]-x_grid[cur]
+            dy=y_grid[candidates]-y_grid[cur]
+            nxt=int(candidates[np.argmin(dx*dx+dy*dy)])
+            if x_grid[nxt]-x_grid[cur] < -2*(y_grid[nxt]-y_grid[cur]):break
+            path.append(nxt);cur=nxt
+        if len(path)>1:
+            indices=np.asarray(path,dtype=int)
+            return x[indices],y[indices],indices
+        if lower==len(y_sorted):break
+    raise ValueError('Coordinates cannot form a downward path within the slope limit.')
 
 
 def moving_average(a, w=7):
-    """Padded moving average."""
+    """Padded moving average, preserving small values and cancellation.
+
+    Widths below two retain the historical no-op. Even widths retain the
+    historical output length of one more than the input. Real NumPy numeric
+    inputs through float64 are averaged from their exact represented values;
+    complex64/complex128 components use the same exact averaging. Object
+    arrays of supported Python/NumPy numeric scalars use that averaging and
+    retain object output dtype. Other carriers retain convolution behaviour.
+    """
+    supplied_a = a
     a = np.asarray(a)
     if w < 2:
         return a
+    input_dtype = a.dtype
+    a = _numeric_array_preserving_integers(supplied_a)
+    from operator import index
+    w = index(w)
+    if a.ndim != 1:
+        raise ValueError("Moving averages need a one-dimensional signal.")
+    object_numeric = False
+    if a.dtype.kind == 'O' and a.ndim == 1:
+        supplied = a.tolist()
+        def supported(value):
+            if type(value) in (bool, int, float, complex):
+                return True
+            if isinstance(value, np.generic):
+                return (value.dtype.kind in 'biu'
+                        or value.dtype.kind == 'f' and value.dtype.itemsize <= 8
+                        or value.dtype.kind == 'c' and value.dtype.itemsize <= 16)
+            return False
+        if all(supported(value) for value in supplied):
+            if any(isinstance(value, (complex, np.complexfloating)) for value in supplied):
+                real = moving_average(np.asarray([value.real for value in supplied], dtype=object), w)
+                imaginary = moving_average(np.asarray([value.imag for value in supplied], dtype=object), w)
+                return np.asarray([complex(r, i) for r, i in zip(real, imaginary)], dtype=object if input_dtype.kind == 'O' else np.complex128)
+            object_numeric = True
+    if a.dtype.kind == 'c' and a.dtype.itemsize <= 16:
+        if a.ndim != 1:
+            raise ValueError("Moving averages need a one-dimensional signal.")
+        real = moving_average(a.real, w)
+        imaginary = moving_average(a.imag, w)
+        result = np.empty(real.shape, dtype=np.complex128)
+        result.real = real
+        result.imag = imaginary
+        return result
     pad = w // 2
     ap = np.pad(a, (pad, pad), mode="edge")
-    return np.convolve(ap, np.ones(w) / w, mode="valid")
+    if not object_numeric and (a.dtype.kind not in 'biuf' or a.dtype.kind == 'f' and a.dtype.itemsize > 8):
+        return np.convolve(ap, np.ones(w) / w, mode="valid")
+    if a.ndim != 1:
+        raise ValueError("Moving averages need a one-dimensional signal.")
+    # Binary integer coordinates avoid an overflowing sum or an underflowing
+    # per-observation weight. Missing/infinite windows keep their own states.
+    ratios = []
+    states = []
+    for value in ap.tolist():
+        if object_numeric and isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, int):
+            ratios.append((value, 1)); states.append(0)
+        elif math.isnan(value):
+            ratios.append((0, 1)); states.append(1)
+        elif math.isinf(value):
+            ratios.append((0, 1)); states.append(2 if value > 0 else 3)
+        else:
+            ratios.append(value.as_integer_ratio()); states.append(0)
+    denominator = max(divisor for _, divisor in ratios)
+    values = [numerator * (denominator // divisor) for numerator, divisor in ratios]
+    total = sum(values[:w])
+    counts = [states[:w].count(state) for state in range(4)]
+    result = []
+    divisor = denominator * w
+    for start in range(len(values) - w + 1):
+        if counts[1] or counts[2] and counts[3]:
+            result.append(np.nan)
+        elif counts[2]:
+            result.append(np.inf)
+        elif counts[3]:
+            result.append(-np.inf)
+        else:
+            result.append(total / divisor)
+        end = start + w
+        if end < len(values):
+            total += values[end] - values[start]
+            counts[states[end]] += 1
+            counts[states[start]] -= 1
+    return np.asarray(result, dtype=object if object_numeric and input_dtype.kind == 'O' else float)
 
 
 def points_to_polyline_distance(px, py, x_line, y_line):
-    """Vectorised minimum distance from points to a polyline."""
-    px = np.asarray(px, dtype=float)[:, None]
-    py = np.asarray(py, dtype=float)[:, None]
-    x_line = np.asarray(x_line, dtype=float)
-    y_line = np.asarray(y_line, dtype=float)
-
+    """Return distances and nearest boundary points, keeping first-segment ties."""
+    supplied = (px, py, x_line, y_line)
+    original_arrays = None if all(isinstance(values, np.ndarray) and values.dtype.kind == 'f' for values in supplied) else [np.array(values, dtype=object, copy=True) for values in supplied]
+    if original_arrays is not None:
+        for values in original_arrays:
+            for index, value in enumerate(values.flat):
+                if isinstance(value, (complex, np.complexfloating)):
+                    if value.imag != 0:
+                        raise ValueError('Point and polyline coordinates must be real.')
+                    values.flat[index] = value.real
+    arrays = [np.asarray(values, dtype=float) for values in (supplied if original_arrays is None else original_arrays)]
+    if any(values.ndim != 1 for values in arrays):
+        raise ValueError('Point and polyline coordinates must be one-dimensional.')
+    px, py, x_line, y_line = arrays
+    if len(px) != len(py) or len(x_line) != len(y_line):
+        raise ValueError('Each coordinate pair must have matching lengths.')
+    if len(x_line) < 2:
+        raise ValueError('A polyline requires at least two vertices.')
+    if any(not np.isfinite(values).all() for values in arrays):
+        raise ValueError('Point and polyline coordinates must be finite.')
+    if not len(px):
+        return np.empty(0, dtype=float), np.empty((0, 2), dtype=float)
+    integer_precision_lost = original_arrays is not None and any(
+        isinstance(value, (int, np.integer)) and int(value) != float(converted)
+        for original, floating in zip(original_arrays, arrays)
+        for value, converted in zip(original.flat, floating.flat)
+    )
+    if integer_precision_lost:
+        return _exact_polyline_distance(*original_arrays)
+    pxx, pyy = px[:, None], py[:, None]
     x0, y0 = x_line[:-1][None, :], y_line[:-1][None, :]
     x1, y1 = x_line[1:][None, :], y_line[1:][None, :]
-    dx, dy = x1 - x0, y1 - y0
-    seg_len2 = dx * dx + dy * dy
-    seg_len2 = np.where(seg_len2 == 0, 1.0, seg_len2)
-
-    t = np.clip(((px - x0) * dx + (py - y0) * dy) / seg_len2, 0.0, 1.0)
-    cx, cy = x0 + t * dx, y0 + t * dy
-    d2 = (px - cx) ** 2 + (py - cy) ** 2
-
-    distances = np.sqrt(d2.min(axis=1))
+    with np.errstate(over='ignore', invalid='ignore'):
+        dx, dy = x1-x0, y1-y0
+        ox, oy = pxx-x0, pyy-y0
+    extreme = False
+    for values in (dx, dy, ox, oy):
+        absolute = np.abs(values)
+        nonzero = absolute[absolute != 0]
+        if not np.isfinite(values).all() or (nonzero.size and
+                (nonzero.max() > 1e150 or nonzero.min() < 1e-150)):
+            extreme = True
+            break
+    if extreme:
+        return _exact_polyline_distance(px, py, x_line, y_line)
+    seg_len2 = dx*dx + dy*dy
+    seg_len2 = np.where(seg_len2 == 0, 1., seg_len2)
+    t = np.clip((ox*dx + oy*dy)/seg_len2, 0., 1.)
+    cx, cy = x0+t*dx, y0+t*dy
+    d2 = (pxx-cx)**2 + (pyy-cy)**2
     best = d2.argmin(axis=1)
-    closest_points = np.array([
-        cx[np.arange(len(px)), best],
-        cy[np.arange(len(px)), best],
-    ]).T
-    return distances, closest_points
+    return np.sqrt(d2.min(axis=1)), np.column_stack((cx[np.arange(len(px)), best], cy[np.arange(len(px)), best]))
 
 
 def filter_dict(my_dict, key_substring):
@@ -1255,7 +1507,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
              write_companion_csv=None, figure_formats=None, dpi=None,
              dpi_preset=None, render_preset=None, width=None, height=None,
              format_options=None, allow_reencode=None, transparent=True,
-             sanitize_name=True, proof=None, proof_policy=None):
+             sanitize_name=True, proof=None, proof_policy=None, preview_of=None):
     """Save one audited figure to every requested direct ReproFig carrier.
 
     Parameters
@@ -1303,6 +1555,12 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         false only when the caller has already supplied a deliberate filename.
     proof : bool, optional
         Capture semantic marks and a shared proof root. The default remains off.
+    preview_of : path, optional
+        Render an auxiliary preview from this figure's producing save call.
+        Written carriers retain their identity and evidence. Skipped/no-write
+        calls use fresh evidence, preserving the old carrier and pending saves.
+        Preview rendering preserves privacy and pixels, does not notify output
+        or montage observers, and refuses a changed or unrelated primary file.
     proof_policy : mapping, optional
         Required verification meanings plus non-secret signing, trust and
         encryption references. Password values are accepted only through the
@@ -1311,11 +1569,29 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
     from matplotlib import pyplot as plt
     from PyFLASH.config import Config, apply_matplotlib_fast_path
     from PyFLASH.aesthetics import (
+        _apply_presentation,
         apply_pyflash_figure_geometry,
         normalize_pyflash_svg_canvas,
         pyflash_savefig_kwargs,
     )
     apply_matplotlib_fast_path()
+    is_preview = preview_of is not None
+    preview_record = None
+    if is_preview:
+        evidence = getattr(figure, "_pyflash_preview_evidence", {}).get(os.path.abspath(preview_of))
+        if os.path.isfile(preview_of):
+            from reprofig import extract_record
+            saved = extract_record(preview_of)
+            if evidence is not None and evidence["written"]:
+                from PyFLASH._cache_identity import file_hash
+                if file_hash(preview_of) != evidence["sha256"]:
+                    raise ValueError("Primary figure changed after this render.")
+        if evidence is None:
+            raise ValueError("Preview source does not belong to this figure render.")
+        preview_record = evidence["record"]
+    else:
+        figure._pyflash_preview_evidence = {}
+    fixed_canvas = not is_preview and bool(getattr(figure, "_pyflash_fixed_canvas", False))
 
     def _windows_extended_path(path):
         if os.name != "nt":
@@ -1360,6 +1636,8 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         if figure_profile is not None
         else getattr(Config, "FIGURE_PROFILE", "master")
     )
+    if preview_record is not None:
+        selected_profile = preview_record.distribution_profile
     if selected_profile not in {"master", "public", "minimal_public"}:
         raise ValueError(
             "figure_profile must be 'master', 'public', or 'minimal_public'"
@@ -1376,9 +1654,9 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         dpi_preset = getattr(Config, "FIGURE_DPI_PRESET", None)
     if render_preset is None:
         render_preset = getattr(Config, "FIGURE_RENDER_PRESET", None)
-    if width is None:
+    if width is None and not is_preview:
         width = getattr(Config, "FIGURE_WIDTH", None)
-    if height is None:
+    if height is None and not is_preview:
         height = getattr(Config, "FIGURE_HEIGHT", None)
     if format_options is None:
         format_options = getattr(Config, "FIGURE_FORMAT_OPTIONS", None)
@@ -1391,50 +1669,39 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
         proof = bool(getattr(Config, "FIGURE_PROOF", False) or proof_policy)
     proof = bool(proof)
 
+    if not is_preview:
+        _apply_presentation(figure)
     # Notify observers with the live figure before the caller closes it (and
     # before rasterize_data_artists mutates it for SVG). Fires regardless of
     # SAVE_MODE / skip so a montage can capture even a skipped/no-write run.
-    if _FIG_SAVE_OBSERVERS:
+    if _FIG_SAVE_OBSERVERS and not is_preview:
         _notify_fig_save_observers(figure, full_path, image_name, subfolder, bool(montage))
 
-    if Config.SAVE_MODE:
-        os.makedirs(_windows_extended_path(save_path), exist_ok=True)
-        if use_skip and all(os.path.isfile(path) for path in save_full_paths):
-            if verbose:
-                _log.hint(f"Skipped (exists): {full_path}")
-            return full_path
+    from PyFLASH import provenance
 
-        if rasterize:
-            rasterize_data_artists(figure)
-
-        # Attach the overlap-safe layout engine just before saving so over-long
-        # titles are shrunk to fit and an overlapping suptitle is lifted clear,
-        # without shrinking the data axes. No-op for figures flagged manual or
-        # created with their own (e.g. constrained) engine.
-        if getattr(Config, "USE_PYFLASH_LAYOUT", True):
-            from PyFLASH.layout import apply_pyflash_layout
-            apply_pyflash_layout(figure)
-        apply_pyflash_figure_geometry(figure, save_bbox=save_bbox)
-
-        # Guarantee editable text at the single figure choke point regardless of
-        # what rcParams the caller left active: every string stays a real <text>
-        # element and mathtext renders in the body font (not vectorised glyphs).
-        # Carry the producing call inside the file as well as in the folder's
-        # figures.json: a manifest is keyed by filename, so a renamed or copied
-        # figure loses the entry but keeps what is embedded in the SVG.
+    def _prepare_export_record(persist=True):
+        from PyFLASH import provenance
+        if not persist:
+            with provenance._unstaged_save(full_path):
+                return _prepare_export_record()
         _prepared_record = None
+        _described = None
+        _svg_metadata = {}
         try:
             from PyFLASH import provenance
 
-            _prepared_record, _svg_metadata, _described = provenance.prepare_figure_record(
-                figure,
-                full_path,
-                image_name,
-                figure_profile=selected_profile,
-                safe_columns=figure_safe_columns,
-                public_sources=public_sources,
-                proof=proof,
-            )
+            if preview_record is not None:
+                _prepared_record, _svg_metadata, _described = preview_record, {}, None
+            else:
+                _prepared_record, _svg_metadata, _described = provenance.prepare_figure_record(
+                    figure,
+                    full_path,
+                    image_name,
+                    figure_profile=selected_profile,
+                    safe_columns=figure_safe_columns,
+                    public_sources=public_sources,
+                    proof=proof,
+                )
         except Exception as exc:
             if selected_profile != "master" or proof:
                 raise
@@ -1447,17 +1714,143 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             except Exception:
                 _svg_metadata = {}
 
+        return _prepared_record, _svg_metadata, _described
+
+    def _remember_current_record(record):
+        if not is_preview and record is not None:
+            from reprofig import derive_profile
+            current_record = derive_profile(record, selected_profile,
+                safe_columns=figure_safe_columns, public_sources=public_sources)
+            figure._pyflash_preview_evidence = {
+                os.path.abspath(path): {"record": current_record, "written": False}
+                for path in full_paths
+            }
+
+    if Config.SAVE_MODE or is_preview:
+        os.makedirs(_windows_extended_path(save_path), exist_ok=True)
+        if use_skip and all(os.path.isfile(path) for path in save_full_paths):
+            _prepared_record, _svg_metadata, _described = _prepare_export_record(persist=False)
+            _remember_current_record(_prepared_record)
+            if verbose:
+                _log.hint(f"Skipped (exists): {full_path}")
+            return full_path
+
+        if rasterize and not is_preview:
+            rasterize_data_artists(figure)
+
+        # Attach the overlap-safe layout engine just before saving so over-long
+        # titles are shrunk to fit and an overlapping suptitle is lifted clear,
+        # without shrinking the data axes. No-op for figures flagged manual or
+        # created with their own (e.g. constrained) engine.
+        if not is_preview and getattr(Config, "USE_PYFLASH_LAYOUT", True):
+            from PyFLASH.layout import apply_pyflash_layout
+            apply_pyflash_layout(figure)
+        if not fixed_canvas and not is_preview:
+            apply_pyflash_figure_geometry(figure, save_bbox=save_bbox)
+
+        # Guarantee editable text at the single figure choke point regardless of
+        # what rcParams the caller left active: every string stays a real <text>
+        # element and mathtext renders in the body font (not vectorised glyphs).
+        # Carry the producing call inside the file as well as in the folder's
+        # figures.json: a manifest is keyed by filename, so a renamed or copied
+        # figure loses the entry but keeps what is embedded in the SVG.
+        cached_paths = [path for path in save_full_paths if use_skip and os.path.isfile(path)]
+        _prepared_record, _svg_metadata, _described = _prepare_export_record(persist=not cached_paths)
+        if proof and _prepared_record is not None:
+            from PyFLASH._figure_proof import capture_figure
+            _prepared_record.extensions['render_manifest'] = capture_figure(figure).to_dict()
+        if cached_paths:
+            from reprofig import derive_profile, extract_record, validate_artifact
+
+            if _prepared_record is None:
+                raise ValueError("Cannot complete cached figure formats without current evidence.")
+            if proof:
+                from PyFLASH._figure_proof import capture_figure
+                _prepared_record.extensions["render_manifest"] = capture_figure(figure).to_dict()
+            current = derive_profile(_prepared_record, selected_profile,
+                safe_columns=figure_safe_columns, public_sources=public_sources)
+
+            def scientific_evidence(record):
+                payload = record.to_dict()
+                # Identity and time belong to the first carrier. Everything
+                # describing its science and producer must still match.
+                payload.pop("figure_id", None)
+                payload.pop("created_at", None)
+                payload.pop("integrity", None)
+                producer = dict(payload.get("producer") or {})
+                arguments = dict(producer.get("arguments") or {})
+                arguments.pop("write_companion_csv", None)
+                if "arguments" in producer:
+                    producer["arguments"] = arguments
+                payload["producer"] = producer
+                sources = [dict(source) for source in payload.get("sources", [])]
+                for source in sources:
+                    if source.get("sha256"):
+                        source.pop("modified_at", None)
+                        source.pop("size_bytes", None)
+                payload["sources"] = sources
+                extensions = dict(payload.get("extensions") or {})
+                # Each carrier binds its own rendered pixels to the shared
+                # evidence. The semantic manifest above must still agree.
+                extensions.pop("visual_reference", None)
+                proof_data = extensions.pop("proof", None)
+                if proof_data is not None:
+                    extensions["proof"] = {key: proof_data.get(key) for key in
+                        ("statistical_specifications", "claims", "opaque_statistics")}
+                payload["extensions"] = extensions
+                return payload
+
+            cached = None
+            for path in cached_paths:
+                validation = validate_artifact(path, expected_profile=selected_profile,
+                    public_safety=selected_profile != "master")
+                if not validation.valid:
+                    raise ValueError("Cached figure format is invalid: " + str(path))
+                record = extract_record(path)
+                if scientific_evidence(record) != scientific_evidence(current):
+                    raise ValueError("Cached figure evidence differs from this render; use a new name or disable skip_existing.")
+                if cached is not None and (record.figure_id != cached.figure_id or
+                        (record.extensions.get("proof") or {}).get("root_sha256") !=
+                        (cached.extensions.get("proof") or {}).get("root_sha256")):
+                    raise ValueError("Cached figure formats disagree on identity or proof root.")
+                cached = record
+            # Render from the complete current record so profile reduction
+            # happens exactly once, including with older ReproFig releases.
+            _prepared_record.figure_id = cached.figure_id
+            _prepared_record.created_at = cached.created_at
+            if "write_companion_csv" in (cached.producer.get("arguments") or {}):
+                arguments = dict(_prepared_record.producer.get("arguments") or {})
+                arguments["write_companion_csv"] = cached.producer["arguments"]["write_companion_csv"]
+                _prepared_record.producer["arguments"] = arguments
+            # Content hashes identify source bytes. Retain the first carrier's
+            # time metadata so an unrelated touch cannot change its proof root.
+            for source in _prepared_record.sources:
+                for previous in cached.sources:
+                    if (source.sha256 and source.sha256 == previous.sha256 and
+                            source.role == previous.role and source.relative_path == previous.relative_path and
+                            source.uri == previous.uri):
+                        source.modified_at = previous.modified_at
+                        source.size_bytes = previous.size_bytes
+                        break
+        _remember_current_record(_prepared_record)
+
         from reprofig import save_figure as _reprofig_save_figure
         from reprofig import validate_artifact
 
         _companion_base_record = _prepared_record
         _variant_record = _prepared_record
         base_savefig_kwargs = pyflash_savefig_kwargs(
+            dpi=dpi,
             bbox_inches=save_bbox,
             pad_inches=pad_inches,
             bbox_extra_artists=extra_artist,
             transparent=bool(transparent),
         )
+        if is_preview:
+            base_savefig_kwargs.update(facecolor="white", transparent=False,
+                                       bbox_inches="tight", pad_inches=plt.rcParams["savefig.pad_inches"])
+        elif fixed_canvas:
+            base_savefig_kwargs["bbox_inches"] = None
         for index, (carrier_path, save_carrier_path, extension) in enumerate(
             zip(full_paths, save_full_paths, selected_formats)
         ):
@@ -1474,14 +1867,27 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             os.unlink(temporary_path)
             temporary_save_path = _windows_extended_path(temporary_path)
             try:
-                with plt.rc_context({'svg.fonttype': 'none', 'mathtext.default': 'regular'}):
-                    if _variant_record is None:
+                with plt.rc_context({'svg.fonttype': 'none', 'mathtext.default': 'regular',
+                                     **({'savefig.bbox': None} if fixed_canvas else {})}):
+                    if _variant_record is None or (_variant_record.distribution_profile == "minimal_public"):
                         figure.savefig(
                             temporary_save_path,
                             format=extension,
                             **base_savefig_kwargs,
                         )
                         _saved_record = None
+                        if _variant_record is not None:
+                            # Reuse the existing carrier-embedding API for a
+                            # metadata-only record. Older ReproFig releases
+                            # cannot derive that reduced profile a second time.
+                            from reprofig import embed_file, refresh_visual_reference
+                            _saved_record = _variant_record
+                            if proof:
+                                _saved_record = refresh_visual_reference(
+                                    temporary_save_path, _saved_record
+                                )
+                            embed_file(temporary_save_path, _saved_record,
+                                       output_path=temporary_save_path)
                     else:
                         _saved_record = _reprofig_save_figure(
                             figure,
@@ -1507,7 +1913,7 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
                             # below, after the final visual reference refresh.
                             proof_policy=None,
                         )
-                if extension == "svg":
+                if extension == "svg" and not fixed_canvas:
                     normalize_pyflash_svg_canvas(
                         temporary_save_path, save_bbox=save_bbox
                     )
@@ -1547,6 +1953,10 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
                     # has one evidence root; signatures are rebound per visual.
                     _variant_record = _saved_record
                 if _saved_record is not None:
+                    if cached_paths and proof and (
+                            (_saved_record.extensions.get("proof") or {}).get("root_sha256") !=
+                            (cached.extensions.get("proof") or {}).get("root_sha256")):
+                        raise ValueError("Completed figure format would change the cached proof root.")
                     validation = validate_artifact(
                         temporary_save_path,
                         expected_profile=selected_profile,
@@ -1561,17 +1971,23 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
                             )
                         )
                 os.replace(temporary_save_path, save_carrier_path)
+                if not is_preview and _saved_record is not None:
+                    from PyFLASH._cache_identity import file_hash
+                    figure._pyflash_preview_evidence[os.path.abspath(carrier_path)] = {
+                        "record": _saved_record, "written": True,
+                        "sha256": file_hash(save_carrier_path),
+                    }
             finally:
                 try:
                     os.unlink(temporary_save_path)
                 except OSError:
                     pass
 
-            if _prepared_record is not None:
+            if _prepared_record is not None and not is_preview:
                 provenance.stage_prepared_save(
                     carrier_path, _described, _saved_record
                 )
-            if _FIG_SAVED_OBSERVERS:
+            if _FIG_SAVED_OBSERVERS and not is_preview:
                 _notify_fig_saved_observers(
                     carrier_path, image_name, subfolder, bool(montage)
                 )
@@ -1595,6 +2011,10 @@ def save_fig(figure, save_path, image_name, extra_artist=None,
             _detach_figure_record(figure)
         except Exception:
             pass
+
+    if not Config.SAVE_MODE and not is_preview:
+        _prepared_record, _svg_metadata, _described = _prepare_export_record(persist=False)
+        _remember_current_record(_prepared_record)
 
     if verbose:
         _log.confirm(f"Figure saved to {full_path}")
@@ -1657,3 +2077,121 @@ def _register_provenance_observer():
 
 
 _register_provenance_observer()
+
+
+def _calibrated_conversion(values, calibration, *, multiply):
+    scale = _finite_real_fraction(calibration, label='Pixel calibration', allow_missing=False, positive=True)
+    array = np.asarray(values)
+    if array.dtype.kind not in 'biufO':
+        raise TypeError('Coordinates must contain real numbers.')
+    if array.dtype.kind == 'f' and array.dtype.itemsize > 8:
+        raise ValueError('Coordinates must be representable in binary64.')
+    if array.dtype.kind == 'f':
+        array = array.astype(float, copy=False)
+    use_exact = array.ndim == 0 or array.dtype.kind in 'biuO'
+    try:
+        floating_scale = float(scale)
+        use_exact = use_exact or not np.isfinite(floating_scale) or floating_scale == 0.
+        use_exact = use_exact or _finite_real_fraction(floating_scale,label='Pixel calibration') != scale
+    except OverflowError:
+        floating_scale = None
+        use_exact = True
+    if use_exact:
+        converted=[]
+        for value in array.flat:
+            original = _finite_real_fraction(value,label='Coordinate',allow_missing=True)
+            if original is None:
+                converted.append(np.nan)
+                continue
+            exact = original*scale if multiply else original/scale
+            try: result=float(exact)
+            except OverflowError as exc:
+                raise ValueError('Converted coordinate exceeds the floating-point range.') from exc
+            if not np.isfinite(result):
+                raise ValueError('Converted coordinate exceeds the floating-point range.')
+            converted.append(result)
+        result=np.asarray(converted,dtype=float).reshape(array.shape)
+    else:
+        if np.isinf(array).any():
+            raise ValueError('Coordinates must be finite or missing.')
+        with np.errstate(over='ignore',invalid='ignore',under='ignore',divide='ignore'):
+            result=np.multiply(array,floating_scale) if multiply else np.divide(array,floating_scale)
+        if np.isinf(result).any():
+            raise ValueError('Converted coordinate exceeds the floating-point range.')
+    if isinstance(values,pd.Series):
+        output=pd.Series(result,index=values.index,name=values.name)
+        output.attrs=values.attrs.copy()
+        return output
+    if isinstance(values,pd.DataFrame):
+        output=pd.DataFrame(result,index=values.index,columns=values.columns)
+        output.attrs=values.attrs.copy()
+        return output
+    if array.ndim==0:
+        return float(result)
+    return result
+
+def _exact_polyline_distance(px, py, x_line, y_line):
+    """Avoid squaring in binary64 when represented coordinates are extreme."""
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    def exact(value):
+        if isinstance(value, np.generic): value=value.item()
+        return Fraction(value) if isinstance(value,int) else Fraction(*float(value).as_integer_ratio())
+    vertices = [(exact(x), exact(y)) for x, y in zip(x_line, y_line)]
+    segments = []
+    for (x0,y0),(x1,y1) in zip(vertices, vertices[1:]):
+        dx, dy = x1-x0, y1-y0
+        segments.append((x0,y0,dx,dy,dx*dx+dy*dy))
+    distances=[];closest=[]
+    for xx, yy in zip(px,py):
+        x,y = exact(xx),exact(yy)
+        best_distance=None;best_point=None
+        for x0,y0,dx,dy,denominator in segments:
+            t = min(Fraction(1), max(Fraction(0), ((x-x0)*dx+(y-y0)*dy)/denominator)) if denominator else Fraction(0)
+            cx,cy=x0+t*dx,y0+t*dy
+            squared=(x-cx)**2+(y-cy)**2
+            if best_distance is None or squared < best_distance:
+                best_distance,best_point=squared,(cx,cy)
+        with localcontext() as context:
+            context.prec=2200
+            distance=float((Decimal(best_distance.numerator)/Decimal(best_distance.denominator)).sqrt())
+        if not np.isfinite(distance):
+            raise ValueError('Polyline distance exceeds the floating-point range.')
+        distances.append(distance)
+        closest.append([float(coordinate) for coordinate in best_point])
+    return np.asarray(distances,dtype=float),np.asarray(closest,dtype=float).reshape(-1,2)
+
+def _finite_real_fraction(value, *, label, allow_missing=True, nonnegative=False,
+                          positive=False):
+    """Read a supplied real measurement exactly before dependent arithmetic."""
+    from fractions import Fraction
+    if isinstance(value, np.generic):
+        value = value.item()
+    if value is None or value is pd.NA or isinstance(value, float) and math.isnan(value):
+        if allow_missing:
+            return None
+        raise ValueError(label + " must be present.")
+    if not isinstance(value, (int, float)):
+        raise TypeError(label + " must be integers or floats.")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(label + " must be finite.")
+    if positive and value <= 0:
+        raise ValueError(label + " must be positive.")
+    if nonnegative and value < 0:
+        raise ValueError(label + " must be nonnegative.")
+    return Fraction(value)
+
+def _pixel_conversion_scale(pixel_size, configured_pixels_per_micron):
+    """Keep ImageJ's represented physical calibration when it is available."""
+    if pixel_size is not None:
+        return pixel_size, False
+    configured = _finite_real_fraction(configured_pixels_per_micron,
+        label='Pixel calibration', allow_missing=False, positive=True)
+    try:
+        physical = float(1/configured)
+    except OverflowError:
+        physical = np.inf
+    if np.isfinite(physical) and physical > 0:
+        return physical, False
+    # An unavailable intermediate reciprocal must not erase a finite answer.
+    return configured_pixels_per_micron, True

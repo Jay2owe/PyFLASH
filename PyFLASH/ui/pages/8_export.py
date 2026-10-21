@@ -1,271 +1,75 @@
-"""Export page — write the formatted Excel workbooks and save the analysis.
-
-Reads the ``Batch``/``Experiment`` placed in ``st.session_state["batch"]`` by
-the Project or Process page. Exposes the two "finish the job" actions from the
-notebook as forms:
-
-* **Export Excel** — toggles for the three workbooks (``if_summary`` /
-  ``if_extended`` / ``behaviour``), an include + exclude column regex per
-  workbook, an optional ``save_name`` per workbook, and a target ``save_path``
-  (defaults to the batch ``Exports/`` folder). Calls
-  ``services.export_excel`` inside ``st.status`` and renders the captured log,
-  the produced ``.xlsx`` files, and the ``*_RegexFilters.txt`` reports so users
-  can see what was matched / skipped.
-* **Save state** — a filename field + button calling ``services.save_batch``
-  (default ``<pickle dir>/<name>.pkl``).
-
-Regex is pre-validated with ``services.validate_regex`` and a friendly error is
-shown *before* export is attempted. All PyFLASH calls go through ``services``
-(Streamlit-free); Streamlit is imported here (a page), never in ``services.py``.
-"""
-
-import os
-
+"""Compact exports, with availability checks against the loaded object."""
+from pathlib import Path
 import streamlit as st
-
+from PyFLASH.ui.controls import fold, widget
 from PyFLASH.ui import services
+from PyFLASH.ui.job_status import submit, download_script
 
-st.header("Export & Save")
-
+st.title("Export")
 batch = st.session_state.get("batch")
 if batch is None:
-    st.info("No analysis loaded. Open a .pkl on the Project page first, or "
-            "build one on the Process page.")
+    st.info("Open data in Workspace, or build an analysis in Process.")
     st.stop()
 
-st.caption(
-    f"Working on **{type(batch).__name__}** "
-    f"(name: {getattr(batch, 'name', '?')})."
-)
-
-
-# ── Helpers ─────────────────────────────────────────────────────────────────
-
-
-def _split_patterns(raw):
-    """Split a comma-separated regex field into a clean list (or ``None``)."""
-    return [s.strip() for s in (raw or "").split(",") if s.strip()] or None
-
-
-def _default_export_path():
-    """Best-effort default for the export folder: the batch ``Exports/`` dir."""
-    path = getattr(batch, "export_path", None)
-    if not path:
-        file_path = getattr(batch, "filePath", None)
-        if file_path:
-            path = os.path.join(file_path, "Exports")
-    return path or ""
-
-
-def _default_save_filename():
-    """Default save-state path: ``<pickle dir>/<name>.pkl``.
-
-    Prefers the directory of the last load/save path (``_state_path``), then the
-    batch ``csv_path`` (``save_state``'s own default), so re-saving lands beside
-    the existing pickle.
-    """
-    name = getattr(batch, "name", "batch") or "batch"
-    state_path = getattr(batch, "_state_path", None)
-    if state_path:
-        return os.path.join(os.path.dirname(state_path), f"{name}.pkl")
-    csv_path = getattr(batch, "csv_path", None)
-    if csv_path:
-        return os.path.join(csv_path, f"{name}.pkl")
-    return f"{name}.pkl"
-
-
-def _list_outputs(root):
-    """Return the .xlsx workbooks and *_RegexFilters.txt reports under *root*.
-
-    Walked read-only after export so the page can show what was produced and
-    surface the regex reports (the workbooks live in per-ROI subfolders).
-    """
-    workbooks, reports = [], []
-    if not root or not os.path.isdir(root):
-        return workbooks, reports
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for fn in filenames:
-            full = os.path.join(dirpath, fn)
-            if fn.lower().endswith(".xlsx"):
-                workbooks.append(full)
-            elif fn.endswith("_RegexFilters.txt"):
-                reports.append(full)
-    return sorted(workbooks), sorted(reports)
-
-
-# ── Export Excel ────────────────────────────────────────────────────────────
-
-st.subheader("Export Excel")
-st.caption(
-    "Pick which workbooks to write and (optionally) narrow the exported "
-    "metric columns with regular expressions. Include keeps only matching "
-    "columns; exclude drops matching columns (both case-insensitive)."
-)
-
-WORKBOOKS = [
-    ("if_summary", "IF Summary", "IF_Summary"),
-    ("if_extended", "IF Extended", "IF_Extended"),
-    ("behaviour", "Behaviour Summary", "Behavior_Summary"),
-]
-
-toggles, includes, excludes, save_names = {}, {}, {}, {}
-for key, label, default_name in WORKBOOKS:
-    with st.expander(label, expanded=True):
-        toggles[key] = st.toggle(
-            f"Export {label}", value=True, key=f"toggle_{key}")
-        includes[key] = st.text_input(
-            "Include columns matching (regex, comma-separated)",
-            value="", key=f"include_{key}",
-            disabled=not toggles[key],
-            help="Leave blank to keep all columns.",
-        )
-        excludes[key] = st.text_input(
-            "Exclude columns matching (regex, comma-separated)",
-            value="", key=f"exclude_{key}",
-            disabled=not toggles[key],
-            help="Leave blank to exclude nothing.",
-        )
-        save_names[key] = st.text_input(
-            "Workbook file name (without .xlsx)",
-            value=default_name, key=f"savename_{key}",
-            disabled=not toggles[key],
-        )
-
-save_path = st.text_input(
-    "Export folder",
-    value=_default_export_path(),
-    help="Where the workbooks are written. Leave blank to use the batch "
-         "Exports/ folder. A relative path lands under Exports/; an absolute "
-         "path is used as-is.",
-)
-
-export = st.button("Export", type="primary")
-
-if export:
-    if not any(toggles.values()):
-        st.warning("Select at least one workbook to export.")
-        st.stop()
-
-    # Pre-validate every regex field so a typo shows a friendly error before we
-    # start a (possibly slow) export, rather than failing mid-write.
-    include_lists = {k: _split_patterns(includes[k]) for k in toggles}
-    exclude_lists = {k: _split_patterns(excludes[k]) for k in toggles}
-    regex_error = None
-    for key, label, _default in WORKBOOKS:
-        if not toggles[key]:
-            continue
-        for kind, lst in (("include", include_lists[key]),
-                          ("exclude", exclude_lists[key])):
-            try:
-                services.validate_regex(lst)
-            except Exception as exc:  # re.error
-                regex_error = f"Invalid {label} {kind} regex: {exc}"
-                break
-        if regex_error:
-            break
-
-    if regex_error:
-        st.error(regex_error)
-        st.stop()
-
-    # A blank save_name means "use the default workbook name" — pass None so
-    # core falls back to its default stem (batch.py:_resolve_export_stem).
-    def _name(key):
-        return (save_names[key].strip() or None) if toggles[key] else None
-
-    target = save_path.strip() or None
-
-    with st.status("Exporting…", expanded=True) as status:
-        st.caption("Running export_all_excel — progress is captured below.")
+table = services.summary_table(batch, roi_base=st.session_state.get("ui_region"), display=False)
+st.subheader("Measurements")
+if table is not None:
+    if widget(st, 'button', "Prepare region summary", icon=":material/download:", help="Prepares the complete CSV in the background; you can keep exploring.", key='_control_event_8_export_002'):
         try:
-            log = services.export_excel(
-                batch,
-                save_path=target,
-                if_summary=toggles["if_summary"],
-                if_extended=toggles["if_extended"],
-                behaviour=toggles["behaviour"],
-                if_summary_include=include_lists["if_summary"],
-                if_extended_include=include_lists["if_extended"],
-                behaviour_include=include_lists["behaviour"],
-                if_summary_exclude=exclude_lists["if_summary"],
-                if_extended_exclude=exclude_lists["if_extended"],
-                behaviour_exclude=exclude_lists["behaviour"],
-                if_summary_save_name=_name("if_summary"),
-                if_extended_save_name=_name("if_extended"),
-                behaviour_save_name=_name("behaviour"),
-            )
-        except ValueError as exc:
-            # Expected, user-actionable (bad regex re-raised by core, etc.).
-            status.update(label="Export failed", state="error")
-            st.error(str(exc))
-        except PermissionError as exc:
-            # Known risk: an open .xlsx locks the file on Windows.
-            status.update(label="Export failed", state="error")
-            st.error(
-                "Could not write a workbook — it may be open in Excel. Close "
-                f"it and try again. ({exc})"
-            )
-        except Exception as exc:  # pragma: no cover - defensive UI guard
-            status.update(label="Export failed", state="error")
-            st.exception(exc)
-        else:
-            if log.strip():
-                st.code(log)
-            else:
-                st.caption("(no progress output was captured)")
-            status.update(label="Export complete", state="complete")
+            submit("csv", {"region": st.session_state.get("ui_region")}, "Region summary export", "ui_csv_result")
+        except Exception as exc:
+            st.error(f"Could not prepare the summary: {exc}")
+    csv = st.session_state.get("ui_csv_result")
+    if csv and csv["region"] == st.session_state.get("ui_region") and Path(csv["path"]).is_file():
+        with open(csv["path"], "rb") as stream:
+            widget(st, 'download_button', "Download region summary", stream, "summary.csv", "text/csv", icon=":material/download:", key='_control_event_8_export_004')
+        download_script(csv, 'export_csv')
 
-            resolved_root = target if (target and os.path.isabs(target)) \
-                else _default_export_path()
-            workbooks, reports = _list_outputs(resolved_root)
-            if workbooks:
-                st.success(f"Wrote {len(workbooks)} workbook(s).")
-                st.markdown("**Workbooks:**")
-                for wb in workbooks:
-                    st.markdown(f"- `{wb}`")
-            else:
-                st.caption(
-                    "No workbooks found under the export folder — check the "
-                    "log above (a missing behaviour table is skipped silently)."
-                )
-
-            for report in reports:
-                with st.expander(f"Regex report — {os.path.basename(report)}"):
-                    try:
-                        with open(report, encoding="utf-8") as fh:
-                            st.code(fh.read())
-                    except OSError as exc:  # pragma: no cover - defensive
-                        st.caption(f"Could not read report: {exc}")
-
-
-# ── Save state ──────────────────────────────────────────────────────────────
-
-st.divider()
-st.subheader("Save analysis (.pkl)")
-st.caption(
-    "Write the in-memory analysis to a pickle so it can be re-opened later "
-    "from the Project page without reprocessing."
-)
-
-save_filename = st.text_input(
-    "Save file",
-    value=_default_save_filename(),
-    help="Destination .pkl path. Defaults beside the existing pickle / cache.",
-)
-
-if st.button("Save"):
-    target = save_filename.strip()
-    if not target:
-        st.warning("Enter a file path to save to.")
-    else:
+st.subheader("Excel workbooks")
+if callable(getattr(batch, "export_all_excel", None)):
+    workbooks = (("if_summary", "Summary", "IF_Summary"), ("if_extended", "Per-object data", "IF_Extended"), ("behaviour", "Behaviour", "Behavior_Summary"))
+    selected, includes, excludes, names = {}, {}, {}, {}
+    for column, (key, label, default) in zip(st.columns(3), workbooks):
+        selected[key] = widget(column, 'checkbox', label, value=key == "if_summary", key=f"ui_export_{key}", help="Include this workbook in the export.")
+    with fold('export.filters'):
+        for key, label, default in workbooks:
+            st.markdown(f"**{label}**")
+            a, b, c = st.columns(3)
+            includes[key] = widget(a, 'text_input', "Include matching columns", key=f"ui_export_include_{key}", help="Comma-separated regular expressions. Blank includes all columns.")
+            excludes[key] = widget(b, 'text_input', "Exclude matching columns", key=f"ui_export_exclude_{key}", help="Comma-separated regular expressions. Blank excludes nothing.")
+            names[key] = widget(c, 'text_input', "File name", value=default, key=f"ui_export_name_{key}", help="The workbook name without its .xlsx extension.")
+    target = widget(st, 'text_input', "Workbook destination", value=getattr(batch, "export_path", "") or "", key="ui_export_path", help="Blank uses the analysis export folder.")
+    if widget(st, 'button', "Export selected workbooks", type="primary", icon=":material/download:", disabled=not any(selected.values()), key='_control_event_8_export_003'):
         try:
-            written = services.save_batch(batch, target)
-        except PermissionError as exc:
-            st.error(
-                "Could not write the pickle — the file may be open or locked. "
-                f"({exc})"
-            )
-        except Exception as exc:  # pragma: no cover - defensive UI guard
-            st.exception(exc)
-        else:
-            st.success(f"Saved to `{written}`")
+            kwargs = {"save_path": target.strip() or None, **selected}
+            for key, _, _ in workbooks:
+                for field, values in (("include", includes), ("exclude", excludes)):
+                    patterns = [v.strip() for v in values[key].split(",") if v.strip()] or None
+                    services.validate_regex(patterns)
+                    kwargs[f"{key}_{field}"] = patterns
+                kwargs[f"{key}_save_name"] = names[key].strip() or None
+            submit("workbooks", kwargs, "Excel workbooks", "ui_export_log")
+        except Exception as exc:
+            st.error(f"Could not export workbooks: {exc}")
+    if st.session_state.get("ui_export_log"):
+        download_script(st.session_state.get('ui_export_result'), 'export_workbooks')
+        with fold('export.log'):
+            st.code(st.session_state["ui_export_log"], language="text")
+else:
+    st.info("This subject-table analysis supports CSV export. Processed FLASH batches also provide formatted Excel workbooks.")
+
+st.subheader("Save analysis")
+state_path = getattr(batch, "_state_path", None)
+default = str(state_path or (Path(getattr(batch, "filePath", ".")) / "analysis.pkl"))
+filename = widget(st, 'text_input', "Analysis file", value=default, key="ui_save_analysis", help="Save measurements and representative image selections to a .pkl file.")
+if widget(st, 'button', "Save analysis", icon=":material/save:", disabled=not filename.strip(), key='_control_event_8_export_001'):
+    try:
+        submit("save", {"filename": filename}, "Save analysis", "ui_saved_analysis_result")
+    except Exception as exc:
+        st.error(f"Could not save analysis: {exc}")
+if st.session_state.get("ui_saved_analysis_result"):
+    st.success(f"Saved analysis: {st.session_state['ui_saved_analysis_result']['path']}")
+    download_script(st.session_state['ui_saved_analysis_result'], 'export_save')
+
+from PyFLASH.ui import function_tools
+function_tools.render("export", "Export package reference")

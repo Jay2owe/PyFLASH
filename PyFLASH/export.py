@@ -7,12 +7,37 @@ These generate formatted .xlsx files from processed Batch objects.
 import re
 import os
 import time
+import tempfile
+from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 from pathlib import Path
 
 from PyFLASH.config import Config
-from PyFLASH.markers import Antibody
+
+
+@contextmanager
+def _literal_excel_writer(path):
+    """Publish a complete workbook, preserving prior bytes on any failed write."""
+    from PyFLASH import _persistence
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent, prefix=f'.{path.stem}.', suffix='.xlsx')
+    os.close(descriptor)
+    try:
+        # Own the stream so it closes even when pandas' save step raises before
+        # pandas releases its handles; Windows then permits temporary cleanup.
+        with open(temporary, 'wb') as stream:
+            with pd.ExcelWriter(stream, engine="xlsxwriter", engine_kwargs={
+                    "options": {"strings_to_formulas": False}}) as writer:
+                yield writer
+            stream.flush()
+            os.fsync(stream.fileno())
+        _persistence.atomic_replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 # ── Name mapping for Excel column headers ──────────────────────────────
 
@@ -83,12 +108,12 @@ IF_NAME_MAP = {
         "desc": f"{_OBJ_COUNTER}The mean surface area per segmented <ab> object {_QUANTIFIED}.",
     },
     "<ab>_SAtoVolumeRatioMean": {
-        "label": "<ab> Mean SA-Vol",
+        "label": "<ab> Mean SA-Vol (µm⁻¹)",
         "desc": f"{_OBJ_COUNTER}The mean surface-area-to-volume ratio per segmented <ab> object {_QUANTIFIED}.",
     },
     "<ab>_MeanIntDenMean": {
-        "label": "<ab> Mean Pixel IntDen",
-        "desc": f"{_OBJ_COUNTER}The mean integrated density of each segmented <ab> object was then normalized by the number of <ab> objects.",
+        "label": "<ab> Mean Pixel Intensity",
+        "desc": f"{_OBJ_COUNTER}The mean pixel intensity within each segmented <ab> object was averaged across objects.",
     },
     "<ab>_Coloc_<ab2>_Mean": {
         "label": "<ab2> Overlap per <ab>",
@@ -99,7 +124,7 @@ IF_NAME_MAP = {
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The mean % voxel overlap of each segmented <ab> object by <ab2> {_QUANTIFIED}.",
     },
     "<ab>_Coloc_<ab2>_Count": {
-        "label": "<ab> colocalised with <ab2> per 0.1mmÂ³",
+        "label": "<ab> colocalised with <ab2> per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects with a greater than {threshold}% overlap by <ab2> objects was summed and {_PER_VOL}.",
     },
     "<ab>_Coloc_<ab2>_CountRaw": {
@@ -119,15 +144,15 @@ IF_NAME_MAP = {
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The % of segmented <ab> objects with a greater than {threshold}% overlap by <ab2> objects {_QUANTIFIED}.",
     },
     "<ab>_DistToClosest_<ab2>Mean": {
-        "label": "<ab> Mean Nearest <ab2>",
+        "label": "<ab> Mean Nearest <ab2> (µm)",
         "desc": f"{_OBJ_COUNTER}Using euclidean distance calculations and the objects' centre of masses, the closest <ab2> object was identified and the distance calculated.\nThe mean distance for each <ab> object {_QUANTIFIED}.",
     },
     "<ab>_DistToVentricle": {
-        "label": "<ab> Mean Ventricle Distance",
+        "label": "<ab> Mean Ventricle Dist (µm)",
         "desc": f"{_OBJ_COUNTER}Using euclidean distance calculations and the centre of mass of <ab> objects, the distance to the ventricular boundary was calculated.\nThe mean distance of each <ab> object to the ventricle {_QUANTIFIED}.",
     },
     "<ab>_Contains_<ab2>_Count": {
-        "label": "<ab> contains <ab2> per 0.1mmÂ³",
+        "label": "<ab> contains <ab2> per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects containing <ab2> was summed and {_PER_VOL}.",
     },
     "<ab>_Contains_<ab2>_CountRaw": {
@@ -160,18 +185,18 @@ IF_NAME_MAP = {
     },
     "<ab>_ROI_IntDenMean": {
         "label": "<ab> ROI IntDen (A.U.)",
-        "desc": "The total integrated density of <ab> signal within the ROI was quantified and then adjusted by the volume of the ROI.",
+        "desc": "The mean integrated density of <ab> signal within the ROI across measured Z-steps.",
     },
     "<ab>_ROI_%AreaMean": {
         "label": "<ab> %Area",
-        "desc": "The percentage of ROI area occupied by thresholded <ab>-positive signal.",
+        "desc": "Mean percentage of ROI pixels occupied by <ab> signal across measured Z-steps (threshold-selected pixels, or nonzero pixels without a threshold).",
     },
     "<ab>_RawYMMean": {
-        "label": "<ab> Mean YM (µms)",
+        "label": "<ab> Mean YM (µm)",
         "desc": f"{_OBJ_COUNTER}The mean Y-coordinate of <ab> objects was then quantified in physical units.",
     },
     "<ab>_RawXMMean": {
-        "label": "<ab> Mean XM",
+        "label": "<ab> Mean XM (µm)",
         "desc": f"{_OBJ_COUNTER}The mean X-coordinate of <ab> objects was then quantified in physical units.",
     },
     "<ab>_burdenScore": {
@@ -183,6 +208,9 @@ IF_NAME_MAP = {
         "desc": "Composite score from log-normalized and z-scored Count/VolumeTotal ratio per subject.",
     },
 }
+
+# Modern summary output and legacy saved columns share one distance definition.
+IF_NAME_MAP["<ab>_DistToVentricleMean"] = IF_NAME_MAP["<ab>_DistToVentricle"]
 
 BEHAVIOR_NAME_MAP = {
     "Period": {"label": "Circadian period (hours)", "desc": "Duration of one complete circadian cycle."},
@@ -198,8 +226,8 @@ RAW_NAME_MAP = {
     "<ab>_Volume":             {"label": "Volume (µm³)",            "desc": "Volume of each segmented <ab> object."},
     "<ab>_Surface":            {"label": "SA (µm²)",                "desc": "Surface area of each segmented <ab> object."},
     "<ab>_IntDen":             {"label": "IntDen",                  "desc": "Integrated density of each segmented <ab> object."},
-    "<ab>_MeanIntDen":         {"label": "Mean IntDen (per pixel)", "desc": "Mean intensity per <ab> object (per-object mean intensity)."},
-    "<ab>_SAtoVolumeRatio":    {"label": "SA:Vol",                  "desc": "Surface-area-to-volume ratio for each <ab> object."},
+    "<ab>_MeanIntDen":         {"label": "Mean Intensity (per pixel)", "desc": "Mean intensity per <ab> object (per-object mean intensity)."},
+    "<ab>_SAtoVolumeRatio":    {"label": "SA:Vol (µm⁻¹)",                  "desc": "Surface-area-to-volume ratio for each <ab> object."},
 
     # --- Per-object coordinates ---
     "<ab>_XM":                 {"label": "Display XM (px)",         "desc": "X coordinate (pixels) of the <ab> object centre of mass."},
@@ -216,7 +244,7 @@ RAW_NAME_MAP = {
     # --- Voxel overlap / colocalisation metrics (per object) ---
     "<ab>_Coloc_<ab2>":        {"label": "<ab2> overlap (%)",         "desc": "Voxel-overlap (co-occurrence) of <ab2> with each <ab> object (per-object overlap metric)."},
     "<ab>_Coloc<ab2>":         {"label": "<ab2> overlap (%)",         "desc": "Voxel-overlap (co-occurrence) of <ab2> with each <ab> object (per-object overlap metric)."},
-    "<ab>_ColocCount<ab2>":    {"label": f"<ab2>+ (<{threshold}% overlap)",     "desc": "Binary/thresholded co-localisation classification per <ab> object for <ab2> (per-object)."},
+    "<ab>_ColocCount<ab2>":    {"label": "<ab2>+ vol",     "desc": "Binary/thresholded co-localisation classification per <ab> object for <ab2> (per-object)."},
 
     # --- Containment / internalisation (per object) ---
     "<ab>_NumColoc_<ab2>":     {"label": "# internal <ab2>",      "desc": "Number of <ab2> objects classified as internalised/contained per <ab> object (per-object value)."},
@@ -224,7 +252,7 @@ RAW_NAME_MAP = {
     "<ab>_Any_<ab2>":          {"label": "coloc or contains <ab2>", "desc": "Binary indicator per <ab> object: whether it either passes the direct colocalisation threshold for <ab2> or contains ≥1 <ab2> object."},
 
     "<ab>_ROI_IntDen":          {"label": "ROI IntDen (per Z-step)", "desc": "ROI IntDen per Z-Step."},
-    "<ab>_ROI_%Area":          {"label": "%Area coverage (per Z-step)", "desc": "ROI IntDen per Z-Step."}
+    "<ab>_ROI_%Area":          {"label": "%Area coverage (per Z-step)", "desc": "Percentage of ROI pixels occupied by signal per Z-step (threshold-selected pixels, or nonzero pixels without a threshold)."}
 }
 
 IF_NAME_MAP.update({
@@ -233,7 +261,7 @@ IF_NAME_MAP.update({
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The mean volumetric % voxel overlap of each segmented <ab> object by <ab2> {_QUANTIFIED}.",
     },
     "<ab>_VolColoc_<ab2>_Count": {
-        "label": "<ab> volumetric coloc with <ab2> per 0.1mmÂ³",
+        "label": "<ab> volumetric coloc with <ab2> per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects positive for volumetric colocalisation with <ab2> was summed and {_PER_VOL}.",
     },
     "<ab>_VolColoc_<ab2>_CountRaw": {
@@ -245,7 +273,7 @@ IF_NAME_MAP.update({
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The percentage of segmented <ab> objects positive for volumetric colocalisation with <ab2> {_QUANTIFIED}.",
     },
     "<ab>_VolContains_<ab2>_Count": {
-        "label": "<ab> volumetric contains <ab2> per 0.1mmÂ³",
+        "label": "<ab> volumetric contains <ab2> per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects volumetrically containing <ab2> was summed and {_PER_VOL}.",
     },
     "<ab>_VolContains_<ab2>_CountRaw": {
@@ -257,7 +285,7 @@ IF_NAME_MAP.update({
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The percentage of segmented <ab> objects volumetrically containing <ab2> {_QUANTIFIED}.",
     },
     "<ab>_VolAny_<ab2>_Count": {
-        "label": "<ab> volumetric assoc with <ab2> per 0.1mmÂ³",
+        "label": "<ab> volumetric assoc with <ab2> per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}{_MULTICOLOC}The number of segmented <ab> objects that either volumetrically colocalised with or volumetrically contained <ab2> was summed and {_PER_VOL}.",
     },
     "<ab>_VolAny_<ab2>_CountRaw": {
@@ -277,7 +305,7 @@ IF_NAME_MAP.update({
         "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the mean CPC association of each segmented <ab> object by <ab2> {_QUANTIFIED}.",
     },
     "<ab>_CPCColoc_<ab2>_Count": {
-        "label": "<ab> CPC coloc with <ab2> per 0.1mmÂ³",
+        "label": "<ab> CPC coloc with <ab2> per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the number of segmented <ab> objects positive for <ab2> was summed and {_PER_VOL}.",
     },
     "<ab>_CPCColoc_<ab2>_CountRaw": {
@@ -289,7 +317,7 @@ IF_NAME_MAP.update({
         "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the percentage of segmented <ab> objects positive for <ab2> {_QUANTIFIED}.",
     },
     "<ab>_CPCContains_<ab2>_Count": {
-        "label": "<ab> CPC contains <ab2> per 0.1mmÂ³",
+        "label": "<ab> CPC contains <ab2> per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the number of segmented <ab> objects classified as containing <ab2> was summed and {_PER_VOL}.",
     },
     "<ab>_CPCContains_<ab2>_CountRaw": {
@@ -301,7 +329,7 @@ IF_NAME_MAP.update({
         "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the percentage of segmented <ab> objects classified as containing <ab2> {_QUANTIFIED}.",
     },
     "<ab>_CPCAny_<ab2>_Count": {
-        "label": "<ab> CPC assoc with <ab2> per 0.1mmÂ³",
+        "label": "<ab> CPC assoc with <ab2> per 0.1mm³",
         "desc": f"{_OBJ_COUNTER}Using centre-particle coincidence, the number of segmented <ab> objects that either CPC-colocalised with or CPC-contained <ab2> was summed and {_PER_VOL}.",
     },
     "<ab>_CPCAny_<ab2>_CountRaw": {
@@ -316,7 +344,7 @@ IF_NAME_MAP.update({
 
 RAW_NAME_MAP.update({
     "<ab>_VolColoc_<ab2>": {"label": "<ab2> vol overlap (%)", "desc": "Volumetric voxel-overlap of <ab2> with each <ab> object."},
-    "<ab>_VolColocCount<ab2>": {"label": f"<ab2>+ vol (<{threshold}% overlap)", "desc": "Binary volumetric colocalisation classification per <ab> object for <ab2>."},
+    "<ab>_VolColocCount<ab2>": {"label": "<ab2>+ vol", "desc": "Binary volumetric colocalisation classification per <ab> object for <ab2>."},
     "<ab>_VolNumColoc_<ab2>": {"label": "# vol internal <ab2>", "desc": "Number of <ab2> objects volumetrically classified as internalised/contained per <ab> object."},
     "<ab>_VolContains_<ab2>": {"label": "vol contains <ab2>", "desc": "Binary volumetric indicator per <ab> object: whether it contains ≥1 <ab2> object."},
     "<ab>_VolAny_<ab2>": {"label": "vol coloc or contains <ab2>", "desc": "Binary volumetric indicator per <ab> object: whether it either volumetrically colocalises with or contains ≥1 <ab2> object."},
@@ -756,13 +784,16 @@ def safe_sheet_name(name: str, used: set[str]) -> str:
 
 # ── Formatter functions ───────────────────────────────────────────────────
 
-def merge_contiguous_cells(worksheet, df, col_name, col_idx=0, cell_format=None):
+def merge_contiguous_cells(worksheet, df, col_name, col_idx=0, cell_format=None, *, group_by=()):
     start_row = None
     current_value = None
+    current_group = None
+    parents = list(df[list(group_by)].itertuples(index=False, name=None)) if group_by else [()] * len(df)
     for i, value in enumerate(df[col_name], start=1):
         value = "" if value is None else str(value)
+        parent = parents[i - 1]
 
-        if value and value != current_value:
+        if parent != current_group or (value and value != current_value):
             # close previous block
             if start_row is not None and i - 1 > start_row:
                 worksheet.merge_range(
@@ -772,8 +803,9 @@ def merge_contiguous_cells(worksheet, df, col_name, col_idx=0, cell_format=None)
                     cell_format
                 )
             # start new block
-            current_value = value
-            start_row = i
+            current_group = parent
+            current_value = value or None
+            start_row = i if value else None
 
     # close final block
     if start_row is not None and len(df) >= 1 and len(df) > start_row:
@@ -886,7 +918,7 @@ def _summary_metric_sort_key(base: str):
             "_Any_",
         )
     ):
-        for suffix, rank in quant_order:
+        for suffix, rank in sorted(quant_order, key=lambda item: -len(item[0])):
             if base.endswith(suffix):
                 return (0, rank, 0, "")
 
@@ -896,7 +928,7 @@ def _summary_metric_sort_key(base: str):
         return (1, 1, 0, "")
     if "_DistToClosest_" in base:
         return (1, 2, 0, base.split("_DistToClosest_", 1)[1].removesuffix("Mean"))
-    if base.endswith("_DistToVentricle"):
+    if base.endswith(("_DistToVentricle", "_DistToVentricleMean")):
         return (1, 3, 0, "")
 
     family_rules = [
@@ -981,8 +1013,8 @@ def blank_repeats(df, cols):
         prev_cols = cols[:i]  # higher-level grouping columns
         same_group = True
         for pc in prev_cols:
-            same_group = same_group & (out[pc] == out[pc].shift())
-        out[col] = out[col].where(~((out[col] == out[col].shift()) & same_group), "")
+            same_group = same_group & (df[pc] == df[pc].shift())
+        out[col] = df[col].where(~((df[col] == df[col].shift()) & same_group), "")
     return out
 
 def write_formatted_df(writer, df, sheet_name, wrap_cols=None, center_cols=None, small_cols=None, padding=2, max_width=120):
@@ -1144,7 +1176,7 @@ def write_experiment_data_list_sheet(writer, experiment_list, sheet_name="Data o
 
     merge_fmt = writer.book.add_format({"valign": "vcenter", "border": 1, 'align':'center'})
     merge_contiguous_cells(worksheet, df_display, col_name="Experiment", col_idx=0, cell_format=merge_fmt)
-    merge_contiguous_cells(worksheet, df_display, col_name="Marker", col_idx=1, cell_format=merge_fmt)
+    merge_contiguous_cells(worksheet, df, col_name="Marker", col_idx=1, cell_format=merge_fmt, group_by=("Experiment",))
 
 EXCEL_FORBIDDEN = r"\\[a-zA-Z]+\{|\}|\$|\^\{|\}"
 def write_conditions_table_sheet(writer, conditions, sheet_name="Conditions", padding=2, max_width=120):
@@ -1152,9 +1184,10 @@ def write_conditions_table_sheet(writer, conditions, sheet_name="Conditions", pa
     used = set()
 
     for c in conditions:
-        if c.name in used:
+        identity = (getattr(c, "factor", ""), c.name)
+        if identity in used:
             continue
-        used.add(c.name)
+        used.add(identity)
         explanation = getattr(c, "factor_explanation", "") or ""
         rows.append({
             "Factor": getattr(c, "factor", ""),
@@ -1255,3 +1288,16 @@ def convert_raw_name_cached(colname: str):
     result = convert_raw_name(colname)
     _raw_name_cache[colname] = result
     return result
+
+
+def _grouped_column_table(groups, column):
+    """Pack nonmissing group values in their original within-group row order.
+
+    Table row labels identify source rows; they are not positions shared by
+    different groups. Normalize positions before pandas aligns the columns.
+    Each returned column owns its values and leaves caller frames untouched.
+    """
+    return pd.DataFrame({
+        name: frame[column].dropna().reset_index(drop=True)
+        for name, frame in groups.items() if column in frame.columns
+    })

@@ -49,6 +49,12 @@ def _p(type_, description, units="-", required=False, default=None):
 #: quantity. Descriptions say what changes if you get it wrong, because that is
 #: the part a caller cannot work out from the name.
 PARAM_DOCS = {
+    "interactive": _p(
+        "bool", "For 3D scatter, also return movable Plotly figures and, with save=True, "
+        "save self-contained HTML files supporting rotation, zoom and participant hover. "
+        "Static figures and numeric values remain available. Requires the interactive extra.",
+        default=False,
+    ),
     # ── what to plot from ─────────────────────────────────────────────────
     "experiment": _p(
         "batch | experiment",

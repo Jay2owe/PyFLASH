@@ -119,6 +119,37 @@ def test_tight_save_bbox_remains_available(tmp_path):
     assert out.endswith("tight_canvas.svg")
 
 
+@pytest.mark.parametrize("bbox", ["fixed", "tight"])
+def test_reserved_canvas_export_is_independent_of_stats_visibility(tmp_path, bbox):
+    from PyFLASH.utils import save_fig
+    from PyFLASH.layout import mark_manual_layout
+    from PIL import Image
+    sizes = []
+    viewboxes = []
+    for show in [False, True]:
+        with pyflash_style_context(figure_size=(4.0, 3.0), save_bbox=bbox):
+            fig, ax = plt.subplots(figsize=(6, 4))
+            mark_manual_layout(fig)
+            fig._pyflash_fixed_canvas = True
+            if show:
+                ax.text(1.1, .9, "Stats: p=.049\nExplained test values", transform=ax.transAxes)
+            try:
+                stem = "reserved_" + str(show)
+                out = save_fig(fig, str(tmp_path), stem, verbose=False, rasterize=False,
+                               figure_formats=["svg", "png"], dpi=72)
+                assert tuple(fig.get_size_inches()) == pytest.approx((6, 4))
+            finally:
+                plt.close(fig)
+            with Image.open(tmp_path / (stem + ".png")) as png:
+                sizes.append(png.size)
+            text = open(out, encoding="utf-8").read()
+            viewboxes.append(re.search(r'viewBox="([^"]+)"', text).group(1))
+            assert 'width="432pt"' in text
+            assert 'height="288pt"' in text
+    assert sizes == [(432, 288), (432, 288)]
+    assert viewboxes == ["0 0 432 288", "0 0 432 288"]
+
+
 def test_plotly_save_helper_uses_fixed_pyflash_canvas(tmp_path):
     class FakePlotlyFigure:
         def write_image(self, path, format="svg"):

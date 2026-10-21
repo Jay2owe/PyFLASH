@@ -44,6 +44,13 @@ _TOPICS = {
         "content": """Write outputs under the request's explicit result root. A successful runner response includes structured results, output paths when applicable, provenance or run metadata, and an `equivalent_script`. Treat the script and recorded inputs as part of the result so another agent can reproduce the call. A preview is for inspection; the SVG or data artifact is the durable output.""",
         "related": ["plotting", "analysis", "troubleshooting"],
     },
+    "control": {
+        "title": "Use the shared API, command line and browser controls",
+        "description": "Inspect exact controls, compare parameter choices, and replay retained run receipts.",
+        "keywords": "CLI pyflash-control describe run queue grid sweep resume style appearance dependencies receipt replay failed",
+        "content": """`pyflash-control describe <action>` reads the same parameter keys, labels, help, units and choices as the browser workbench. `pyflash-control run <action> --input <csv-or-pickle> --params <JSON> --output <new-folder>` retains input/output hashes, software versions, configuration, code identity and an equivalent standalone script. Source-free helpers omit --input. Plot appearance is a separate --style JSON object; its `presentation` mapping edits ranges, legends, series colours, stroke widths and fonts without changing measurements. Each function's browser appearance and comparison choices are saved with the workspace. `PyFLASH.queue.run_action_grid` streams bounded comparison cells, verifies content before reuse and keeps immutable failed/retried attempt records. `pyflash-control queue --input <data> --spec <recipe> --progress <progress.json>` resumes verified completed calls and records a new receipt/script for each invocation. Browser failures also retain a replay script and their original error; old completed exports retain their own scripts regardless of the newest job. Use `pyflash-control doctor` or the point-of-use browser repair control to inspect declared optional dependencies.""",
+        "related": ["data", "plotting", "outputs", "troubleshooting"],
+    },
     "troubleshooting": {
         "title": "Diagnose a rejected or unexpected call",
         "description": "Use live discovery, descriptions and returned errors before retrying.",

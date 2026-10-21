@@ -154,6 +154,39 @@ def describe_status(short_name):
     return 'unclassified'
 
 
+def plot_requires_input(plot_type):
+    """Read dataset ownership from the public callable's first parameter."""
+    if plot_type not in PLOT_REGISTRY:
+        raise ValueError(f'Unknown figure: {plot_type}')
+    func = _resolve_func(PLOT_REGISTRY[plot_type])
+    first = next(iter(inspect.signature(func).parameters.values()),None)
+    return first is not None and first.default is inspect.Parameter.empty
+
+
+def resolve_plot_call(plot_type, params):
+    """Canonical strict binding for UI, CLI and recoverable batch calls."""
+    if plot_type not in PLOT_REGISTRY:
+        raise ValueError(f"Unknown figure: {plot_type}. Valid: {', '.join(sorted(PLOT_REGISTRY))}")
+    func = _resolve_func(PLOT_REGISTRY[plot_type])
+    signature = inspect.signature(func)
+    names = set(signature.parameters)
+    delegated = set(inspect.signature(_resolve_func(PLOT_REGISTRY['images'])).parameters) if plot_type == 'representative_images' else set()
+    valid = names | delegated
+    kwargs, sources = {}, {}
+    unknown = []
+    for key, value in params.items():
+        parameter = _resolve_param_alias(key, valid, value)
+        if parameter not in valid or parameter in {'kwargs', 'args'}:
+            unknown.append(key)
+            continue
+        _set_resolved_kwarg(kwargs, sources, parameter,
+                           _normalize_spec_param_value(key, parameter, value), key)
+    if unknown:
+        raise ValueError(f"Unknown parameters: {', '.join(unknown)}. Valid: {', '.join(sorted(valid))}")
+    signature.bind(object(), **kwargs)
+    return func, kwargs
+
+
 # Keys consumed by the spec runner, not passed to plot functions
 _SPEC_KEYS = {'type', 'batch'}
 

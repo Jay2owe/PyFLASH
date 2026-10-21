@@ -177,7 +177,8 @@ def test_repeated_calls_share_one_computation():
     se._permutation_null_cached.cache_clear()
     first = se.permutation_null((3, 3, 4))
     second = se.permutation_null((3, 3, 4))
-    assert first is second
+    assert first is not second
+    np.testing.assert_array_equal(first['p'],second['p'])
     assert se._permutation_null_cached.cache_info().hits >= 1
     assert se._permutation_null_cached.cache_info().misses == 1
 
@@ -196,7 +197,8 @@ def test_rank_order_does_not_split_the_cache():
     se._permutation_null_cached.cache_clear()
     a = se.permutation_null((3, 3), ranks=[1, 2, 3, 4, 5, 6])
     b = se.permutation_null((3, 3), ranks=[6, 5, 4, 3, 2, 1])
-    assert a is b
+    assert a is not b
+    np.testing.assert_array_equal(a['p'],b['p'])
     assert se._permutation_null_cached.cache_info().misses == 1
 
 
@@ -366,9 +368,16 @@ def test_bonferroni_row_is_three_times_the_uncorrected_row(tmp_path):
         assert b == pytest.approx(min(r * 3, 1.0), rel=1e-9)
 
 
-def test_permutation_rows_are_absent_before_the_rank_stage(tmp_path):
-    # Guards the cost promise: nothing in this stage may enumerate a null.
-    _run(tmp_path)
+def test_cheap_value_audit_never_enumerates_a_null(tmp_path, monkeypatch):
+    # This cost promise belongs to the value-based test. Three observations
+    # cannot establish normality, so request ANOVA explicitly instead of
+    # depending on the automatic assumption screen to select that branch.
+    monkeypatch.setattr(Config, "CORRECTION_AUDIT", "cheap")
+    def forbidden(*args, **kwargs):
+        raise AssertionError('The cheap value audit started a permutation null')
+    monkeypatch.setattr(st, "_build_null", forbidden)
+    answer = _run(tmp_path, stats_test="anova", posthoc="Fisher LSD")
+    assert "ANOVA" in answer[0]
     rows = _csv_rows(tmp_path)
     for label in ("Correction-WestfallYoung", "Correction-AlphaStar",
                   "Correction-NullMode"):
@@ -827,8 +836,8 @@ def test_value_westfall_young_is_valid_and_beats_bonferroni():
 
 def test_a_sampled_null_cannot_resolve_below_one_permutation():
     # Not a defect, and the thing most likely to be misread. Westfall-Young
-    # counts permutations, so 10,000 draws cannot express an adjusted p below
-    # 1e-4. An observed p of 4e-9 therefore comes back near the resolution
+    # includes the observed arrangement, so 10,000 sampled draws cannot express
+    # an adjusted p below 1/10,001. An observed p of 4e-9 comes back near the resolution
     # floor - above what Bonferroni would give - because the null has run out
     # of precision, not because the evidence is weaker.
     data = [[1.0, 1.2, 1.1], [2.0, 2.1, 2.2], [4.0, 4.2, 4.1, 4.3]]
@@ -837,10 +846,10 @@ def test_a_sampled_null_cannot_resolve_below_one_permutation():
     assert min(raw) < 1e-4
     adj = se.value_westfall_young_adjusted(
         raw, data, pairs=[(0, 1), (0, 2), (1, 2)])
-    assert min(adj) >= 1.0 / 10000
+    assert min(adj) >= 1.0 / 10001
     audit = se.correction_audit(
         raw, null=se.value_permutation_null(data), want_permutation=False)
-    assert audit["permutation"]["p_resolution"] == pytest.approx(1e-4)
+    assert audit["permutation"]["p_resolution"] == 1.0 / 10001
 
 
 def test_westfall_young_respects_the_union_bound_on_its_own_null():
@@ -963,7 +972,8 @@ def test_tukey_says_why_it_is_not_offered(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "CORRECTION_AUDIT", "full", raising=False)
     _run(tmp_path, save_name="tk", stats_test="anova", posthoc="Tukey")
     reason = _row(_csv_rows(tmp_path, "tk"), "Correction-Unavailable")[1]
-    assert "studentised range" in reason
+    assert "already accounts for multiplicity" in reason
+    assert "no permutation null is implemented" in reason
     assert _row(_csv_rows(tmp_path, "tk"), "Correction-AlphaStar") is None
 
 

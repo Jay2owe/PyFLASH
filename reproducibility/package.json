@@ -1,0 +1,12 @@
+{
+  "name": "pyflash-independent-r-references",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Verification-only pinned R runtime; never imported by PyFLASH.",
+  "dependencies": {
+    "webr": "0.6.0"
+  },
+  "engines": {
+    "node": ">=22.15.0"
+  }
+}

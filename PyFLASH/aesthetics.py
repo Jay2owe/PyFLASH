@@ -51,6 +51,8 @@ DEFAULT_PYFLASH_STYLE = {
     "save_dpi": 600,
     "fixed_layout": False,
     "fixed_layout_pad": 1.0,
+    # Explicit post-render edits; an empty mapping preserves authored figures.
+    "presentation": {},
 
     # Condition/group semantic styling.
     "auto_style": True,
@@ -109,6 +111,119 @@ DEFAULT_PYFLASH_STYLE = {
 }
 
 _PYFLASH_STYLE = deepcopy(DEFAULT_PYFLASH_STYLE)
+
+# One vocabulary for API/CLI descriptions and the shared browser editor.
+PRESENTATION_FIELDS = {
+    'xlim': {'label':'Horizontal axis range', 'kind':'range', 'unit':'axis units',
+             'help':'Display bounds only; measurements and fitted models are unchanged.'},
+    'ylim': {'label':'Vertical axis range', 'kind':'range', 'unit':'axis units',
+             'help':'Display bounds only; measurements and fitted models are unchanged.'},
+    'zlim': {'label':'Depth axis range', 'kind':'range', 'unit':'axis units',
+             'help':'Display bounds on three-dimensional axes only.'},
+    'legend': {'label':'Legend', 'kind':'choice', 'choices':['keep','show','hide'],
+               'help':'Keep the authored legend, show labelled series, or hide it.'},
+    'series_color': {'label':'Series colour', 'kind':'color',
+                     'help':'Colour unscaled lines, points and filled shapes; image pixels and colour-mapped values stay unchanged.'},
+    'series_colors': {'label':'Colours by series label', 'kind':'mapping',
+                      'help':'Match an artist label exactly; override individual series colours.'},
+    'line_width': {'label':'Rendered line width', 'kind':'number', 'unit':'points',
+                   'help':'Override existing series strokes without changing scientific coordinates.'},
+    'font_size': {'label':'Rendered text size', 'kind':'number', 'unit':'points',
+                  'help':'Override existing text sizes before label layout.'},
+    'font_family': {'label':'Rendered font family', 'kind':'text',
+                    'help':'Override the font of existing labels, titles and legends.'},
+}
+
+
+def _validate_presentation(value):
+    import math
+    from matplotlib.colors import is_color_like
+    if not isinstance(value, Mapping):
+        raise ValueError('presentation must be a mapping of named display edits')
+    unknown = set(value)-PRESENTATION_FIELDS.keys()
+    if unknown:
+        raise ValueError('Unknown presentation settings: '+', '.join(sorted(unknown)))
+    for name, item in value.items():
+        if name.endswith('lim'):
+            if (not isinstance(item,(list,tuple)) or len(item)!=2
+                    or any(not isinstance(v,(int,float)) or not math.isfinite(v) for v in item)
+                    or item[0]>=item[1]):
+                raise ValueError(name+' must contain two finite increasing bounds')
+        elif name == 'legend' and item not in PRESENTATION_FIELDS[name]['choices']:
+            raise ValueError('legend must be keep, show or hide')
+        elif name in {'line_width','font_size'}:
+            if not isinstance(item,(int,float)) or not math.isfinite(item) or item < 0 or name=='font_size' and item==0:
+                raise ValueError(name+' must be a finite valid size')
+        elif name == 'font_family' and (not isinstance(item,str) or not item.strip()):
+            raise ValueError('font_family must be a nonempty name')
+        elif name == 'series_color' and not is_color_like(item):
+            raise ValueError('series_color must be a Matplotlib colour')
+        elif name == 'series_colors':
+            if not isinstance(item,Mapping) or any(not isinstance(k,str) or not is_color_like(v) for k,v in item.items()):
+                raise ValueError('series_colors must map exact series labels to colours')
+
+
+def _apply_presentation(figure):
+    """Apply requested display edits at the existing export owner, before layout."""
+    settings = get_pyflash_style('presentation')
+    if not settings:
+        return figure
+    from matplotlib.text import Text
+    from matplotlib.collections import Collection
+    _validate_presentation(settings)
+    for ax in figure.axes:
+        if getattr(ax,'_colorbar',None) is not None:
+            continue
+        for name in ('xlim','ylim','zlim'):
+            setter = getattr(ax,'set_'+name,None)
+            if name in settings and setter:
+                setter(*settings[name])
+        if 'xlim' in settings or 'ylim' in settings:
+            for text in ax.texts:
+                if text.get_transform() is ax.transData:
+                    text.set_clip_on(True)
+        # Scalar-mapped collections encode scientific values, not categories.
+        # Never replace their map or any AxesImage pixel array.
+        for artist in (*ax.lines,*ax.collections,*ax.patches):
+            if isinstance(artist,Collection) and artist.get_array() is not None:
+                continue
+            color = settings.get('series_colors',{}).get(artist.get_label(),settings.get('series_color'))
+            if color is not None:
+                artist.set_color(color)
+            if 'line_width' in settings:
+                artist.set_linewidth(settings['line_width'])
+        for container in ax.containers:
+            color = settings.get('series_colors',{}).get(container.get_label())
+            if color is not None:
+                for patch in getattr(container,'patches',[]):
+                    patch.set_color(color)
+        legend = ax.get_legend()
+        mode = settings.get('legend','keep')
+        if mode == 'hide' and legend is not None:
+            legend.set_visible(False)
+        elif mode == 'show':
+            if legend is not None:
+                legend.set_visible(True)
+            elif ax.get_legend_handles_labels()[1]:
+                ax.legend()
+    legends = [legend for ax in figure.axes if (legend := ax.get_legend()) is not None]+list(figure.legends)
+    for legend in legends:
+        mode = settings.get('legend','keep')
+        if mode in {'show','hide'}:
+            legend.set_visible(mode=='show')
+        handles = getattr(legend,'legend_handles',getattr(legend,'legendHandles',[]))
+        for handle,text in zip(handles,legend.get_texts()):
+            color = settings.get('series_colors',{}).get(text.get_text(),settings.get('series_color'))
+            if color is not None and hasattr(handle,'set_color'):
+                handle.set_color(color)
+            if 'line_width' in settings and hasattr(handle,'set_linewidth'):
+                handle.set_linewidth(settings['line_width'])
+    for text in figure.findobj(match=Text):
+        if 'font_size' in settings:
+            text.set_fontsize(settings['font_size'])
+        if 'font_family' in settings:
+            text.set_fontfamily(settings['font_family'])
+    return figure
 _MATPLOTLIB_STYLE_KEYS = {
     "line_width",
     "tick_major_width",
@@ -197,6 +312,7 @@ def _rc_save_bbox(value):
 
 
 def _validate_export_style(style):
+    _validate_presentation(style.get('presentation',{}))
     _coerce_figure_size(style.get("figure_size"))
     _normalize_orientation(style.get("figure_orientation"))
     _normalize_save_bbox(style.get("save_bbox"))
@@ -287,7 +403,7 @@ def set_pyflash_style(updates=None, **kwargs):
     for raw_key, value in merged.items():
         key = _normalized_key(raw_key)
         current = candidate[key]
-        if key == "significance_thresholds" and isinstance(value, Mapping):
+        if key in {"significance_thresholds", "presentation"} and isinstance(value, Mapping):
             candidate[key] = {
                 _coerce_nested_key(key, nested_key): nested_value
                 for nested_key, nested_value in value.items()
@@ -341,18 +457,30 @@ def pyflash_style_value(key, default=None):
 
 
 def pyflash_significance_annotation(p, ns=None):
-    """Return significance text using the active PyFLASH style thresholds."""
+    """Present a finite scalar probability with the active style thresholds.
+
+    Undefined, non-scalar and out-of-range inputs use the missing-result label.
+    The numeric ``p`` presentation preserves undefined results as NaN.
+    """
+    import math
     if ns is None or ns == DEFAULT_PYFLASH_STYLE["significance_ns"]:
         ns = get_pyflash_style("significance_ns")
+    try:
+        if (isinstance(p, bool) or getattr(p, "ndim", 0) != 0
+                or getattr(getattr(p, "dtype", None), "kind", None) == "b"):
+            value = math.nan
+        else:
+            value = float(p)
+    except (TypeError, ValueError, OverflowError):
+        value = math.nan
+    if not math.isfinite(value) or not 0. <= value <= 1.:
+        return math.nan if ns == "p" else ns
     if ns == "p":
-        ns = round(float(p), 3)
+        ns = round(value, 3)
     thresholds = get_pyflash_style("significance_thresholds")
     for threshold, symbol in sorted(thresholds.items(), key=lambda item: float(item[0])):
-        try:
-            if float(p) < float(threshold):
-                return symbol
-        except (TypeError, ValueError):
-            continue
+        if value < float(threshold):
+            return symbol
     return ns
 
 

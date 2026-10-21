@@ -4,7 +4,7 @@ Experimental condition classes and helpers.
 
 import difflib
 from collections import OrderedDict
-from functools import reduce
+from copy import deepcopy
 
 from PyFLASH import palette as _palette
 
@@ -73,13 +73,23 @@ class multiCondition:
 
     def __init__(self, conditionsList, name=None, label=None, color=None,
                  style=None):
-        self.conditionsList = conditionsList
+        if not conditionsList:
+            raise ValueError('A compound group needs at least one component')
+        # A crossed list may itself contain compound groups. Preserve its
+        # authored name/color/style while exposing primitive factor levels.
+        def flatten(parts):
+            for part in parts:
+                if isinstance(part, multiCondition):
+                    yield from flatten(part.conditionsList)
+                else:
+                    yield part
+        self.conditionsList = list(flatten(conditionsList))
         self.name = (
-            reduce(lambda a, b: a.name + b.name, conditionsList)
+            ''.join(component.name for component in conditionsList)
             if name is None else name
         )
         self.label = (
-            reduce(lambda a, b: a.label + b.label, conditionsList)
+            ''.join(component.label for component in conditionsList)
             if label is None else label
         )
         self.color = conditionsList[0].color if color is None else color
@@ -87,14 +97,16 @@ class multiCondition:
         # that by deriving from the first component with a non-default style, so
         # the secondary factor can carry the second visual channel.
         self.style = _derive_multi_style(conditionsList) if style is None else style
-        self.factor = [c.factor for c in conditionsList]
-        self.factor_explanation = [c.factor_explanation for c in conditionsList]
+        self.factor = [c.factor for c in self.conditionsList]
+        self.factor_explanation = [c.factor_explanation for c in self.conditionsList]
 
 
 class conditionList:
     """An ordered list of conditions with comparison pairs and factor info."""
 
     def __init__(self, condition_list, comparisons=None, explanation=None):
+        if not condition_list:
+            raise ValueError('A group list needs at least one condition')
         self.condition_list = condition_list
         self.comparisons = comparisons
         self.conditions = []
@@ -114,6 +126,10 @@ class conditionList:
                 self.factorDict[cond.factor].append(cond)
             if explanation is not None:
                 cond.factor_explanation = explanation.replace("<>", cond.label)
+        if explanation is not None:
+            for cond in self.condition_list:
+                if isinstance(cond, multiCondition):
+                    cond.factor_explanation = [part.factor_explanation for part in cond.conditionsList]
 
     def __iter__(self):
         return iter(self.condition_list)
@@ -239,6 +255,9 @@ class ConditionBuilder:
         """Return a ``conditionList`` from the accumulated entries."""
         if not self._entries:
             raise ValueError("No conditions added — call .add() before .build()")
+        names = [entry['short'] for entry in self._entries]
+        if len(set(names)) != len(names):
+            raise ValueError('Condition shorthand names must be unique; duplicate names are ambiguous')
 
         conditions_out = []
         for i, entry in enumerate(self._entries):
@@ -390,7 +409,20 @@ class _CrossedConditionBuilder:
 
     def build(self):
         """Return a ``conditionList`` from the crossed design."""
-        crossed = list(zipConditionLists(self._cl1, self._cl2, self._colors))
+        factors = set(self._cl1.factor+self._cl2.factor)
+        requested = [self._order_factor] if self._order_factor is not None else []
+        requested += [spec[1] if spec[0]=='__ALL_PAIRS_WITHIN__' else spec[2]
+                      for spec in self._comparisons
+                      if spec[0] in ('__ALL_PAIRS_WITHIN__','__VS_CONTROL_WITHIN__')]
+        for factor in requested:
+            if factor is not None and factor not in factors:
+                raise ValueError(f'Unknown crossed-design factor {factor!r}; choose from {sorted(factors)}')
+        # An explanation belongs to this new design, not the source lists.
+        # Copy the whole graph once, preserving shared level identities inside
+        # the new Cartesian product for factor deduplication.
+        cl1, cl2 = (deepcopy((self._cl1,self._cl2)) if self._explanation is not None
+                    else (self._cl1,self._cl2))
+        crossed = list(zipConditionLists(cl1, cl2, self._colors))
 
         if self._order_factor:
             crossed = self._reorder(crossed, self._order_factor)
@@ -487,15 +519,14 @@ class _CrossedConditionBuilder:
                         key = self._factor_value(mc, within_factor)
                         groups.setdefault(key, []).append((i + 1, mc))
                     for entries in groups.values():
-                        ctrl_idx = None
+                        candidates = [idx for idx, mc in entries if control in self._sub_names(mc)]
+                        if len(candidates) != 1:
+                            raise ValueError(f'Control {control!r} must match exactly one condition in each '
+                                             f'{within_factor!r} group; found {candidates}')
+                        ctrl_idx = candidates[0]
                         for idx, mc in entries:
-                            if control in self._sub_names(mc):
-                                ctrl_idx = idx
-                                break
-                        if ctrl_idx is not None:
-                            for idx, mc in entries:
-                                if idx != ctrl_idx:
-                                    resolved.append(f'{ctrl_idx}-{idx}')
+                            if idx != ctrl_idx:
+                                resolved.append(f'{ctrl_idx}-{idx}')
                 else:
                     ctrl_idx = self._find_crossed_index(crossed, control)
                     for i in range(len(crossed)):

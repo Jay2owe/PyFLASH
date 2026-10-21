@@ -15,6 +15,7 @@ imported here (a page), never in ``services.py`` / ``project_io.py``.
 """
 
 import streamlit as st
+from PyFLASH.ui.controls import fold, widget
 
 from PyFLASH.config import Config
 from PyFLASH.ui import services
@@ -67,7 +68,7 @@ def _entry_editor(seed_entries, key):
     # Backfill style for specs saved before the channel existed.
     for row in seed:
         row.setdefault("style", "fill")
-    edited = st.data_editor(
+    edited = widget(st, 'data_editor', 
         seed,
         num_rows="dynamic",
         use_container_width=True,
@@ -119,15 +120,19 @@ def _duplicate_shorts(entries):
     return dupes
 
 
-def _comparison_picker(entries, modes, key_prefix):
+def _comparison_picker(entries, modes, key_prefix, seed=None):
     """Render the comparison-mode picker; return a comparisons spec dict.
 
     Common to a single factor and to each crossed sub-factor. Pairs are picked
     from the available short names; vs-control picks one short name.
     """
     shorts = _shorts(entries)
-    label = st.selectbox(
-        "Comparison mode", list(modes), key=f"{key_prefix}_mode")
+    seed = seed or {}
+    labels = list(modes)
+    default_label = next((label for label in labels if modes[label] == seed.get("mode")), labels[0])
+    label = widget(st, 'selectbox', 
+        "Comparison mode", labels, index=labels.index(default_label), key=f"{key_prefix}_mode",
+        help="Choose the comparisons included in the processed analysis.")
     mode = modes[label]
     spec = {"mode": mode} if mode else {}
 
@@ -137,16 +142,18 @@ def _comparison_picker(entries, modes, key_prefix):
             for i, a in enumerate(shorts)
             for b in shorts[i + 1:]
         ]
-        picked = st.multiselect(
+        picked = widget(st, 'multiselect', 
             "Pairs to compare",
             pair_options,
             format_func=lambda p: f"{p[0]} vs {p[1]}",
+            default=[tuple(p[:2]) for p in seed.get("pairs", []) if tuple(p[:2]) in pair_options],
             key=f"{key_prefix}_pairs",
         )
         spec["pairs"] = [[a, b] for a, b in picked]
     elif mode == "vs_control":
-        control = st.selectbox(
-            "Control group", shorts or [""], key=f"{key_prefix}_control")
+        control = widget(st, 'selectbox', 
+            "Control group", shorts or [""], index=shorts.index(seed["control"]) if seed.get("control") in shorts else 0,
+            key=f"{key_prefix}_control", help="The reference group for comparisons.")
         spec["control"] = control
     return spec
 
@@ -157,16 +164,16 @@ def _factor_block(seed, key_prefix, modes, *, with_explanation=True):
     Returns a factor spec dict (``factor``/``entries``/``comparisons``/
     ``explanation``) plus the list of duplicate-short warnings to surface.
     """
-    factor = st.text_input(
+    factor = widget(st, 'text_input', 
         "Factor name", value=seed.get("factor", ""), key=f"{key_prefix}_factor")
     entries = _entry_editor(seed.get("entries"), key=f"{key_prefix}_entries")
     dupes = _duplicate_shorts(entries)
 
     spec = {"factor": factor.strip(), "entries": entries}
     if entries and not dupes:
-        spec["comparisons"] = _comparison_picker(entries, modes, key_prefix)
+        spec["comparisons"] = _comparison_picker(entries, modes, key_prefix, seed.get("comparisons"))
     if with_explanation:
-        explanation = st.text_input(
+        explanation = widget(st, 'text_input', 
             "Explanation template (<> is replaced with each label)",
             value=seed.get("explanation", ""),
             key=f"{key_prefix}_explanation",
@@ -214,7 +221,7 @@ def _render_preview(spec):
     else:
         st.caption("No comparisons defined.")
 
-    with st.expander("Explanation expansion"):
+    with fold('groups.explanation'):
         any_expl = False
         for cond in preview["conditions"]:
             if cond["explanation"]:
@@ -226,20 +233,18 @@ def _render_preview(spec):
 
 # ── Page body ───────────────────────────────────────────────────────────────
 
-st.header("Groups")
-st.caption(
-    "Define your experimental groups in a grid and choose how to compare them. "
-    "The design is rebuilt and previewed live, then saved to the project."
-)
+st.title("Groups")
 
 project = _project()
-existing = project.conditions or {}
+existing = st.session_state.get("ui_group_draft") or project.conditions or {}
 
-design = st.radio(
+design = widget(st, 'radio', 
     "Design",
     ["Single factor", "Crossed (two factors)"],
     index=1 if existing.get("crossed") else 0,
     horizontal=True,
+    key="ui_group_design",
+    help="Single factor defines one group variable; crossed design combines two factors.",
 )
 
 spec = None
@@ -273,30 +278,30 @@ else:
     # Crossed comparisons reference the sub-condition short names of either
     # factor; offer all of them to the picker.
     combined_entries = f1.get("entries", []) + f2.get("entries", [])
-    crossed_cmp = _comparison_picker(combined_entries, _CROSSED_MODES, "cross_cmp")
+    crossed_cmp = _comparison_picker(combined_entries, _CROSSED_MODES, "cross_cmp", existing.get("comparisons"))
 
     within_options = ["(none)"] + [f1.get("factor", ""), f2.get("factor", "")]
     within_options = [w for w in within_options if w]
-    within_factor = st.selectbox(
+    within_factor = widget(st, 'selectbox', 
         "Restrict comparisons within factor (within_factor)",
         within_options,
         help="For 'All pairs' / 'Versus control', compare only within each "
              "level of this factor.",
-    )
+     key='ui_control_3_conditions_002')
     if within_factor and within_factor != "(none)" \
             and crossed_cmp.get("mode") in {"all_pairs", "vs_control"}:
         crossed_cmp["within_factor"] = within_factor
 
     order_options = ["(default)"] + [f1.get("factor", ""), f2.get("factor", "")]
     order_options = [o for o in order_options if o]
-    order_by = st.selectbox(
+    order_by = widget(st, 'selectbox', 
         "Order groups by factor (order_by)",
         order_options,
         help="Regroup crossed groups by this factor (default groups by "
              "the first factor).",
-    )
+     key='ui_control_3_conditions_003')
 
-    explanation = st.text_input(
+    explanation = widget(st, 'text_input', 
         "Explanation template (<> is replaced with each label)",
         value=existing.get("explanation", "") if existing.get("crossed") else "",
         key="cross_explanation",
@@ -331,7 +336,9 @@ else:
 
 # ── Persist the spec into the session project ───────────────────────────────
 
-if st.button("Save groups", type="primary", disabled=bool(all_dupes)):
+st.session_state["ui_group_draft"] = spec
+
+if widget(st, 'button', "Save groups", type="primary", disabled=bool(all_dupes) or not spec or not (spec.get("entries") or spec.get("factors")), icon=":material/check:", key='_control_event_3_conditions_001'):
     try:
         # Final validation: must build cleanly before we persist the spec.
         services.build_conditions(spec)
@@ -342,5 +349,5 @@ if st.button("Save groups", type="primary", disabled=bool(all_dupes)):
     else:
         project.conditions = spec
         st.session_state["project"] = project
-        st.success("Groups saved to the current project (persists across "
-                   "pages). The batch is built on the Batch page.")
+        from pathlib import Path
+        st.switch_page(str(Path(__file__).with_name("4_process.py")))

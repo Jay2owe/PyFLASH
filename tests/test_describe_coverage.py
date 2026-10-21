@@ -13,6 +13,10 @@ a conscious describe-layer decision. See spec.DESCRIBE_* and CLAUDE.md.
 """
 
 import PyFLASH.spec as spec
+from importlib.util import find_spec
+from pathlib import Path
+import tokenize
+import pytest
 
 
 def test_every_registered_plot_is_classified():
@@ -43,16 +47,22 @@ def test_describe_sets_are_disjoint():
 
 
 def test_every_public_plot_function_is_registered():
-    import PyFLASH.plotting as plotting
-
-    public_plotters = {
-        name for name, obj in vars(plotting).items()
-        if (
-            name.startswith("plot_")
-            and callable(obj)
-            and getattr(obj, "__module__", None) == plotting.__name__
-        )
-    }
+    # Registration is a declaration check; importing every rendering engine is
+    # unnecessary here. Executability is checked separately in the full suite.
+    # Stream declarations instead of materializing the large plot module's AST.
+    public_plotters = set()
+    depth = 0
+    with Path(find_spec('PyFLASH.plotting').origin).open(encoding='utf-8') as source:
+        tokens = tokenize.generate_tokens(source.readline)
+        for token in tokens:
+            if token.type == tokenize.INDENT:
+                depth += 1
+            elif token.type == tokenize.DEDENT:
+                depth -= 1
+            elif depth == 0 and token.type == tokenize.NAME and token.string == 'def':
+                name = next(tokens).string
+                if name.startswith('plot_'):
+                    public_plotters.add(name)
     registry_targets = {
         str(target).rsplit(".", 1)[-1]
         for target in spec.PLOT_REGISTRY.values()
@@ -66,6 +76,7 @@ def test_every_public_plot_function_is_registered():
     )
 
 
+@pytest.mark.slow
 def test_every_registry_target_resolves():
     for short_name, target in spec.PLOT_REGISTRY.items():
         resolved = spec._resolve_func(target)

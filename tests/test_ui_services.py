@@ -25,8 +25,13 @@ from PyFLASH.ui import services
 
 
 def test_importing_services_does_not_import_streamlit():
-    # Importing the adapter must not drag in the UI dependency.
-    assert "streamlit" not in sys.modules
+    # Check a fresh import rather than imports made by earlier browser tests.
+    import subprocess
+    from pathlib import Path
+    actual = Path(sys.prefix) / 'python.exe'
+    executable = str(actual) if os.name == 'nt' and actual.is_file() else sys.executable
+    subprocess.run([executable, '-c',
+        "import sys; from PyFLASH.ui import services; assert 'streamlit' not in sys.modules"], check=True)
 
 
 def test_package_info_reports_clean_import():

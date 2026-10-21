@@ -1,0 +1,1070 @@
+{
+  "schema_version": 1,
+  "project": "PyFLASH-analysis",
+  "profile": "python-browser-app",
+  "source_root": ".",
+  "required_paths": [
+    "PyFLASH/spec.py",
+    "PyFLASH/actions.py",
+    "PyFLASH/palette.py",
+    "PyFLASH/aesthetics.py",
+    "PyFLASH/ui/controls.py",
+    "PyFLASH/ui/catalogue.py",
+    "PyFLASH/ui/function_workflows.py",
+    "PyFLASH/ui/theme.py",
+    "demo/data/summary.csv",
+    "demo/expected_result.json",
+    "reproducibility/cases.py",
+    "reproducibility/comparisons.py",
+    "scripts/verify.py",
+    "scripts/project_contract.py",
+    "scripts/ui_readiness.py",
+    "architecture.schema.json",
+    "architecture.lock.json",
+    "tests"
+  ],
+  "boundaries": [
+    {
+      "id": "core-without-interface-or-private-kit",
+      "sources": [
+        "PyFLASH/*.py"
+      ],
+      "forbidden": [
+        "streamlit",
+        "fastapi",
+        "analysis_kit"
+      ]
+    },
+    {
+      "id": "science-without-browser-adapters",
+      "sources": [
+        "PyFLASH/*.py"
+      ],
+      "forbidden": [
+        "PyFLASH.ui"
+      ],
+      "exceptions": [
+        {
+          "path": "PyFLASH/actions.py",
+          "import": "PyFLASH.ui.catalogue",
+          "reason": "Public action metadata reuses the source-derived, headless function catalogue."
+        },
+        {
+          "path": "PyFLASH/actions.py",
+          "import": "PyFLASH.ui.services",
+          "reason": "The public dispatcher converts condition inputs through the existing headless adapter."
+        },
+        {
+          "path": "PyFLASH/actions.py",
+          "import": "PyFLASH.ui.project_io",
+          "reason": "The public dispatcher restores the existing versioned project object."
+        },
+        {
+          "path": "PyFLASH/control.py",
+          "import": "PyFLASH.ui",
+          "reason": "The command-line driver shares headless parameter descriptions, workspace state and operation receipts with the browser. It is not numerical analysis."
+        },
+        {
+          "path": "PyFLASH/queue.py",
+          "import": "PyFLASH.ui",
+          "reason": "The resumable queue shares versioned project restoration and headless workspace loading. It is not numerical analysis."
+        }
+      ]
+    },
+    {
+      "id": "headless-service-adapter",
+      "sources": [
+        "PyFLASH/ui/services.py",
+        "PyFLASH/ui/project_io.py"
+      ],
+      "forbidden": [
+        "streamlit"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "id": "native-controls",
+      "title": "Registered native controls",
+      "path": "PyFLASH/ui/controls.py",
+      "symbol": "widget",
+      "kind": "python",
+      "purpose": "Create native controls with stable keys, help and icons from one builder.",
+      "options": [
+        "kind",
+        "key",
+        "help",
+        "icon"
+      ],
+      "states": [
+        "enabled",
+        "disabled",
+        "renamed label"
+      ],
+      "examples": [
+        "tests/test_ui_control_catalogue.py"
+      ],
+      "uses": [
+        {
+          "path": "PyFLASH/ui/app.py",
+          "call": "widget"
+        },
+        {
+          "path": "PyFLASH/ui/pages/3_conditions.py",
+          "call": "widget"
+        },
+        {
+          "path": "PyFLASH/ui/pages/9_functions.py",
+          "call": "widget"
+        }
+      ]
+    },
+    {
+      "id": "remembered-folds",
+      "title": "Saved advanced disclosures",
+      "path": "PyFLASH/ui/controls.py",
+      "symbol": "fold",
+      "kind": "python",
+      "purpose": "Use registered labels and stable saved preferences for secondary options.",
+      "options": [
+        "key",
+        "namespace"
+      ],
+      "states": [
+        "open",
+        "closed",
+        "recovered",
+        "unknown key rejected"
+      ],
+      "examples": [
+        "tests/test_ui_folds.py"
+      ],
+      "uses": [
+        {
+          "path": "PyFLASH/ui/app.py",
+          "call": "fold"
+        },
+        {
+          "path": "PyFLASH/ui/pages/3_conditions.py",
+          "call": "fold"
+        },
+        {
+          "path": "PyFLASH/ui/pages/9_functions.py",
+          "call": "fold"
+        }
+      ]
+    },
+    {
+      "id": "function-cards",
+      "title": "Continuous function cards",
+      "path": "PyFLASH/ui/function_cards.py",
+      "symbol": "render",
+      "kind": "python",
+      "purpose": "Render existing canonical plot and pipeline homes through one component and event channel.",
+      "options": [
+        "selected",
+        "query",
+        "task",
+        "access",
+        "guided",
+        "choices",
+        "on_select"
+      ],
+      "states": [
+        "filtered",
+        "selected",
+        "no matches"
+      ],
+      "examples": [
+        "tests/test_ui_catalogue.py",
+        "tests/test_ui_picture_workflows.py"
+      ],
+      "uses": [
+        {
+          "path": "PyFLASH/ui/pages/9_functions.py",
+          "call": "function_cards.render"
+        }
+      ]
+    },
+    {
+      "id": "figure-export",
+      "title": "Shared scientific figure export",
+      "path": "PyFLASH/utils.py",
+      "symbol": "save_fig",
+      "kind": "python",
+      "purpose": "Keep style, editable text, format identity and provenance on the existing ReproFig export route.",
+      "options": [
+        "figure_formats",
+        "figure_profile",
+        "dpi",
+        "save_bbox"
+      ],
+      "states": [
+        "saved",
+        "no-write",
+        "reused"
+      ],
+      "examples": [
+        "tests/test_plot_presentation.py",
+        "tests/test_reprofig_integration.py"
+      ],
+      "uses": [
+        {
+          "path": "PyFLASH/plotting.py",
+          "call": "save_fig"
+        }
+      ]
+    }
+  ],
+  "theme": {
+    "files": [
+      "PyFLASH/ui/theme.py"
+    ],
+    "required_tokens": [
+      "--pf-gap",
+      "--pf-radius"
+    ]
+  },
+  "checks": [
+    {
+      "id": "architecture-and-live-catalogues",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_project_contracts.py",
+        "tests/test_describe_coverage.py",
+        "tests/test_ui_catalogue.py",
+        "tests/test_ui_control_catalogue.py",
+        "tests/test_project_plugin_isolation.py",
+        "-q",
+        "-k",
+        "not every_registry_target_resolves and not source_free_helper_form_runs_without_a_dataset"
+      ],
+      "groups": [
+        "fast",
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 27,
+      "reason": " Add three actual child-process controls for the public pytest extension policy: unrelated extensions stay unloaded, explicit extensions run and broken explicit extensions fail. No generated runner or deadline changes. Require all 23 previously executed passes, all three added extension-policy controls and the additional actual child-process parent-directory isolation guard. Preserve the original public-default failure: temporary-directory siblings were collected under the project configuration. Scope each child to its owned root and configuration boundary; no extension policy or execution deadline changes."
+    },
+    {
+      "id": "interface-actions-and-options",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_ui_control_catalogue.py",
+        "tests/test_ui_folds.py",
+        "tests/test_ui_function_workbench.py",
+        "tests/test_ui_picture_workflows.py",
+        "tests/test_support_actions.py",
+        "tests/test_plot_presentation.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 30
+    },
+    {
+      "id": "saved-edits-and-recovery",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_workspace_edits.py",
+        "tests/test_workspace_folder_move.py",
+        "tests/test_state_atomicity.py",
+        "tests/test_state_portability.py",
+        "tests/test_resumable_queue.py",
+        "tests/test_export_result_scripts.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 30
+    },
+    {
+      "id": "independent-scientific-references",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_independent_references.py",
+        "tests/test_extended_references.py",
+        "tests/test_bootstrap_reference.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 30
+    },
+    {
+      "id": "multi-group-statistics-and-corrections",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_one_way_complete_contract.py",
+        "tests/test_welch_one_way_complete_contract.py",
+        "tests/test_rank_complete_contract.py",
+        "tests/test_fdr_family_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 600,
+      "min_passed": 30,
+      "reason": "Retain every full-report and coverage check. The first combined run exceeded its provisional 300-second execution deadline; a diagnostic one-way run passed 1021 tests in 93.58 seconds, including a 59.77-second whole-coverage inventory check. The aggregate execution deadline is 600 seconds; numerical tolerances and application performance budgets are unchanged."
+    },
+    {
+      "id": "registered-renderers-and-export",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_describe_coverage.py",
+        "tests/test_reprofig_integration.py",
+        "tests/test_aesthetics.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 20
+    },
+    {
+      "id": "headless-imports-and-loading",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_init_lazy_attrs.py",
+        "tests/test_ui_readiness.py",
+        "tests/test_ui_lazy_measurements.py",
+        "tests/test_ui_preparation.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 15
+    },
+    {
+      "id": "direct-utilities-and-lifecycle-contracts",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_axis_limit_rounding_display.py",
+        "tests/test_calibrated_conversion_native_outputs.py",
+        "tests/test_calibrated_conversion_typed_arrays.py",
+        "tests/test_coloc_percentage_extremes.py",
+        "tests/test_coloc_percentage_ownership.py",
+        "tests/test_complex_moving_average_native.py",
+        "tests/test_dataframe_lifecycle_contract_guards.py",
+        "tests/test_downward_trace_exact_distance.py",
+        "tests/test_downward_trace_original_rows.py",
+        "tests/test_integer_geometry_ownership.py",
+        "tests/test_moving_average_native_windows.py",
+        "tests/test_polyline_extreme_native_outputs.py",
+        "tests/test_scientific_utility_contract_guards.py",
+        "tests/test_volume_normalization_native_units.py",
+        "tests/test_polyline_real_coordinate_ownership.py",
+        "tests/test_experiment_metadata_contract.py",
+        "tests/test_marker_assignment_contract.py",
+        "tests/test_display_summary_contract.py",
+        "tests/test_exact_geometry_input_storage.py",
+        "tests/test_mixed_mean_fidelity.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 600,
+      "min_passed": 2010,
+      "reason": "Run every newly frozen direct utility/lifecycle regression and evidence/ownership guard. The installed affected round passes 1522 checks in 295.27 seconds with unchanged source; this subset contains 1385 executed tests. Preserve original native answers, scientific tolerances and application budgets. Add all 48 frozen real-plane/carrier cases and two altered-amendment guards; preserve all 1385 earlier checks and their answers. Native input refusals are functional controls, not extra scientific-method votes. Add 153 complete literal metadata/path/reporting cases and three evidence/failure guards. Original empty-condition reporting failures remain retained; functional metadata coverage does not close scientific constructors or pipelines. Add 72 original complete direct marker-setter ownership calls and seven evidence, damaged-output and scope controls. All 72 original calls pass without source changes. This is a functional assignment contract with no numerical vote and no parent promotion. Retain the existing 600-second deadline and every previous control. Add 250 complete display-table presentation/ownership controls, 18 original exact geometry storage controls and 67 original mixed real/complex window controls. Preserve original failures, dtype contracts and exact represented-input answers; the existing 600-second deadline is unchanged. Add four actual damaged-subclass setter controls and one inheritance/inventory-binding guard, retaining all 2005 original checks. All 84 current assignment tests pass, and each subclass requires its own original 24 actual calls; no numerical-method or parent promotion."
+    },
+    {
+      "id": "association-confidence-levels",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_association_interval_native.py",
+        "tests/test_reproducibility_distribution_resources.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 42,
+      "reason": "Retain 16 original-value native R interval cases through both numerical and public plot interfaces, two altered-evidence guards and six actual archive-resource guards, including duplicated evidence members. Twelve original confidence-level failures are preserved. This limited native family does not close whole association scientific coverage or change tolerances/budgets. Add 12 narrow-interval cases with original native endpoints and point markers, preserving all nine original rendering failures. Retain four altered-evidence guards and ten source archive guards; no complete scientific parent claim."
+    },
+    {
+      "id": "direct-exports-and-inference-boundaries",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_csv_export_contract.py",
+        "tests/test_association_fisher_native.py",
+        "tests/test_reproducibility_test_scratch.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 45,
+      "reason": "Retain 23 complete literal CSV contracts and two altered-source guards, 16 native Fisher-information boundary cases and two evidence guards, plus real framework-script preservation and disk-admission controls. Eight original CSV failures and twelve original inference failures remain immutable. Functional exports provide no scientific vote; limited native fields do not close association parents. No scientific tolerance or application budget changes."
+    },
+    {
+      "id": "spreadsheet-source-row-order",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_excel_export_row_order_contract.py",
+        "tests/test_excel_region_selection_contract.py",
+        "tests/test_csv_export_contract.py",
+        "tests/test_unregistered_summary_export.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 480,
+      "min_passed": 148,
+      "reason": "Retain 64 literal spreadsheet row-order/missing-cell controls, two changed-evidence guards and three changed-output guards, all 25 existing CSV controls and two existing export integration checks. Add 48 actual extended-workbook region-selector controls, two evidence guards and two emitted-output guards. Preserve 48 original group-workbook failures and 44 original region-workbook failures. Shared helpers own column packing and acquired-region selection without mutating inputs. These functional controls do not close complete exporter options or scientific processing. The installed 96-check group-export round passed in 186.01 seconds; allow 480 seconds for all 148 native-workbook checks while preserving every check and the five-second application budget."
+    },
+    {
+      "id": "outlier-requests-and-binary-fits",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_outlier_request_contract.py",
+        "tests/test_overview_pipeline.py::test_data_overview_specificity_queue_merges_into_one_folder",
+        "tests/test_ordinal_binary_glm_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 108,
+      "reason": "Retain 62 functional outlier request/table controls, two changed-evidence guards and three changed-output guards, the actual grouped-overview regression, 36 native-R binary-fit scientific controls and four evidence/output guards. Preserve 29 original request failures, the installed grouped-queue regression and all 36 original native precision disagreements. Shared method normalization occurs once before queue dispatch without forwarding helper locals. The equivalent unpenalized two-class likelihood uses the dependency's native Newton solver; alpha-positive and multiclass branches keep their original owner. Exact native answers and the original 1e-9 relative/zero absolute tolerance are unchanged. These conditional families do not close whole outlier/overview/model parents or application budgets."
+    },
+    {
+      "id": "marker-threshold-consumers",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_marker_threshold_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 128,
+      "reason": "Execute 54 constructor, 54 nearest-marker consumer and 12 actual CSV-import controls, three evidence guards, four damaged-output guards and the legacy global-threshold fallback. Preserve 44 original constructor failures, 26 nearest-consumer failures and 12 real-import failures. Use the stored per-marker threshold consistently and recognize one-character legacy marker names while preserving acquired measurements and binary flags. Functional option controls only; no complete scientific-method certificate, tolerance relaxation or application budget change."
+    },
+    {
+      "id": "exact-subject-identifiers",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_dataframe_identifier_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 120,
+      "min_passed": 68,
+      "reason": "Execute all 66 frozen exact-identifier cases through actual public constructors and two evidence-alteration guards. Preserve 28 original identity failures and every unchanged measurement/index/attribute/region field. This limited functional input family does not close whole constructors or supply scientific inference votes."
+    },
+    {
+      "id": "public-distribution-curves",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_ecdf_public_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 80,
+      "reason": "Execute 60 actual native/domain distribution calls and 10 original queue/custom-label controls, with preserved native R reexecution and frozen SciPy full-function knots. Add three changed-evidence guards, six damaged-output guards and one independent caller-table ownership check. Preserve raw R infinity acceptance and SciPy refusal separately from explicit finite display admission. Every original scientific curve remains unchanged; correct reported finite observation counts and forwarded custom labels. Other selectors/options and final whole-plot rendering remain open; no tolerance or application budget relaxation."
+    },
+    {
+      "id": "distribution-selection-and-evidence",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_marker_region_contract.py",
+        "tests/test_marker_legacy_region_contract.py",
+        "tests/test_distribution_label_contract.py",
+        "tests/test_evidence_identity.py",
+        "tests/test_distribution_manifest_resources.py",
+        "tests/test_native_query_preflight.py",
+        "tests/test_run_disk_admission.py",
+        "tests/test_distribution_consumers.py",
+        "tests/test_distribution_consumer_failures.py",
+        "tests/test_marker_factor_region_contract.py",
+        "tests/test_object_mean_contract.py",
+        "tests/test_regression_label_contract.py",
+        "tests/test_regression_region_range_contract.py",
+        "tests/test_region_factor_finalization_contract.py",
+        "tests/test_scatter_queue_display_contract.py",
+        "tests/test_scatter_recursive_labels.py",
+        "tests/test_atomic_json_read_retry.py",
+        "tests/test_evidence_source_revision.py",
+        "tests/test_portable_scientific_cache_evidence.py",
+        "tests/test_frozen_verification_inputs.py",
+        "tests/test_ui_figure_carrier_discovery.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 472,
+      "reason": "Selected-region native curves, legacy object compatibility, literal plot labels, region-specific figure finalization and shared 3D queue axes, bounded Windows state reads, authenticated source-download evidence and production disk admission. No whole-parent or startup completion claim."
+    },
+    {
+      "id": "marker-nearest-complete-native-tables",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_marker_nearest_native_contract.py",
+        "tests/test_marker_distance_grouping.py",
+        "tests/test_marker_threshold_contract.py",
+        "tests/test_reference_family_runner.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 499,
+      "reason": "Retain all full-table nearest-distance controls, exact count attribution, both backends and threshold ownership; refuse changed independent originals, missing corroboration and unrepresentable coordinates before mutation. Native R and published scikit-learn full replay passed 484 comparisons with unchanged source; focused 498 tests passed before the added completeness guard. This certifies prepared-coordinate direct operation only and cannot certify microscopy import, calibration or experiment summaries. No numerical tolerance or application budget is relaxed."
+    },
+    {
+      "id": "marker-native-calibration-imports",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_marker_calibration_native_tables.py",
+        "tests/test_ventricle_row_ownership.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 112,
+      "reason": "Exercise unchanged installed Fiji object centres and calibrated measurements through complete actual object/cell-marker tables and actual CSV imports, all three declared axis pitches, units, both distance backends and legacy ownership. Retain the original 36 failures and their full actual/expected journals. Verify native zero depth, refusal of invalid calibration before coordinate mutation, and anisotropic boundary-distance controls. No original reference answers, numerical tolerance or application budget is relaxed. Include seven finite-range and nonreal-coordinate refusal guards, with exact table preservation."
+    },
+    {
+      "id": "experiment-nearest-complete-native-tables",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_experiment_nearest_native_contract.py",
+        "tests/test_reference_family_runner.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 591,
+      "reason": "Retain every full public experiment configuration across zero, one, two and three markers, ordered pairs, object/cell classes, both distance backends, global/instance thresholds and progress settings. Fresh native R and retained installed Fiji centres passed 576 complete table comparisons with unchanged source. Require all 576 keys; preserve exact counts, original tables, aliases, nonspatial carriers and immutable independent inputs. Initial 590 focused controls passed in 105.70 seconds; include the final completeness guard. This certificate belongs only to pair orchestration and cannot certify imports or summaries. No scientific tolerance or application budget changes."
+    },
+    {
+      "id": "ventricle-native-complete-tables",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_ventricle_native_contract.py",
+        "tests/test_ventricle_row_ownership.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 482,
+      "reason": "Execute 105 complete direct-table and 326 actual experiment boundary controls against original native R tracing/smoothing and independently measured GEOS geometry, plus original row-ownership and malformed-input refusals. Keep spatial boundaries within their shared subject/image/hemisphere/region-type ownership and preserve all acquired tables, aliases and original answers. Retain 12 original grouping failures, 431 qualified corrected tables and altered-evidence/output guards. These operations do not certify imports, summaries or standalone boundary visualisation. No scientific tolerance or application budget changes."
+    },
+    {
+      "id": "native-tissue-area-summary-routes",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_summary_area_native_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 360,
+      "min_passed": 398,
+      "reason": "Retain 384 complete original-ImageJ/native-R area-normalization tables across pixel densities, area/volume headers, sections, thickness and progress, plus strict evidence, damaged-output and invalid-calibration controls. Preserve all 96 original failures, the unchanged native answers and both qualified candidates. Route both pixel-area axes through the existing validated unit converter instead of multiplying by squared pixel density. The first combined 431-control round took 242.23 seconds with every native numeric table passing; allow 360 seconds for this new 398-control check, preserving every check and the application's five-second/half-second budgets. Honor the shared converter's existing positive-real scalar policy. These full area-route tables do not certify the other createSummary branches. No scientific tolerance is changed."
+    },
+    {
+      "id": "mini-scientific-summary-and-identifiers",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_mini_scientific_tables.py",
+        "tests/test_miniexperiment.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 297,
+      "reason": "Require 288 independently frozen complete-table calls across flat CSV subject identities, original label maps, scalar mean controls and the main experiment summary consumer, plus changed-evidence and damaged-output guards and both existing human CSV workflows. Native R and Python CSV parsers retain exact identities; 4096-bit mpmath establishes extreme represented means independently of the shared Fraction arithmetic in Python statistics and production. Original R cancellation outliers remain recorded. The affected round including 31 existing volume controls passed 328 tests in 105.32 seconds; allow 180 seconds without changing existing application or check budgets. Remaining summary score and import lifecycle routes remain partial; this check does not certify either whole summary method."
+    },
+    {
+      "id": "summary-numeric-storage",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_summary_numeric_storage.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 745,
+      "reason": "Require 738 original complete public summary calls across native and nullable floating, signed/unsigned integer and Boolean storage, missing values, overflow and integer accumulation boundaries, plus seven scope, evidence and damaged-output guards. Independent 4096-bit mpmath answers use exact original represented inputs before a single output cast. Preserve original R double-transport results as a separately labelled convention, not exact-integer evidence, and all original failed outputs. The combined 1073 affected controls passed in 102.15 seconds. This new check allows 180 seconds without changing any existing check or application budget and does not certify remaining summary branches."
+    },
+    {
+      "id": "summary-exclusions-and-marker-scores",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_mini_exclusion_contract.py",
+        "tests/test_mini_score_contract.py",
+        "tests/test_mini_nonfinite_score_contract.py",
+        "tests/test_mini_object_mean_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 335,
+      "reason": "Require 256 complete public tables plus 24 scope, evidence and damaged-output controls. Original native R exclusion means preserve excluded groups and protected text, nullable string, categorical and date metadata. Original native score variance underflow is retained beside a separately declared scaled published R scale route and independent 4096-bit mpmath. Preserve 92 original exclusion failures, sixteen genuine finite numeric score failures, sixteen separately amended JSON-zero dtype predictions and 48 infinite-observation failures. Prevent intermediate ratio overflow, preserve subnormal variance, and keep undefined infinite-observation scores missing instead of reporting zero, without changing acquired data. The previous 208 controls passed in 48.87 seconds; the private correction also passed all 160 finite and infinite native tables. Add 72 infinite-observation controls while retaining the original 180-second budget and every numerical tolerance. Whole summary methods remain separately gated. Add 48 original exact object-storage and CSV summary cases plus seven evidence, prediction and scope guards; retain 20 original failures. Independent 4096-bit mpmath and 2048-digit Decimal answers agree before the final rounding. The private correction passed all 48 cases and 1122 existing full-table controls. Preserve integer digits through mixed excluded-measurement storage. Retain this check's 180-second deadline and original numerical tolerances."
+    },
+    {
+      "id": "mini-flat-table-and-image-lifecycle",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_mini_lifecycle_contract.py",
+        "tests/test_mini_image_condition_contract.py",
+        "tests/test_mini_csv_refresh_contract.py",
+        "tests/test_table_family_workflow_integration.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 240,
+      "min_passed": 193,
+      "reason": "Require 128 original native full CSV summary and raw-table calls across one to four tables, explicit/default subject columns, declared numeric-looking factors, both progress and image switches and both stepped and processData routes. Preserve all 112 original failures. Propagate declared subject conditions to every table, retain exact factor codes, and avoid duplicated generated condition columns. Include six atomic conflicting-factor refusals, evidence/output damage controls, and two complete native acquired-image metadata cases with both getter options and unchanged pixels; preserve both original stale-image failures. The initial 142 lifecycle controls consumed 128.894 seconds within a passing 1392-control round; the acquired-image affected 361 controls passed in 163.33 seconds. Allow 240 seconds for this new 151-control check without changing existing check or application budgets. Other acquired-image layouts, decoding and whole methods remain separately gated. Two passing integration controls require full heterogeneous native tables to share the real workflow CSV schema and retain non-finite input signs and disagreement evidence. The unchanged 240-second check now requires 153 executed controls. Add 32 complete atomic CSV-refresh cases and eight evidence, damage and scope guards; preserve 30 genuine original failures and the first failed candidate. The additive native R subject-label adapter preserves every original numeric answer. The private candidate passed 32 original cases and 360 existing controls; the installed repair passed 545 affected checks. The same 240-second check now requires 193 controls; no existing deadline or tolerance changes."
+    },
+    {
+      "id": "literal-factors-and-batch-table-ownership",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_parent_ownership_contract.py",
+        "tests/test_empty_parent_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 417,
+      "reason": "Require 256 complete parent/flat-experiment literal-factor tables and 72 native R make.unique table-name and carrier-ownership cases, plus nine evidence, damaged-prediction and scope guards. Preserve 208 genuine label failures, 32 overwritten-table failures and every first-adapter output. The explicit call-adapter amendment preserves all original native queries and full-table predictions. All 770 affected condition, lifecycle, metadata, design and UI checks passed in 196.97 seconds; these 337 controls consumed 57.026 seconds. This new check allows 180 seconds without changing an existing check, application budget or reference tolerance. Whole condition methods and batch processing remain separately gated. Add 72 native empty-parent and zero-experiment calls plus eight evidence, prediction and explicit marker-storage amendment guards. Retain 24 original failures and the first failed 845-test installed round (843 passed, two nonempty marker-set failures). The corrected empty route uses a set and preserves the original nonempty reduction and alias behavior. Native queries, native answers and complete summary predictions are unchanged. This existing check retains 180 seconds and now requires 417 controls; whole parent methods remain separately gated."
+    },
+    {
+      "id": "whole-roi-native-and-saved-preview",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_roi_analysis_contract.py",
+        "tests/test_roi_saved_preview.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 492,
+      "reason": "Require every native and exact-storage distance, projected point, smoothed boundary coordinate, refusal, input alias, preview artist and separately reproduced carrier. Retain 24 original storage failures and the explicitly amended extended original loader metadata. Fresh native replay, all 467 complete-call obligations and 60 supporting means pass; the installed affected subset passes 559 tests in 122.988 seconds. This new 300-second check changes no existing check, application budget, original native answer or tolerance and certifies only the direct custom boundary method."
+    },
+    {
+      "id": "whole-parent-condition-assignment",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_whole_condition_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 600,
+      "min_passed": 875,
+      "reason": "Require 864 complete native literal-assignment tables across factors, subject indexing, condition text storage, raw tables, image lifecycle and regions, plus eleven evidence, prediction, nested-ownership and scope guards. Retain all 144 original indexed-image failures, original categorical transport and the failed first candidate. The strict private round passes 864 unchanged native predictions plus 536 existing controls in 555 seconds; this new 600-second gate changes no existing deadline, numerical tolerance or application budget. Processing and other parent methods remain separately required."
+    },
+    {
+      "id": "whole-image-table-retrieval",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_image_table_whole_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 697,
+      "reason": "Retain 132 original failures across 684 complete getter calls, real nonempty directory imports in all three export layouts, and every value/dtype/index/acquired-attribute/caller-ownership obligation. The strict private repair passes all 684 unchanged predictions, 864 whole assignment calls and 536 existing controls. The installed 684-call replay and all 696 damage/evidence/scope tests pass with unchanged sources in 173 seconds; add the executed coverage-binding guard for 697 required tests. This new 300-second gate changes no existing deadline, native answer or application budget and certifies only the three direct getters, not whole processing, imports or pixel decoding."
+    },
+    {
+      "id": "whole-custom-trace-and-axis-bound-policies",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_axis_bound_whole_contract.py",
+        "tests/test_trace_policy_whole_contract.py",
+        "tests/test_verification_inherited_methods.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 540,
+      "reason": "Require all 211 original qualified scalar-bound and 291 complete tracing profiles, authenticated native arrays and transport amendments, altered-output/ownership/evidence refusal guards, and coverage binding for both original and new obligations. Fresh native replay passes 502 calls; all 528 existing utility tests pass in the retained 1225-test run whose separate inherited-getter coverage guard failed. Ten local inheritance-resolution controls and the corrected getter guard pass. Add two explicit utility coverage guards; this new 300-second gate changes no existing deadline, scientific tolerance or application budget. These custom functional policies do not supply published whole-method votes or certify parent boundary, smoothing or processing methods."
+    },
+    {
+      "id": "whole-moving-window-carriers",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_window_carrier_whole_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 414,
+      "reason": "Retain 400 complete storage/width/admission/no-op/copy profiles and 260 earlier native/qualified original-cell controls. The installed fresh 660-call replay passes with unchanged sources, and 413 permanent evidence/coordinate/dtype/alias/refusal guards pass in 10.35 seconds. Add an explicit inventory guard requiring all 660 obligations. Preserve nine original unsupported-text error-class assumptions and their authenticated NumPy fallback qualification, three genuine scalar-object admission failures and the first failed verification adapter. The qualified production edit only rejects non-vector inputs after historical no-op handling; every numeric answer and existing deadline/tolerance/application budget remains unchanged."
+    },
+    {
+      "id": "inherited-mini-metadata",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_inherited_mini_metadata_contract.py",
+        "tests/test_experiment_metadata_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 337,
+      "reason": "Preserve every original145 recorded subclass input and literal expected output; add24 original UTF-8 filename inputs previously decoded using the Windows locale. Private qualification passes338 actual calls across both classes. The updated permanent gate passes all337 controls in43.81 seconds, including both interpreter encoding modes, original evidence/corruption guards and complete inventory binding. Raise the minimum count to337 to require the added obligations. Retain the original180-second deadline, every original answer and failure, and all numerical/application budgets. The five exposures remain functional only; this does not certify processing or import."
+    },
+    {
+      "id": "whole-mini-summary",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_mini_summary_whole_contract.py",
+        "tests/test_verification_workflow.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 666,
+      "reason": "Require 640 complete native R flat-summary profiles, all unchanged earlier table predictions, original failures and explicit adapter qualifications, altered-evidence/table/alias refusal guards, existing-summary atomic conflict preservation and inventory binding that requires all original numeric/exclusion/score/lifecycle obligations. The installed public source passes 448 fresh native tables plus 1898 original controls, then 640 fresh mixed-label/late-subject native tables. All 666 permanent summary/workflow checks pass in 237.08 seconds with zero skips. This new gate changes no existing deadline, scientific tolerance or application budget. Completeness is limited to the flat-summary method; whole CSV import, condition assignment, images and processing remain required separately."
+    },
+    {
+      "id": "inherited-spatial-consumers",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_inherited_spatial_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 600,
+      "min_passed": 2753,
+      "reason": "Require 2744 actual inherited spatial calls with unchanged complete native R, scikit-learn and ImageJ input/output arrays, all ownership/type/return/progress/backend controls, evidence refusal and damaged subclass guards, and independent inherited inventory obligations including corroborated geometry. All 2753 permanent checks pass in 303.088 seconds with zero skips. Preserve the first adapter failure: 326 parent marker-kind tuples serialize as JSON lists; complete canonical serialized inputs agree without changing a value or expected answer. This new gate changes no existing deadline, scientific tolerance or application budget. Reference reuse supplies no extra whole-method vote and certifies none of import, cleaning, ROI drawing, summary or processing."
+    },
+    {
+      "id": "inherited-mini-csv-and-paired-checkpoint",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_inherited_mini_csv_contract.py",
+        "tests/test_csv_export_contract.py",
+        "tests/test_paired_checkpoint.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 51,
+      "reason": "Require fifteen actual lightweight-experiment exports with every path, header, cell, ordering, empty branch, return and caller ownership checked through independent standard-library CSV reads. All 24 inherited controls, 25 original CSV controls and two append-only checkpoint controls pass within the retained 979-test focused round, with no skips. Checkpoint controls preserve signed zero, nonfinite observations, complete nested values and failed attempts; no scientific answer, comparison, existing deadline or application budget changes. These three inherited serialization exposures do not certify imports, processing or additional scientific methods."
+    },
+    {
+      "id": "inherited-boundary-arrays-and-saved-previews",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_inherited_roi_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 600,
+      "min_passed": 944,
+      "reason": "Require all 932 actual subclass boundary calls and two separate saved-carrier reproductions, damaged-subclass and altered-evidence refusal, distinct-archive cache separation and rejection of changed retained evidence after a cache read. All 944 current permanent checks pass with zero skips in 214.357 seconds (244.986 seconds including process launch). Original native R and GEOS answers, geometry tolerances and existing deadlines remain unchanged. Completion covers only the two inherited boundary methods, not cleaning, import, summary or processing."
+    },
+    {
+      "id": "whole-colocalisation-annotation",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_coloc_annotation_contract.py",
+        "tests/test_marker_threshold_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 2342,
+      "reason": "Require 2205 predeclared full-table annotation options through the three actual marker classes, evidence/damaged-owner/refused-prediction and inventory guards, and every earlier constructor/import/nearest threshold control. All 2342 current tests pass without skips in 175.94 seconds; the installed family separately passes all 2205 comparisons with unchanged sources. Retain the original nine nullable failures and all 270 broader original failures. The qualified two-line repair treats missing nullable values as negative while preserving binary/text/numeric policy, types, index, raw values, table identity and earlier answers. This is a functional annotation gate with no independent scientific-method vote; cleaning and parent scientific methods remain separately required. No existing deadline, tolerance or application budget changes."
+    },
+    {
+      "id": "whole-mini-conditions",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_mini_condition_whole_contract.py",
+        "tests/test_parent_ownership_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 600,
+      "min_passed": 1792,
+      "reason": "Require 1440 actual lightweight-experiment full native-backed condition calls, retained genuine original indexed-subject and typed-empty failures, evidence/prediction/output/alias/ownership refusal controls, all 337 earlier literal-factor and carrier-ownership tests, and explicit inventory refusal when any one of six required routes is omitted. The whole method separately requires 1736 comparisons including its 134 lifecycle, 32 empty, two acquired-image and 128 literal-factor obligations. The installed 1791-control round passes in 214.19 seconds, fresh R replay passes all 1440 in 255.859 seconds and the added inventory guard passes alone in 314.60 seconds. Preserve the first 600-second combined 2900-control timeout and interrupted inventory failure. This new 1792-control gate allows 600 seconds based on the measured permanent and inventory work; every existing gate, tolerance and application budget remains unchanged. This functional assignment declaration supplies no statistical-method vote and certifies none of import, summary or processing."
+    },
+    {
+      "id": "whole-image-import",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_image_import_whole_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 300,
+      "min_passed": 359,
+      "reason": "Require all 330 predeclared actual Experiment, MiniExperiment and Batch filename-indexing returns, stored tables, dtypes, indexes, lookup, import summary, roots, cached child branches and input ownership, plus all 29 unchanged evidence/prediction/damage/scope controls. The original UTF-8 observer-qualified actual replay passes 330 with unchanged predictions and sources, and all 359 permanent controls pass in 230.576 seconds under this 300-second boundary. Retain the original observer failures. This functional indexing declaration adds no pixel-decoder or independent statistical-method vote and promotes no processing method. Every existing gate and deadline remains unchanged."
+    },
+    {
+      "id": "whole-image-import-coverage-binding",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_image_import_inventory_binding.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 1,
+      "reason": "Separately require that each of the three actual owners has every whole-image-import case executed, and that omitting any case prevents its complete status. Authenticate the current metadata once and preserve every original gate unchanged; no scientific helper or parent processing method is promoted."
+    },
+    {
+      "id": "whole-marker-cleaning",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_marker_cleaning_whole_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 600,
+      "min_passed": 1983,
+      "reason": "Require all 1952 native-R-backed whole raw-marker cleaning tables and 31 evidence, prediction, damage, scope and ownership controls. The installed actual replay passes 1952 and permanent controls pass 1983 in 415.676 seconds. Retain all 968 genuine original failures and the failed combined timeout. The qualified repair preserves complete raw and final data, types, indexes, attributes and return ownership. This new 600-second gate changes no existing deadline, tolerance or application budget; whole-method completion additionally requires separate configuration, refusal and actual native-coordinate constructor obligations."
+    },
+    {
+      "id": "whole-marker-cleaning-options",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_marker_cleaning_options_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 437,
+      "reason": "Require 252 sealed native-R full-table configuration/public-constructor cases and 144 sealed full partial-table calibration-refusal cases, plus 41 evidence, prediction, damaged-result, caller-ownership, global-configuration-restoration and scope controls. All 396 original comparisons pass unchanged, and the exact private adapter separately replays 396 with no source changes in 85.227 seconds. This additive 180-second gate changes no existing answer or deadline and adds no statistical-method vote. It remains required alongside the 1952 base tables and native ImageJ constructor composition."
+    },
+    {
+      "id": "whole-marker-cleaning-edges",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_marker_cleaning_edges_contract.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 379,
+      "reason": "Require all 296 sealed native-R typed/domain full-table cases and 48 dimensional/region-only full-table cases, with 35 evidence, prediction, damage, refusal, global-restoration and ownership controls. The original 48 genuine failures remain retained unchanged. The exact domain repair privately matches all 2728 added/base/configuration/native-calibration comparisons. This additive 180-second gate uses the existing supplementary cleaning boundary for fewer cases and changes no prior check, expected number, tolerance or application budget. Whole-method promotion separately requires every owning case and constructor composition."
+    },
+    {
+      "id": "whole-marker-cleaning-coverage-binding",
+      "kind": "pytest",
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_marker_cleaning_inventory_binding.py",
+        "-q"
+      ],
+      "groups": [
+        "release"
+      ],
+      "timeout_seconds": 180,
+      "min_passed": 1,
+      "reason": "Require the ordinary public catalogue to bind each complete raw-marker cleaner to its own full original tables, configuration/refusal routes, typed/domain and optional-dimensional routes, and native ImageJ constructors. Every one of 2716 case omissions must revoke completeness for the owning cleaner. Parent imports, processing and pipelines remain incomplete. Authenticate metadata once and retain immutability while checking every omission. This additive gate changes no existing deadline or numerical tolerance."
+    }
+  ]
+}

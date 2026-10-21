@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PyFLASH — plot workflow design</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PyFLASH <span>Plots &amp; pipelines</span></div>
+    <span class="preview-label">Design preview · schematic results</span>
+    <button id="theme" class="quiet" title="Switch between light and dark appearance">Dark theme</button>
+  </header>
+  <div class="context">
+    <span><strong>Example dataset</strong> batch1 · 42 subjects</span>
+    <span>Region: suprachiasmatic nucleus</span>
+    <span id="global-status" role="status">No analysis is running</span>
+  </div>
+  <main>
+    <nav class="chooser" aria-label="Plot and pipeline examples">
+      <label for="search" class="search-label">Choose a picture</label>
+      <input id="search" type="search" placeholder="Find a plot…" title="Search these four design examples by picture, task or function name">
+      <div id="gallery"></div>
+      <p id="empty-search" hidden>No matches. <button id="clear-search" class="text-button" title="Show all four design examples">Clear search</button></p>
+      <p class="scope-note">Four examples for design review. The live catalogue has 46 actions.</p>
+    </nav>
+    <section class="active" aria-labelledby="work-title">
+      <div class="work-heading"><h1 id="work-title"></h1><span id="kind" class="tag"></span></div>
+      <div class="workbench">
+        <form id="inputs" novalidate aria-label="Inputs for the selected example"></form>
+        <section class="output" aria-label="Result preview">
+          <div class="output-header">
+            <div><h2 id="result-title">Illustrative result</h2><span id="result-state" role="status"></span></div>
+            <button id="appearance-button" class="quiet" title="Edit this example's plot appearance" aria-expanded="false">Edit appearance</button>
+          </div>
+          <div id="appearance" class="appearance" hidden>
+            <label>Accent colour <select id="accent" title="Change the schematic plot colours"><option value="teal">Teal</option><option value="blue">Blue</option><option value="purple">Purple</option></select></label>
+            <label>Point size <input id="point-size" type="range" min="3" max="8" value="5" title="Change the schematic point size"></label>
+            <label><input id="show-legend" type="checkbox" checked title="Show or hide the schematic legend"> Legend</label>
+          </div>
+          <div id="result" class="result-view"></div>
+          <div class="result-footer"><span>Schematic illustration — values are not analysis results.</span><button id="restore" class="text-button" title="Restore the inputs used for this illustration" hidden>Restore result inputs</button></div>
+          <details class="run-details"><summary title="Inspect the proposed link between controls and the package action">Run details</summary><div id="details"></div></details>
+        </section>
+      </div>
+      <section class="saved" aria-label="Saved design runs">
+        <h2>Saved previews</h2><div id="history"><span class="muted">Your preview runs appear here.</span></div>
+      </section>
+    </section>
+  </main>
+  <footer class="review-tools">
+    <label>Inspect a state <select id="review-state" title="Show a design state without running scientific analysis"><option value="ready">Ready</option><option value="missing">Missing input</option><option value="editing">Changed inputs</option><option value="running">Running example</option></select></label>
+    <button id="reset" class="text-button" title="Clear saved design choices and return to the first example">Reset preview</button>
+    <span>Controls and job progress are simulated; package defaults are source-checked.</span>
+  </footer>
+</body>
+</html>

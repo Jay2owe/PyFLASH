@@ -91,6 +91,52 @@ def _marginal_model_batch(tmp_path):
     )
 
 
+@pytest.mark.parametrize("single_group", [False, True])
+def test_linear_pipeline_invalid_adjustment_fails_before_fitting(tmp_path, monkeypatch, single_group):
+    batch = _model_batch(tmp_path)
+    if single_group:
+        batch.summary["Diagnosis"] = "Control"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("An invalid correction reached fitting")
+
+    import PyFLASH.pipeline as pipeline
+    monkeypatch.setattr(pipeline, "_fit_linear_models", forbidden)
+    with pytest.raises(ValueError, match="method not recognized"):
+        linear_model(batch, dependent_variables=["Totalcounts"], group="Diagnosis",
+                     predictors=["Age"], adjusted_mean_p_adjust="not-a-method",
+                     save=False, montage=False, verbose=False)
+
+
+def test_linear_pipeline_correction_failure_does_not_return_raw_probabilities(tmp_path, monkeypatch):
+    batch = _model_batch(tmp_path)
+    from PyFLASH import stats_extra
+    original = stats_extra.apply_fdr
+
+    def broken_engine(pvalues, *args, **kwargs):
+        if len(pvalues):
+            raise RuntimeError("Correction engine failed")
+        return original(pvalues, *args, **kwargs)
+
+    monkeypatch.setattr(stats_extra, "apply_fdr", broken_engine)
+    with pytest.raises(RuntimeError, match="Correction engine failed"):
+        linear_model(batch, dependent_variables=["Totalcounts"], group="Diagnosis",
+                     predictors=["Age"], adjusted_mean_p_adjust="holm",
+                     save=False, montage=False, verbose=False)
+
+
+@pytest.mark.parametrize("method", ["none", "raw", "uncorrected"])
+def test_linear_pipeline_explicit_uncorrected_comparisons_remain_available(tmp_path, method):
+    batch = _model_batch(tmp_path)
+    result = linear_model(batch, dependent_variables=["Totalcounts"], group="Diagnosis",
+                          predictors=["Age"], adjusted_mean_p_adjust=method,
+                          save=False, montage=False, verbose=False)
+    contrasts = result["adjusted_mean_comparisons"]
+    assert len(contrasts) == 3
+    assert (contrasts["p_adjusted"] == contrasts["p_value"]).all()
+    assert set(contrasts["p_adjust_method"]) == {"none"}
+
+
 def test_linear_model_pipeline_registered_and_covered():
     assert "linear_model_pipeline" in PLOT_REGISTRY
     assert _resolve_func(PLOT_REGISTRY["linear_model_pipeline"]) is linear_model
@@ -99,6 +145,30 @@ def test_linear_model_pipeline_registered_and_covered():
     assert describe_status("linear_model_adjusted_means") == "covered"
     assert _resolve_func(PLOT_REGISTRY["linear_model_coefficient_forest"]) is plot_linear_model_coefficient_forest
     assert describe_status("linear_model_coefficient_forest") == "covered"
+
+
+@pytest.mark.parametrize("method,alias", [("holm-sidak", "hs"), ("simes-hochberg", "sh"), ("fdr-bh", "fdr_bh")])
+def test_linear_pipeline_preserves_valid_correction_method_names(tmp_path, method, alias):
+    batch = _model_batch(tmp_path)
+    options = dict(dependent_variables=["Totalcounts"], group="Diagnosis", predictors=["Age"],
+                   save=False, montage=False, verbose=False)
+    full = linear_model(batch, adjusted_mean_p_adjust=method, **options)["adjusted_mean_comparisons"]
+    short = linear_model(batch, adjusted_mean_p_adjust=alias, **options)["adjusted_mean_comparisons"]
+    pd.testing.assert_frame_equal(full[["p_adjusted", "reject_adjusted"]], short[["p_adjusted", "reject_adjusted"]])
+    assert set(full["p_adjust_method"]) == {"fdr_bh" if method == "fdr-bh" else method}
+
+
+def test_linear_pipeline_zero_outcome_keeps_point_confidence_intervals(tmp_path):
+    batch = _model_batch(tmp_path)
+    batch.summary["Totalcounts"] = 0.0
+    result = linear_model(batch, dependent_variables=["Totalcounts"], group="Diagnosis", predictors=["Age"],
+                          save=False, montage=False, verbose=False)
+    means = result["adjusted_means_table"]
+    assert (means[["adjusted_mean", "mean_se", "ci_low", "ci_high"]] == 0).all().all()
+    comparisons = result["adjusted_mean_comparisons"]
+    assert comparisons["p_value"].isna().all()
+    assert comparisons["p_adjusted"].isna().all()
+    assert set(comparisons["reference_distribution"]) == {"t"}
 
 
 def test_linear_model_pipeline_saves_adjusted_means_and_plots(tmp_path):
