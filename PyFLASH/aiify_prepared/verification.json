@@ -16,19 +16,25 @@
     "guide.md": "7f6b4203cab01cd73496d825a3eece278c0f288688d82a0d43efd3a390814e11",
     "TEST.md": "4d437cf1f6fb936adb0304b0c33d171140a34e6478c02bddabf885addf497ebd"
   },
-  "manifest_hash": "fe87a0cca30d41ec899e483f99d4d1aea2cadd4b416ca18cd194e4dd5562e4b2",
+  "manifest_hash": "3e6fe2b368884232fc4449ca06c6844d63658e246e79c01e7db51bf7c144a0a6",
   "command": [
-    "python",
+    "C:\\Users\\Owner\\AppData\\Local\\Microsoft\\WindowsApps\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\python.exe",
     "-m",
     "pytest",
-    "test_actions.py",
+    "C:\\Users\\Owner\\UK Dementia Research Institute Dropbox\\Brancaccio Lab\\Jamie\\Experiments\\IHF Pipeline\\IF_analysis\\PyFLASH\\aiify_prepared\\test_actions.py",
     "-q",
+    "--confcutdir",
+    "C:\\Users\\Owner\\UK Dementia Research Institute Dropbox\\Brancaccio Lab\\Jamie\\Experiments\\IHF Pipeline\\IF_analysis\\PyFLASH\\aiify_prepared",
     "--junitxml",
-    "<temporary-report>"
+    "C:\\Users\\Owner\\AppData\\Local\\Temp\\aiify-verify-ris_6m07\\tests.xml",
+    "-o",
+    "addopts=",
+    "-o",
+    "junit_family=xunit2"
   ],
   "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
   "returncode": 0,
-  "elapsed_s": 12.907,
-  "verified": "2026-10-06T21:17:23Z",
-  "output": "..                                                                       [100%]\n2 passed in 5.23s\n"
+  "elapsed_s": 8.594,
+  "verified": "2026-10-21T20:14:42Z",
+  "output": "..                                                                       [100%]\n2 passed in 4.27s\n"
 }
