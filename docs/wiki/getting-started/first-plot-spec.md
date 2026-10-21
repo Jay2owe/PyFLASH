@@ -12,7 +12,7 @@ plot.
   `plot_mean_bars`.
 - YAML specs need PyYAML. The local `.[ui]` extra includes it.
 - TOML specs use Python's built-in `tomllib` on Python 3.11 and newer. On
-  Python 3.9 or 3.10, install `tomli`.
+  Python 3.10, install `tomli`.
 - JSON specs work without extra packages.
 
 ## Steps

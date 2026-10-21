@@ -1,5 +1,7 @@
 import os
 
+import pandas as pd
+
 from PyFLASH.batch import Batch
 from PyFLASH.conditions import condition, conditionList, zipConditions, zipConditionLists
 from PyFLASH.experiment import MiniExperiment
@@ -106,3 +108,23 @@ def test_miniexperiment_accepts_subject_column_alias(tmp_path):
     summary = batch.summary.sort_values("AnimalName").reset_index(drop=True)
     assert summary["AnimalName"].tolist() == ["1", "2"]
     assert exp.subject_column == "Subject ID"
+
+
+def test_miniexperiment_preserves_string_dtype_metadata_and_numeric_means(tmp_path):
+    _write_csv(tmp_path / "Data.csv", "\n".join([
+        "Subject,Diagnosis,Sex,Signal",
+        "Control-1,Control,Female,1.0",
+        "Control-1,Control,Female,3.0",
+        "AD-1,AD,Male,5.0",
+    ]))
+    exp = MiniExperiment("Simulated", str(tmp_path), subject_column="Subject")
+    exp.importCSVs(progress=False)
+    frame = exp.data["Data"].df
+    for column in ("AnimalName", "Diagnosis", "Sex"):
+        frame[column] = frame[column].astype("string")
+    summary = exp.createSummary(progress=False).set_index("AnimalName")
+    assert summary.loc["Control-1", "Signal"] == 2.0
+    assert summary.loc["AD-1", "Signal"] == 5.0
+    assert summary.loc["Control-1", "Diagnosis"] == "Control"
+    assert summary.loc["AD-1", "Sex"] == "Male"
+    assert isinstance(summary["Sex"].dtype, pd.StringDtype)

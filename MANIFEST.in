@@ -22,3 +22,10 @@ global-exclude *.py[cod]* *.pyc* *.pyo* *.pyd*
 global-exclude __pycache__
 prune demo/output
 prune reproducibility/results
+
+# Local maintainer instructions are not part of the installed software.
+exclude AGENTS.md CLAUDE.md GEMINI.md DEPLOY_CONTRACT.md PUBLISHING_AUDIT.md
+prune graphify-out
+prune .claude
+prune .codex
+global-exclude __pycache__ *.py[cod]

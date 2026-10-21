@@ -1,5 +1,7 @@
 # PyFLASH
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21933060.svg)](https://doi.org/10.5281/zenodo.21933060)
+
 [![Documentation Status](https://readthedocs.org/projects/pyflash/badge/?version=latest)](https://pyflash.readthedocs.io/en/latest/)
 [![PyPI](https://img.shields.io/pypi/v/PyFLASH-analysis)](https://pypi.org/project/PyFLASH-analysis/)
 
@@ -18,7 +20,7 @@ result = runITTest(*groups, {}, equal_var=False)
 print(result[2])  # Welch t statistic and two-sided p-value; simulated data
 ```
 
-📖 **[Documentation](https://pyflash.readthedocs.io/)**
+**[Documentation](https://pyflash.readthedocs.io/)**
 
 ## What it does
 
@@ -67,6 +69,19 @@ The demo was verified on Windows 11 with Python 3.12.10 and PyFLASH-analysis
 The PyPI distribution is `PyFLASH-analysis`; the Python import package is `PyFLASH`.
 For local development, install from the repository with `pip install -e .`.
 For local notebook testing, start Jupyter from this repository and run `pip install -e .`; the editable `PyFLASH-analysis` install points at the local `PyFLASH/` source files while imports stay as `import PyFLASH`.
+
+## Reproducible installation
+
+The current tagged release is [PyFLASH 0.3.1](https://github.com/Jay2owe/PyFLASH/releases/tag/v0.3.1).
+For a fixed installation of that release:
+
+```bash
+python -m pip install "PyFLASH-analysis==0.3.1"
+```
+
+The default branch and unpinned installation can change over time. Record the
+software version, dependencies and analysis settings with your results.
+Source for the release is available at the `v0.3.1` tag.
 
 ## Small simulated demo
 
@@ -125,6 +140,15 @@ example to your own tabular data.
 The verified demo took **10.3 seconds** on the laptop described above, using
 the published PyPI package in a fresh environment. Exact tested dependency
 versions are in [`demo/tested-dependencies.txt`](demo/tested-dependencies.txt).
+
+## Manuscript analysis scripts
+
+The [Soteras et al. rerun guide](reproduce/soteras_2026/README.md) provides
+command-line scripts using public PyFLASH APIs for human regression/correlation
+analyses, mouse batch preparation, and explicitly configured panel statistics.
+Each run records its inputs, settings, versions and sample counts. The guide
+identifies the original exclusions and settings still required before claiming
+an exact match to the final paper results.
 
 ## Quick start
 
@@ -202,7 +226,7 @@ batch = create_batch(
 
 # Analyse
 cols = get_columns(batch.summary, column_strings=['Count', 'Volume'], exclude='NonColoc')
-plot_mean_bars(batch, cols, specificity=('Time', 'WeekEight'))
+plot_mean_bars(batch, cols, factor='Genotype')
 plot_matrices(batch, cols)
 
 # Export
@@ -362,10 +386,28 @@ with PyFLASH.verbose():
 If you use PyFLASH in academic work, cite the software release you used:
 
 ```text
-Jamie Malcolm. PyFLASH: ImageJ confocal microscopy data processing and analysis pipeline.
+Malcolm, J. (2026). PyFLASH: ImageJ confocal microscopy data processing and analysis pipeline
+(Version 0.3.1) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.23072427
 PyPI: https://pypi.org/project/PyFLASH-analysis/
 Source: https://github.com/Jay2owe/PyFLASH
 ```
+
+Machine-readable citation metadata is provided in [`CITATION.cff`](CITATION.cff).
+When using a different release, cite its version and source tag instead.
+
+## Development and testing
+
+From a checkout of this repository:
+
+```bash
+python -m pip install -e .
+python -m pip install pytest
+python -m pytest tests -q
+```
+
+For the optional browser interface, install `.[ui]` and run `pyflash-ui`.
+The [documentation site](https://pyflash.readthedocs.io/) covers usage and
+individual analysis functions; its sources are maintained in `docs/wiki/`.
 
 ## Acknowledgements
 

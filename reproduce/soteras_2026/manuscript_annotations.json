@@ -1,0 +1,18 @@
+{
+  "source": "Soteras_et_al_Nature_2026 last.pdf, Figure 1 on PDF page 24; displayed estimates transcribed to two decimal places.",
+  "precision": 2,
+  "coefficients": {
+    "Age-volume": {"Control": -0.11, "MCI": -0.59, "AD": -0.79},
+    "Volume-M10": {"Control": 0.58, "MCI": 0.09, "AD": -0.09}
+  },
+  "pearson_age_volume": {"Control": -0.15, "MCI": -0.47, "AD": -0.74},
+  "spearman": {
+    "Avgactivityactivephase(M10)": {"Control": [0.71, 0.81], "MCI": [0.18, -0.01], "AD": [-0.24, -0.25]},
+    "Alphacounts(day)": {"Control": [0.61, 0.75], "MCI": [0.34, 0.07], "AD": [-0.13, -0.25]},
+    "Amplitude": {"Control": [0.66, 0.64], "MCI": [0.20, -0.02], "AD": [-0.07, -0.31]},
+    "Avgactivityrestingphase(L5)": {"Control": [0.56, 0.58], "MCI": [-0.18, -0.16], "AD": [0.22, -0.16]},
+    "Rhocounts(night)": {"Control": [0.62, 0.49], "MCI": [0.06, -0.15], "AD": [0.10, -0.25]},
+    "Eveningpeakamplitude": {"Control": [0.41, 0.57], "MCI": [0.25, 0.20], "AD": [-0.13, 0.38]},
+    "morningpeakamplitude": {"Control": [0.34, 0.26], "MCI": [0.08, -0.11], "AD": [0.25, -0.07]}
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "status": "Methods example only. Original outcome/profile selection has not been recovered.",
+  "profiles": [
+    {
+      "name": "AgeSex",
+      "outcomes": ["Totalcounts", "Avgactivityactivephase(M10)"],
+      "covariates": ["Age", "Sex"],
+      "categorical": ["Sex"]
+    }
+  ]
+}
